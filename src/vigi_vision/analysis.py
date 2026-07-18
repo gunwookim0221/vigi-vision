@@ -1,68 +1,51 @@
-"""OpenAI image-analysis boundary for one locally captured frame."""
+"""OpenAI image and sparse temporal-analysis boundary."""
 
 import base64
-import re
 from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
-from typing import ClassVar, Final
+from typing import TYPE_CHECKING, ClassVar
 
-from openai import (
-    APIConnectionError,
-    APIStatusError,
-    APITimeoutError,
-    AuthenticationError,
-    BadRequestError,
-    NotFoundError,
-    OpenAI,
-    OpenAIError,
-    PermissionDeniedError,
-    RateLimitError,
-    UnprocessableEntityError,
-)
+from openai import OpenAI, OpenAIError
+from openai.types.responses.response_input_content_param import ResponseInputContentParam
+from openai.types.responses.response_input_image_param import ResponseInputImageParam
+from openai.types.responses.response_input_text_param import ResponseInputTextParam
 from pydantic import BaseModel, ConfigDict, ValidationError
 from typing_extensions import override
 
-from vigi_vision.profiles import (
-    ProfileAnalysis,
-    ProfileDefinition,
-    parse_profile_analysis,
+from vigi_vision.openai_errors import (
+    AnalysisRequestError,
+    OpenAiErrorMetadata,
+    OpenAiFailureKind,
+    diagnose_openai_error,
+    missing_api_key_error,
 )
+from vigi_vision.profiles import ProfileAnalysis, ProfileDefinition, parse_profile_analysis
+from vigi_vision.temporal_profiles import (
+    TemporalProfileAnalysis,
+    TemporalProfileDefinition,
+    parse_temporal_profile_analysis,
+)
+from vigi_vision.video import FrameRecord, VideoMetadata
+
+if TYPE_CHECKING:
+    from openai.types.responses.response_input_item_param import Message, ResponseInputItemParam
 
 _MODEL = "gpt-5.6-terra"
 _PROMPT = (
     "Inspect this one current camera frame. Return a concise scene summary, whether a person "
     "is visible, visually notable observations, and limitations appropriate to a single image."
 )
-_QUOTA_ERROR_CODES: Final = frozenset({"billing_hard_limit_reached", "insufficient_quota"})
-_SAFE_ERROR_FIELD: Final = re.compile(r"^[A-Za-z0-9_.:/-]{1,120}$")
-
-
-class OpenAiFailureKind(Enum):
-    """Safe categories for failures at the OpenAI image-analysis boundary."""
-
-    MISSING_API_KEY = "Missing OpenAI API key"
-    AUTHENTICATION = "OpenAI authentication failure"
-    PERMISSION_OR_MODEL_ACCESS = "OpenAI permission or model-access failure"
-    QUOTA_OR_BILLING = "OpenAI quota or billing failure"
-    RATE_LIMIT = "OpenAI rate limit"
-    TIMEOUT_OR_NETWORK = "OpenAI timeout or network failure"
-    INVALID_REQUEST = "OpenAI invalid request"
-    STRUCTURED_RESPONSE_PARSING = "OpenAI structured-response parsing failure"
-    UNEXPECTED_API_FAILURE = "Unexpected OpenAI API failure"
-
-
-_ACTIONS: Final = {
-    OpenAiFailureKind.MISSING_API_KEY: "Set OPENAI_API_KEY.",
-    OpenAiFailureKind.AUTHENTICATION: "Verify the configured API key.",
-    OpenAiFailureKind.PERMISSION_OR_MODEL_ACCESS: "Verify account access to the configured model.",
-    OpenAiFailureKind.QUOTA_OR_BILLING: "Verify account quota and billing status.",
-    OpenAiFailureKind.RATE_LIMIT: "Wait briefly and retry.",
-    OpenAiFailureKind.TIMEOUT_OR_NETWORK: "Verify network connectivity and retry.",
-    OpenAiFailureKind.INVALID_REQUEST: "Verify the configured model and request contract.",
-    OpenAiFailureKind.STRUCTURED_RESPONSE_PARSING: "Check the structured output contract.",
-    OpenAiFailureKind.UNEXPECTED_API_FAILURE: "Retry and inspect the safe exception category.",
-}
+__all__ = (
+    "AnalysisRequestError",
+    "AnalysisResponseError",
+    "OpenAiAnalyzer",
+    "OpenAiErrorMetadata",
+    "OpenAiFailureKind",
+    "SceneAnalysis",
+    "TemporalAnalysisRequest",
+    "diagnose_openai_error",
+    "parse_scene_analysis",
+)
 
 
 class SceneAnalysis(BaseModel):
@@ -84,7 +67,6 @@ class AnalysisResponseError(RuntimeError):
 
     @override
     def __str__(self) -> str:
-        """Return a redacted message."""
         return (
             f"{OpenAiFailureKind.STRUCTURED_RESPONSE_PARSING.value} "
             f"[{self.exception_type}]. Check the structured output contract."
@@ -92,45 +74,12 @@ class AnalysisResponseError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class OpenAiErrorMetadata:
-    """Safe metadata exposed by an OpenAI SDK request exception."""
+class TemporalAnalysisRequest:
+    """All locally authoritative facts and temporary images for one temporal request."""
 
-    status_code: int | None
-    code: str | None
-    param: str | None
-    request_id: str | None
-
-    def formatted_fields(self) -> str:
-        """Return only pre-redacted diagnostic fields."""
-        fields = (
-            ("HTTP", self.status_code),
-            ("code", self.code),
-            ("param", self.param),
-            ("request", self.request_id),
-        )
-        return "".join(f" [{name} {value}]" for name, value in fields if value is not None)
-
-
-@dataclass(frozen=True, slots=True)
-class AnalysisRequestError(RuntimeError):
-    """Raised when the OpenAI request cannot complete without exposing details."""
-
-    kind: OpenAiFailureKind
-    exception_type: str
-    metadata: OpenAiErrorMetadata
-
-    @property
-    def status_code(self) -> int | None:
-        """Return the safe HTTP status code for compatibility with CLI consumers."""
-        return self.metadata.status_code
-
-    @override
-    def __str__(self) -> str:
-        """Return a redacted message."""
-        return (
-            f"{self.kind.value} [{self.exception_type}]{self.metadata.formatted_fields()}. "
-            f"{_action(self.kind)}"
-        )
+    profile: TemporalProfileDefinition
+    metadata: VideoMetadata
+    frames: tuple[FrameRecord, ...]
 
 
 def parse_scene_analysis(raw_response: str) -> SceneAnalysis:
@@ -143,7 +92,7 @@ def parse_scene_analysis(raw_response: str) -> SceneAnalysis:
 
 @dataclass(frozen=True, slots=True)
 class OpenAiAnalyzer:
-    """Send one JPEG to the Responses API with a fixed vision result schema."""
+    """Send one or more JPEGs to the Responses API with strict schemas."""
 
     api_key: str
 
@@ -162,6 +111,18 @@ class OpenAiAnalyzer:
         )
         return parse_profile_analysis(raw_response, profile)
 
+    def analyze_temporal(self, request: TemporalAnalysisRequest) -> TemporalProfileAnalysis:
+        """Analyze all ordered temporary frames through exactly one request."""
+        raw_response = self._request_temporal_analysis(request)
+        analysis = parse_temporal_profile_analysis(raw_response, request.profile, request.frames)
+        return analysis.model_copy(
+            update={
+                "video_duration_seconds": request.metadata.duration_seconds,
+                "sampled_frame_count": len(request.frames),
+                "sampled_timestamps": tuple(frame.timestamp_ms / 1_000 for frame in request.frames),
+            }
+        )
+
     def _request_analysis(
         self,
         image_path: Path,
@@ -170,29 +131,45 @@ class OpenAiAnalyzer:
         response_name: str,
     ) -> str:
         """Send one image using the supplied prompt and strict response model."""
-        if not self.api_key:
-            raise AnalysisRequestError(
-                OpenAiFailureKind.MISSING_API_KEY,
-                "ConfigurationError",
-                OpenAiErrorMetadata(None, None, None, None),
+        self._require_api_key()
+        return self._request_content(
+            [_text_content(prompt), _image_content(image_path)],
+            response_model,
+            response_name,
+        )
+
+    def _request_temporal_analysis(self, request: TemporalAnalysisRequest) -> str:
+        """Assemble the ordered label/image pairs for one temporal model request."""
+        self._require_api_key()
+        content: list[ResponseInputContentParam] = [
+            _text_content(f"{request.profile.prompt}\n\n{_temporal_metadata_prompt(request)}")
+        ]
+        for frame in request.frames:
+            content.extend(
+                (
+                    {"type": "input_text", "text": frame.display_label},
+                    _image_content(frame.temporary_path),
+                )
             )
-        image_data = base64.b64encode(image_path.read_bytes()).decode("ascii")
+        return self._request_content(
+            content,
+            request.profile.response_model,
+            f"{request.profile.name}_temporal_analysis",
+        )
+
+    def _request_content(
+        self,
+        content: list[ResponseInputContentParam],
+        response_model: type[BaseModel],
+        response_name: str,
+    ) -> str:
+        """Send one strict multimodal request through the shared OpenAI client path."""
         try:
+            message: Message = {"role": "user", "content": content}
+            input_messages: list[ResponseInputItemParam] = [message]
             response = OpenAI(api_key=self.api_key, timeout=20.0).responses.create(
                 model=_MODEL,
-                input=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "input_text", "text": prompt},
-                            {
-                                "type": "input_image",
-                                "image_url": f"data:image/jpeg;base64,{image_data}",
-                                "detail": "low",
-                            },
-                        ],
-                    }
-                ],
+                input=input_messages,
                 text={
                     "format": {
                         "type": "json_schema",
@@ -206,62 +183,29 @@ class OpenAiAnalyzer:
             raise diagnose_openai_error(error) from error
         return response.output_text
 
-
-def diagnose_openai_error(error: OpenAIError) -> AnalysisRequestError:
-    """Classify an SDK exception without reading or printing its message or body."""
-    match error:
-        case AuthenticationError():
-            kind = OpenAiFailureKind.AUTHENTICATION
-        case PermissionDeniedError() | NotFoundError():
-            kind = OpenAiFailureKind.PERMISSION_OR_MODEL_ACCESS
-        case RateLimitError() as rate_limit_error:
-            kind = _rate_limit_kind(rate_limit_error)
-        case APITimeoutError() | APIConnectionError():
-            kind = OpenAiFailureKind.TIMEOUT_OR_NETWORK
-        case BadRequestError() | UnprocessableEntityError():
-            kind = OpenAiFailureKind.INVALID_REQUEST
-        case APIStatusError():
-            kind = OpenAiFailureKind.UNEXPECTED_API_FAILURE
-        case _:
-            kind = OpenAiFailureKind.UNEXPECTED_API_FAILURE
-    return AnalysisRequestError(kind, type(error).__name__, _error_metadata(error))
+    def _require_api_key(self) -> None:
+        """Reject a missing API key before reading any local image bytes."""
+        if not self.api_key:
+            raise missing_api_key_error()
 
 
-def _rate_limit_kind(error: RateLimitError) -> OpenAiFailureKind:
-    match error.body:
-        case {"error": {"code": str() as code}} if code in _QUOTA_ERROR_CODES:
-            return OpenAiFailureKind.QUOTA_OR_BILLING
-        case {"code": str() as code} if code in _QUOTA_ERROR_CODES:
-            return OpenAiFailureKind.QUOTA_OR_BILLING
-        case _:
-            return OpenAiFailureKind.RATE_LIMIT
+def _text_content(value: str) -> ResponseInputTextParam:
+    return {"type": "input_text", "text": value}
 
 
-def _error_metadata(error: OpenAIError) -> OpenAiErrorMetadata:
-    match error:
-        case APIStatusError() as status_error:
-            return OpenAiErrorMetadata(
-                status_error.status_code,
-                _safe_error_field(status_error.code),
-                _safe_error_field(status_error.param),
-                _safe_error_field(status_error.request_id),
-            )
-        case _:
-            return OpenAiErrorMetadata(None, None, None, None)
+def _image_content(image_path: Path) -> ResponseInputImageParam:
+    image_data = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    return {
+        "type": "input_image",
+        "image_url": f"data:image/jpeg;base64,{image_data}",
+        "detail": "low",
+    }
 
 
-def _safe_error_field(value: str | None) -> str | None:
-    if value is None:
-        return None
-    value_lower = value.lower()
-    if (
-        _SAFE_ERROR_FIELD.fullmatch(value)
-        and "data:" not in value_lower
-        and "sk-" not in value_lower
-    ):
-        return value
-    return None
-
-
-def _action(kind: OpenAiFailureKind) -> str:
-    return _ACTIONS[kind]
+def _temporal_metadata_prompt(request: TemporalAnalysisRequest) -> str:
+    timestamps = tuple(frame.timestamp_ms / 1_000 for frame in request.frames)
+    return (
+        "For the required local metadata fields, return these exact values: "
+        f"video_duration_seconds={request.metadata.duration_seconds}; "
+        f"sampled_frame_count={len(request.frames)}; sampled_timestamps={list(timestamps)}."
+    )

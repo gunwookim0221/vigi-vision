@@ -88,6 +88,28 @@ The `counter` profile reports only a possible payment interaction, never a
 definite payment conclusion from a single frame. Dining and entrance counts are
 estimates from a still image.
 
+### Short-video analysis
+
+`vigi-vision analyze-video` analyzes one local MP4 of 30 seconds or less with
+2–10 evenly spaced representative frames. It sends those ordered frame samples
+in exactly one OpenAI request, then removes the temporary extracted JPEGs when
+the command finishes. It does not connect to a camera, record video, or retain
+the local clip.
+
+```text
+uv run vigi-vision analyze-video private_data/clip.mp4 --profile counter
+uv run vigi-vision analyze-video private_data/clip.mp4 --profile dining
+uv run vigi-vision analyze-video private_data/clip.mp4 --profile entrance
+```
+
+Each report separates directly visible evidence, observed changes between named
+samples, possible events, unknowns, and profile-specific findings. Sparse
+samples do not support identity tracking, continuous activity claims, causal
+payment or transaction conclusions, or claims about unsampled intervals.
+Recommendations are tied to visible evidence or an explicit sampling
+limitation. `private_data/` remains local and ignored by Git; never commit
+surveillance footage, extracted frames, or report data that identifies people.
+
 ## Image data boundaries
 
 `sample_data/` contains public demonstration images used only for profile-based

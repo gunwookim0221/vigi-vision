@@ -147,6 +147,15 @@ class Settings(BaseSettings):
                 raise SourceConfigurationError(_IPC_SOURCE)
 
 
+class LocalAnalysisSettings(BaseSettings):
+    """Validate only the values needed for analysis of an existing local file."""
+
+    model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(extra="ignore")
+
+    openai_api_key: SecretStr = Field(min_length=1, validation_alias="OPENAI_API_KEY")
+    ffmpeg_path: Path | None = Field(default=None, validation_alias="FFMPEG_PATH")
+
+
 def load_settings(env_file: Path | None = None) -> Settings:
     """Load settings from process variables and an optional local dotenv file."""
     dotenv_file = Path(".env") if env_file is None else env_file
@@ -160,6 +169,21 @@ def load_settings(env_file: Path | None = None) -> Settings:
         if value != "" or key not in _OPTIONAL_ENVIRONMENT_KEYS
     }
     return Settings.model_validate(normalized_values)
+
+
+def load_local_analysis_settings(env_file: Path | None = None) -> LocalAnalysisSettings:
+    """Load the API-key and media-tool settings without requiring a camera source."""
+    dotenv_file = Path(".env") if env_file is None else env_file
+    file_values = {
+        key: value for key, value in dotenv_values(dotenv_file).items() if value is not None
+    }
+    values = {**file_values, **environ}
+    normalized_values = {
+        key: value
+        for key, value in values.items()
+        if value != "" or key not in _OPTIONAL_ENVIRONMENT_KEYS
+    }
+    return LocalAnalysisSettings.model_validate(normalized_values)
 
 
 def _require_nvr_values(settings: Settings) -> None:

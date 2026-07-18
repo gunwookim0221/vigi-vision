@@ -1,3 +1,5 @@
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from secrets import token_urlsafe
 
@@ -5,10 +7,16 @@ import pytest
 from typer.testing import CliRunner
 
 from vigi_vision import cli, nvr
-from vigi_vision.analysis import OpenAiAnalyzer, SceneAnalysis
+from vigi_vision.analysis import OpenAiAnalyzer, SceneAnalysis, TemporalAnalysisRequest
 from vigi_vision.channel_selection import Channel
 from vigi_vision.config import Settings
 from vigi_vision.profiles import EntranceAnalysis, ProfileDefinition
+from vigi_vision.temporal_profiles import (
+    EntranceTemporalAnalysis,
+    TemporalEvidence,
+    TemporalProfileAnalysis,
+)
+from vigi_vision.video import FrameRecord, VideoMetadata, VideoSample, VideoSampler
 from vigi_vision.workflow import InspectionResult, InspectionWorkflow
 
 _TEST_OPENAI_KEY = token_urlsafe()
@@ -171,3 +179,95 @@ def test_cli_analyze_image_uses_profile_without_ffmpeg(
     assert result.stdout.index("Recommendations") < result.stdout.index("Analysis Limitations")
     assert "Estimated Shoe Pairs on Rack" in result.stdout
     assert "Image analysis completed successfully." in result.stdout
+
+
+def test_cli_analyze_video_renders_temporal_report_with_korean_alias(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Given
+    video_path = tmp_path / "clip.mp4"
+    _ = video_path.write_bytes(b"mp4")
+    metadata = VideoMetadata(duration_seconds=3.0, width=1280, height=720)
+    sample = VideoSample(
+        metadata=metadata,
+        frames=(
+            FrameRecord(1, 0, "Frame 1 — 00:00.0", tmp_path / "frame-001.jpg"),
+            FrameRecord(2, 3_000, "Frame 2 — 00:03.0", tmp_path / "frame-002.jpg"),
+        ),
+    )
+
+    @contextmanager
+    def _sample(_sampler: VideoSampler, _video_path: Path) -> Generator[VideoSample, None, None]:
+        yield sample
+
+    def _analyze_temporal(
+        _: OpenAiAnalyzer, request: TemporalAnalysisRequest
+    ) -> TemporalProfileAnalysis:
+        assert request.profile.name == "entrance"
+        return EntranceTemporalAnalysis(
+            profile="entrance",
+            summary="The entrance appears clear in both samples.",
+            confidence="high",
+            evidence=(
+                TemporalEvidence(
+                    frame_indices=(1,),
+                    timestamps=(0.0,),
+                    description="At 00:00 the entrance is clear.",
+                ),
+            ),
+            observed_changes=(),
+            possible_events=(),
+            unresolved_temporal_questions=("The interval between frames is not continuous.",),
+            recommendations=(),
+            limitations="Sparse samples do not confirm intermediate events.",
+            video_duration_seconds=3.0,
+            sampled_frame_count=2,
+            sampled_timestamps=(0.0, 3.0),
+            entrance_state_trend="unchanged",
+            person_entrance_change="not_visible",
+            footwear_count_trend="stable",
+            footwear_change="none_visible",
+        )
+
+    monkeypatch.setattr("vigi_vision.video_cli.load_local_analysis_settings", _settings)
+
+    def _resolve_ffmpeg(_: Path | None) -> Path:
+        return Path("ffmpeg")
+
+    def _resolve_ffprobe(_: Path) -> Path:
+        return Path("ffprobe")
+
+    monkeypatch.setattr("vigi_vision.video_cli.resolve_ffmpeg", _resolve_ffmpeg)
+    monkeypatch.setattr("vigi_vision.video_cli.resolve_ffprobe", _resolve_ffprobe)
+    monkeypatch.setattr(VideoSampler, "sample", _sample)
+    monkeypatch.setattr(OpenAiAnalyzer, "analyze_temporal", _analyze_temporal)
+    runner = CliRunner()
+
+    # When
+    result = runner.invoke(cli.app, ["analyze-video", str(video_path), "--profile", "입구"])
+
+    # Then
+    assert result.exit_code == 0
+    assert "VIGI Vision — Video Analysis (entrance)" in result.stdout
+    assert result.stdout.index("Duration") < result.stdout.index("Frame Count")
+    assert result.stdout.index("Frame Count") < result.stdout.index("Sample Timestamps")
+    assert result.stdout.index("Sample Timestamps") < result.stdout.index("Observed Changes")
+    assert "Profile-specific Findings" in result.stdout
+    assert "Video analysis completed successfully." in result.stdout
+
+
+def test_cli_analyze_video_rejects_unsupported_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Given
+    video_path = tmp_path / "clip.mp4"
+    _ = video_path.write_bytes(b"mp4")
+    monkeypatch.setattr("vigi_vision.video_cli.load_local_analysis_settings", _settings)
+    runner = CliRunner()
+
+    # When
+    result = runner.invoke(cli.app, ["analyze-video", str(video_path), "--profile", "warehouse"])
+
+    # Then
+    assert result.exit_code == 1
+    assert "Unknown profile 'warehouse'" in result.stdout

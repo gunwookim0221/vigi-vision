@@ -14,6 +14,7 @@ from openai import (
     PermissionDeniedError,
     RateLimitError,
 )
+from openai.types.responses.response_input_content_param import ResponseInputContentParam
 from pydantic import BaseModel
 
 from vigi_vision.analysis import (
@@ -23,10 +24,13 @@ from vigi_vision.analysis import (
     OpenAiErrorMetadata,
     OpenAiFailureKind,
     SceneAnalysis,
+    TemporalAnalysisRequest,
     diagnose_openai_error,
     parse_scene_analysis,
 )
 from vigi_vision.profiles import CounterAnalysis, get_profile
+from vigi_vision.temporal_profiles import get_temporal_profile
+from vigi_vision.video import FrameRecord, VideoMetadata
 
 _SECRET = token_urlsafe()
 _REQUEST = httpx.Request("POST", "https://api.openai.invalid/responses")
@@ -183,6 +187,101 @@ def test_analyzer_routes_profile_to_its_prompt_and_schema(
     # Then
     assert isinstance(analysis, CounterAnalysis)
     assert analysis.counter_occupied is False
+
+
+def test_temporal_analysis_uses_local_metadata_over_model_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Given
+    image_path = tmp_path / "frame.jpg"
+    _ = image_path.write_bytes(b"jpeg")
+    request = TemporalAnalysisRequest(
+        profile=get_temporal_profile("counter"),
+        metadata=VideoMetadata(duration_seconds=3.0, width=1280, height=720),
+        frames=(
+            FrameRecord(1, 0, "Frame 1 — 00:00.0", image_path),
+            FrameRecord(2, 3_000, "Frame 2 — 00:03.0", image_path),
+        ),
+    )
+    raw_response = (
+        '{"profile":"counter","summary":"A sparse change is visible.","confidence":"moderate",'
+        '"evidence":[{"frame_indices":[1],"timestamps":[0.0],'
+        '"description":"At 00:00 the counter is clear."}],"observed_changes":[],'
+        '"possible_events":[],"unresolved_temporal_questions":["The interval is unsampled."],'
+        '"recommendations":[],"limitations":"Sparse samples.","video_duration_seconds":99.0,'
+        '"sampled_frame_count":99,"sampled_timestamps":[99.0],'
+        '"counter_occupancy_trend":"no_change_visible",'
+        '"customer_counter_presence":"not_visible",'
+        '"possible_service_interaction":false,"possible_exchange_sequence":false}'
+    )
+
+    def _request_temporal_analysis(
+        _: OpenAiAnalyzer, analyzed_request: TemporalAnalysisRequest
+    ) -> str:
+        assert analyzed_request == request
+        return raw_response
+
+    monkeypatch.setattr(OpenAiAnalyzer, "_request_temporal_analysis", _request_temporal_analysis)
+
+    # When
+    analysis = OpenAiAnalyzer(_SECRET).analyze_temporal(request)
+
+    # Then
+    assert analysis.video_duration_seconds == 3.0
+    assert analysis.sampled_frame_count == 2
+    assert analysis.sampled_timestamps == (0.0, 3.0)
+
+
+def test_temporal_request_interleaves_authoritative_labels_and_images(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Given
+    image_path = tmp_path / "frame.jpg"
+    _ = image_path.write_bytes(b"jpeg")
+    request = TemporalAnalysisRequest(
+        profile=get_temporal_profile("counter"),
+        metadata=VideoMetadata(duration_seconds=3.0, width=1280, height=720),
+        frames=(
+            FrameRecord(1, 0, "Frame 1 — 00:00.0", image_path),
+            FrameRecord(2, 3_000, "Frame 2 — 00:03.0", image_path),
+        ),
+    )
+    captured_content: list[ResponseInputContentParam] = []
+    raw_response = (
+        '{"profile":"counter","summary":"No change is confirmed.","confidence":"low",'
+        '"evidence":[],"observed_changes":[],"possible_events":[],'
+        '"unresolved_temporal_questions":[],"recommendations":[],"limitations":"Sparse samples.",'
+        '"video_duration_seconds":3.0,"sampled_frame_count":2,"sampled_timestamps":[0.0,3.0],'
+        '"counter_occupancy_trend":"no_change_visible",'
+        '"customer_counter_presence":"not_visible",'
+        '"possible_service_interaction":false,"possible_exchange_sequence":false}'
+    )
+
+    def _request_content(
+        _analyzer: OpenAiAnalyzer,
+        content: list[ResponseInputContentParam],
+        _response_model: type[BaseModel],
+        _response_name: str,
+    ) -> str:
+        nonlocal captured_content
+        captured_content.extend(content)
+        return raw_response
+
+    monkeypatch.setattr(OpenAiAnalyzer, "_request_content", _request_content)
+
+    # When
+    _ = OpenAiAnalyzer(_SECRET).analyze_temporal(request)
+
+    # Then
+    assert tuple(item["type"] for item in captured_content) == (
+        "input_text",
+        "input_text",
+        "input_image",
+        "input_text",
+        "input_image",
+    )
+    assert captured_content[1] == {"type": "input_text", "text": "Frame 1 — 00:00.0"}
+    assert captured_content[3] == {"type": "input_text", "text": "Frame 2 — 00:03.0"}
 
 
 def test_request_error_includes_safe_openai_metadata() -> None:

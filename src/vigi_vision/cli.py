@@ -30,10 +30,12 @@ from vigi_vision.profiles import (
     get_profile,
     resolve_profile_alias,
 )
+from vigi_vision.video_cli import analyze_video
 from vigi_vision.workflow import InspectionResult, InspectionWorkflow
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 _console = Console()
+_ = app.command(name="analyze-video")(analyze_video)
 
 
 @final
