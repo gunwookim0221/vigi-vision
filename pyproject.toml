@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vigi-vision"
+version = "0.1.0"
+description = "AI-assisted investigation workflows for TP-Link VIGI camera data."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.21",
+    "pytest>=8",
+    "ruff>=0.8",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.basedpyright]
+typeCheckingMode = "all"
+pythonVersion = "3.10"
+pythonPlatform = "All"
+include = ["src", "tests"]
+exclude = ["**/__pycache__", "**/.venv", "**/build", "**/dist"]
+reportUnnecessaryTypeIgnoreComment = "error"
+reportUnusedVariable = "error"
+reportMissingParameterType = "error"
+reportPrivateUsage = "error"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812",
+    "CPY001",
+    "D203",
+    "D213",
+    "FIX002",
+    "ISC001",
+    "TD002",
+    "TD003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["ARG", "D", "PLR2004", "S101", "SLF001"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-config", "--strict-markers"]
+filterwarnings = ["error"]

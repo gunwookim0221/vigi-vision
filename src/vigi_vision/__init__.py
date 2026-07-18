@@ -1,0 +1,1 @@
+"""VIGI Vision application package."""
