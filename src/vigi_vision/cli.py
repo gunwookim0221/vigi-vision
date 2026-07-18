@@ -1,5 +1,6 @@
 """Terminal interface for the first VIGI Vision inspection slice."""
 
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import final
@@ -20,7 +21,7 @@ from vigi_vision.ffmpeg import (
 )
 from vigi_vision.gateway import select_source_gateway
 from vigi_vision.nvr import NvrRequestError, SdkNvrGateway
-from vigi_vision.workflow import InspectionWorkflow
+from vigi_vision.workflow import InspectionResult, InspectionWorkflow
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 _console = Console()
@@ -68,15 +69,7 @@ def inspect() -> None:
     ) as error:
         _console.print(f"Error: {error}", style="red")
         raise typer.Exit(code=1) from error
-    if result.channel is None:
-        _console.print(f"Source: {result.label}")
-    else:
-        _console.print(f"Channel: {result.channel.channel_id}")
-    _console.print(f"Snapshot: {result.snapshot_path}")
-    _console.print(f"Summary: {result.analysis.summary}")
-    _console.print(f"Person visible: {'yes' if result.analysis.person_visible else 'no'}")
-    _console.print(f"Notable: {', '.join(result.analysis.notable_observations)}")
-    _console.print(f"Limitations: {result.analysis.limitations}")
+    _print_inspection_report(result)
 
 
 @app.command()
@@ -97,3 +90,55 @@ def _nvr_channels(settings: Settings) -> tuple[Channel, ...]:
             return SdkNvrGateway(settings.nvr_connection).channels()
         case "ipc":
             raise ChannelsUnavailableError
+
+
+def _print_inspection_report(result: InspectionResult) -> None:
+    _console.print("=" * 60, markup=False)
+    _console.print("VIGI Vision — Live Scene Inspection", markup=False)
+    _console.print("=" * 60, markup=False)
+    _console.print()
+    _print_section("Source", result.label)
+    _print_section(
+        "Channel",
+        "Not available" if result.channel is None else str(result.channel.channel_id),
+    )
+    _print_section("Snapshot", str(result.snapshot_path))
+    _print_section("Scene Summary", result.analysis.summary)
+    _print_section("People", "Yes" if result.analysis.person_visible else "No")
+    _print_observations(result.analysis.notable_observations)
+    _print_section("Analysis Limitations", result.analysis.limitations)
+    _console.print("Inspection completed successfully.", markup=False)
+
+
+def _print_section(title: str, value: str) -> None:
+    _console.print(title, markup=False)
+    _console.print("-" * len(title), markup=False)
+    for line in _wrapped_lines(value):
+        _console.print(line, markup=False)
+    _console.print()
+
+
+def _print_observations(observations: tuple[str, ...]) -> None:
+    _console.print("Key Observations", markup=False)
+    _console.print("-" * len("Key Observations"), markup=False)
+    if observations:
+        for observation in observations:
+            lines = _wrapped_lines(observation)
+            _console.print(f"• {lines[0]}", markup=False)
+            for line in lines[1:]:
+                _console.print(f"  {line}", markup=False)
+    else:
+        _console.print("Not available", markup=False)
+    _console.print()
+
+
+def _wrapped_lines(value: str) -> tuple[str, ...]:
+    cleaned = value.strip() or "Not available"
+    return tuple(
+        textwrap.wrap(
+            cleaned,
+            width=96,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+    )

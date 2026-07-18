@@ -5,8 +5,10 @@ import pytest
 from typer.testing import CliRunner
 
 from vigi_vision import cli, nvr
+from vigi_vision.analysis import SceneAnalysis
 from vigi_vision.channel_selection import Channel
 from vigi_vision.config import Settings
+from vigi_vision.workflow import InspectionResult, InspectionWorkflow
 
 _TEST_OPENAI_KEY = token_urlsafe()
 _TEST_PASSWORD = token_urlsafe()
@@ -82,3 +84,39 @@ def test_cli_channels_rejects_ipc_source(monkeypatch: pytest.MonkeyPatch) -> Non
     # Then
     assert result.exit_code == 1
     assert result.stdout == "Error: channels is available only when VIGI_SOURCE=nvr.\n"
+
+
+def test_cli_inspect_renders_a_wrapped_demonstration_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    monkeypatch.setattr(cli, "load_settings", _settings)
+
+    def _run(_: InspectionWorkflow) -> InspectionResult:
+        return InspectionResult(
+            label="Standalone IPC",
+            channel=None,
+            snapshot_path=Path("artifacts/snapshots/latest.jpg"),
+            analysis=SceneAnalysis(
+                summary="A very long scene summary " * 8,
+                person_visible=False,
+                notable_observations=("A delivery box is visible.", "Lighting is limited."),
+                limitations="This result reflects one current frame only.",
+            ),
+        )
+
+    monkeypatch.setattr(InspectionWorkflow, "run", _run)
+    runner = CliRunner()
+
+    # When
+    result = runner.invoke(cli.app, ["inspect"])
+
+    # Then
+    assert result.exit_code == 0
+    assert "VIGI Vision — Live Scene Inspection" in result.stdout
+    assert "Not available" in result.stdout
+    assert "Scene Summary" in result.stdout
+    assert "• A delivery box is visible." in result.stdout
+    assert "• Lighting is limited." in result.stdout
+    assert "Inspection completed successfully." in result.stdout
+    assert all(len(line) <= 100 for line in result.stdout.splitlines())
