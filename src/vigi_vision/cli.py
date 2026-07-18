@@ -28,6 +28,7 @@ from vigi_vision.profiles import (
     ProfileValue,
     UnknownProfileError,
     get_profile,
+    resolve_profile_alias,
 )
 from vigi_vision.workflow import InspectionResult, InspectionWorkflow
 
@@ -83,12 +84,20 @@ def inspect() -> None:
 @app.command()
 def analyze_image(
     image_path: Path,
-    profile: Annotated[str, typer.Option(help="Analysis profile: counter, dining, or entrance.")],
+    profile: Annotated[
+        str,
+        typer.Option(
+            help=(
+                "Analysis profile: counter (카운터), dining (홀 or 식사공간), "
+                "or entrance (입구 or 신발장)."
+            )
+        ),
+    ],
 ) -> None:
     """Analyze a previously captured image without using ffmpeg or a live camera."""
     try:
         settings = load_settings(Path.cwd() / ".env")
-        selected_profile = get_profile(profile)
+        selected_profile = get_profile(resolve_profile_alias(profile))
         analysis = OpenAiAnalyzer(settings.openai_api_key.get_secret_value()).analyze_profile(
             image_path, selected_profile
         )
@@ -136,7 +145,7 @@ def _print_inspection_report(result: InspectionResult) -> None:
     _print_section("Snapshot", str(result.snapshot_path))
     _print_section("Scene Summary", result.analysis.summary)
     _print_section("People", "Yes" if result.analysis.person_visible else "No")
-    _print_observations(result.analysis.notable_observations)
+    _print_observations("Key Observations", result.analysis.notable_observations)
     _print_section("Analysis Limitations", result.analysis.limitations)
     _console.print("Inspection completed successfully.", markup=False)
 
@@ -149,9 +158,17 @@ def _print_profile_report(
     _console.print("=" * 60, markup=False)
     _console.print()
     _print_section("Image", str(image_path))
+    _print_section("Profile", profile.name)
+    _print_section("Summary", analysis.summary)
+    _print_section("Confidence", analysis.confidence.capitalize())
+    _print_observations("Evidence", analysis.evidence)
+    _console.print("Structured Findings", markup=False)
+    _console.print("-" * len("Structured Findings"), markup=False)
     for field, value in zip(profile.report_fields, analysis.display_values(), strict=True):
-        _print_section(field.label, _format_profile_value(value))
-    _print_observations(analysis.notable_observations)
+        _console.print(f"{field.label}: {_format_profile_value(value)}", markup=False)
+    _console.print()
+    if analysis.recommendations:
+        _print_observations("Recommendations", analysis.recommendations)
     _print_section("Analysis Limitations", analysis.limitations)
     _console.print("Image analysis completed successfully.", markup=False)
 
@@ -164,9 +181,9 @@ def _print_section(title: str, value: str) -> None:
     _console.print()
 
 
-def _print_observations(observations: tuple[str, ...]) -> None:
-    _console.print("Key Observations", markup=False)
-    _console.print("-" * len("Key Observations"), markup=False)
+def _print_observations(title: str, observations: tuple[str, ...]) -> None:
+    _console.print(title, markup=False)
+    _console.print("-" * len(title), markup=False)
     if observations:
         for observation in observations:
             lines = _wrapped_lines(observation)

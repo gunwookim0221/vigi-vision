@@ -67,7 +67,11 @@ structured image analysis all succeed.
 
 For hackathon demonstrations, analyze a previously captured real camera frame
 without taking a new live capture. Select exactly one of `counter`, `dining`,
-or `entrance`; each profile uses its own prompt and strict structured schema:
+or `entrance`; each profile uses its own prompt and strict structured schema.
+The output presents a concise business report with summary, qualitative
+confidence, observable evidence, profile findings, optional recommendations,
+and single-frame limitations. The structured analysis remains the source of
+truth.
 
 ```text
 uv run vigi-vision analyze-image artifacts/snapshots/ipc-20260718T094854Z.jpg --profile counter
@@ -75,6 +79,18 @@ uv run vigi-vision analyze-image artifacts/snapshots/ipc-20260718T094854Z.jpg --
 uv run vigi-vision analyze-image artifacts/snapshots/ipc-20260718T094854Z.jpg --profile entrance
 ```
 
+Documented Korean aliases are accepted at the CLI boundary and resolve to the
+same canonical profile IDs: `카운터` for `counter`, `홀` or `식사공간` for
+`dining`, and `입구` or `신발장` for `entrance`. Structured output always
+uses the canonical English profile ID.
+
 The `counter` profile reports only a possible payment interaction, never a
 definite payment conclusion from a single frame. Dining and entrance counts are
 estimates from a still image.
+
+## Image data boundaries
+
+`sample_data/` contains public demonstration images used only for profile-based
+analysis examples. `private_data/` is reserved for local real-camera captures
+and is ignored by Git; production, customer, employee, and surveillance data
+must never be committed.

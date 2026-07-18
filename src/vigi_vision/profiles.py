@@ -3,12 +3,25 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import ClassVar, Final, TypeAlias
+from typing import ClassVar, Final, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 from typing_extensions import override
 
 ProfileValue: TypeAlias = bool | int | str
+Confidence: TypeAlias = Literal["high", "moderate", "low"]
+MAX_SUMMARY_SENTENCES: Final = 2
+
+
+@dataclass(frozen=True, slots=True)
+class SummarySentenceLimitError(ValueError):
+    """Report that a profile summary exceeds its two-sentence limit."""
+
+    sentence_count: int
+
+    @override
+    def __str__(self) -> str:
+        return "A profile summary may contain at most two sentences."
 
 
 class ProfileAnalysis(BaseModel):
@@ -16,8 +29,21 @@ class ProfileAnalysis(BaseModel):
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True)
 
+    summary: str
+    confidence: Confidence
+    evidence: tuple[str, ...]
+    recommendations: tuple[str, ...]
     notable_observations: tuple[str, ...]
     limitations: str
+
+    @field_validator("summary")
+    @classmethod
+    def require_at_most_two_sentences(cls, value: str) -> str:
+        """Keep business summaries concise and suitable for the CLI report."""
+        sentence_count = sum(value.count(terminator) for terminator in ".!?")
+        if sentence_count > MAX_SUMMARY_SENTENCES:
+            raise SummarySentenceLimitError(sentence_count)
+        return value
 
     def display_values(self) -> tuple[ProfileValue, ...]:
         """Return scalar values in the registered report-field order."""
@@ -27,6 +53,7 @@ class ProfileAnalysis(BaseModel):
 class CounterAnalysis(ProfileAnalysis):
     """Structured observations for a counter-facing camera frame."""
 
+    profile: Literal["counter"]
     staff_visible: bool
     customer_visible: bool
     customer_at_counter: bool
@@ -47,6 +74,7 @@ class CounterAnalysis(ProfileAnalysis):
 class DiningAnalysis(ProfileAnalysis):
     """Structured estimates for a dining-area camera frame."""
 
+    profile: Literal["dining"]
     estimated_people_count: int
     occupied_tables: int
     empty_tables: int
@@ -67,6 +95,7 @@ class DiningAnalysis(ProfileAnalysis):
 class EntranceAnalysis(ProfileAnalysis):
     """Structured estimates for an entrance-facing camera frame."""
 
+    profile: Literal["entrance"]
     estimated_shoe_pairs_on_rack: int
     estimated_shoe_pairs_on_floor: int
     person_near_entrance: bool
@@ -137,8 +166,11 @@ _COUNTER_PROFILE: Final = ProfileDefinition(
         "visible, whether a customer is at the counter, whether the counter is occupied, and "
         "whether a possible payment interaction is visible. Never conclude payment definitely "
         "happened from a single frame; use cautious wording such as 'possible payment interaction' "
-        "or 'payment activity may be occurring'. Include concise notable observations and the "
-        "limitations of one still image."
+        "or 'payment activity may be occurring'. Return a business summary of at most two "
+        "sentences, qualitative confidence of high, moderate, or low, the canonical profile "
+        "identifier 'counter', observable evidence, "
+        "recommendations only when appropriate, concise notable observations, and the limitations "
+        "of one still image."
     ),
     response_model=CounterAnalysis,
     report_fields=(
@@ -155,7 +187,10 @@ _DINING_PROFILE: Final = ProfileDefinition(
     prompt=(
         "Inspect this one dining-area camera frame. Estimate people, occupied tables, empty "
         "tables, and standing people, then classify the crowd level. Treat every count as an "
-        "estimate from one still image. Include concise notable observations and limitations."
+        "estimate from one still image. Return a business summary of at most two sentences, "
+        "qualitative confidence of high, moderate, or low, the canonical profile identifier "
+        "'dining', observable evidence, recommendations "
+        "only when appropriate, concise notable observations, and limitations."
     ),
     response_model=DiningAnalysis,
     report_fields=(
@@ -173,7 +208,10 @@ _ENTRANCE_PROFILE: Final = ProfileDefinition(
         "Inspect this one entrance-area camera frame. Estimate shoe pairs on a rack and on the "
         "floor; determine whether a person is near the entrance, whether the entrance is clear, "
         "and whether footwear is scattered. Treat every count as an estimate from one still image. "
-        "Include concise notable observations and limitations."
+        "Return a business summary of at most two sentences, qualitative confidence of high, "
+        "moderate, or low, the canonical profile identifier 'entrance', observable evidence, "
+        "recommendations only when appropriate, concise "
+        "notable observations, and limitations."
     ),
     response_model=EntranceAnalysis,
     report_fields=(
@@ -188,6 +226,20 @@ _ENTRANCE_PROFILE: Final = ProfileDefinition(
 PROFILE_REGISTRY: Final[Mapping[str, ProfileDefinition]] = MappingProxyType(
     {profile.name: profile for profile in (_COUNTER_PROFILE, _DINING_PROFILE, _ENTRANCE_PROFILE)}
 )
+_PROFILE_ALIASES: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "카운터": "counter",
+        "홀": "dining",
+        "식사공간": "dining",
+        "입구": "entrance",
+        "신발장": "entrance",
+    }
+)
+
+
+def resolve_profile_alias(name: str) -> str:
+    """Resolve a documented profile alias to its canonical English identifier."""
+    return _PROFILE_ALIASES.get(name, name)
 
 
 def get_profile(name: str) -> ProfileDefinition:

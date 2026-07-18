@@ -154,8 +154,11 @@ def test_analyzer_routes_profile_to_its_prompt_and_schema(
     image_path = tmp_path / "captured-frame.jpg"
     profile = get_profile("counter")
     raw_response = (
-        '{"staff_visible":false,"customer_visible":false,"customer_at_counter":false,'
+        '{"profile":"counter","staff_visible":false,"customer_visible":false,'
+        '"customer_at_counter":false,'
         '"counter_occupied":false,"possible_payment_interaction":false,'
+        '"summary":"No customer is visible at the counter.","confidence":"high",'
+        '"evidence":["The counter area is visible without a customer."],"recommendations":[],'
         '"notable_observations":[],"limitations":"One still frame."}'
     )
 

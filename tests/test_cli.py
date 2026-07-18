@@ -137,11 +137,16 @@ def test_cli_analyze_image_uses_profile_without_ffmpeg(
         assert analyzed_path == image_path
         assert profile.name == "entrance"
         return EntranceAnalysis(
+            profile="entrance",
             estimated_shoe_pairs_on_rack=3,
             estimated_shoe_pairs_on_floor=1,
             person_near_entrance=False,
             entrance_clear=True,
             scattered_footwear=True,
+            summary="The entrance appears clear.",
+            confidence="high",
+            evidence=("Entrance appears unobstructed.",),
+            recommendations=("If an exact shoe count is required, inspect additional frames.",),
             notable_observations=("Shoes are visible near the entrance.",),
             limitations="Counts are estimates from one still frame.",
         )
@@ -154,10 +159,15 @@ def test_cli_analyze_image_uses_profile_without_ffmpeg(
     runner = CliRunner()
 
     # When
-    result = runner.invoke(cli.app, ["analyze-image", str(image_path), "--profile", "entrance"])
+    result = runner.invoke(cli.app, ["analyze-image", str(image_path), "--profile", "입구"])
 
     # Then
     assert result.exit_code == 0
     assert "VIGI Vision — Image Analysis (entrance)" in result.stdout
+    assert result.stdout.index("Summary") < result.stdout.index("Confidence")
+    assert result.stdout.index("Confidence") < result.stdout.index("Evidence")
+    assert result.stdout.index("Evidence") < result.stdout.index("Structured Findings")
+    assert result.stdout.index("Structured Findings") < result.stdout.index("Recommendations")
+    assert result.stdout.index("Recommendations") < result.stdout.index("Analysis Limitations")
     assert "Estimated Shoe Pairs on Rack" in result.stdout
     assert "Image analysis completed successfully." in result.stdout

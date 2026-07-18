@@ -61,11 +61,13 @@ AI-specific logic must never be moved into the SDK.
 
 ## Current phase
 
-Sessions 2 and 3 implementation are complete. The First Working Slice has a
+Sessions 2, 3, and 4 implementation are complete. The First Working Slice has a
 typed CLI, public-SDK NVR and standalone-IPC RTSP adapters, a one-frame ffmpeg
 extraction boundary, and an OpenAI image-analysis boundary. Session 3 adds
 profile-based analysis of previously captured frames for counter, dining, and
-entrance tasks without changing the live capture pipeline.
+entrance tasks without changing the live capture pipeline. Session 4 adds
+explainable business reports from the same single structured model response;
+the structured analysis remains authoritative.
 
 ## Current priorities
 

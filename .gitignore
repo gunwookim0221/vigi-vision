@@ -39,6 +39,8 @@ htmlcov/
 
 # Private runtime captures
 artifacts/
+private_data/*
+!private_data/README.md
 
 # OS files
 .DS_Store
