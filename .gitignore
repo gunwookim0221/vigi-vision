@@ -37,6 +37,9 @@ htmlcov/
 !.env.example
 *.local
 
+# Private runtime captures
+artifacts/
+
 # OS files
 .DS_Store
 Thumbs.db

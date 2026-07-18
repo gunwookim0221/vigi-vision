@@ -61,15 +61,16 @@ AI-specific logic must never be moved into the SDK.
 
 ## Current phase
 
-Foundation complete. The repository contains only the permanent project
-guidance, documentation routes, packaging metadata, and importable package
-shell. The First Working Slice is next.
+Session 2 implementation and live validation are complete. The First Working
+Slice has a typed CLI, public-SDK NVR and standalone-IPC RTSP adapters, a
+one-frame ffmpeg extraction boundary, and an OpenAI image-analysis boundary.
+The local IPC path has produced one real extracted frame and one successful
+structured OpenAI analysis without recording private frame or response details.
 
 ## Current priorities
 
-1. Define the First Working Slice and its acceptance checks.
-2. Keep implementation focused on that one end-to-end MVP path.
-3. Add documentation only alongside decisions or implementation that need it.
+1. Preserve the public SDK / Vision ownership boundary in subsequent work.
+2. Retain the completed First Working Slice as the baseline for Session 3.
 
 ## High-level roadmap
 

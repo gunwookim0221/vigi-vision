@@ -8,7 +8,18 @@ version = "0.1.0"
 description = "AI-assisted investigation workflows for TP-Link VIGI camera data."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "openai>=2.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "python-dotenv>=1.0",
+    "rich>=13.0",
+    "tp-link-vigi-sdk>=0.1.0",
+    "typer>=0.12",
+]
+
+[project.scripts]
+vigi-vision = "vigi_vision.cli:app"
 
 [dependency-groups]
 dev = [
@@ -20,11 +31,15 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.uv.sources]
+tp-link-vigi-sdk = { path = "../tp-link-vigi-sdk", editable = true }
+
 [tool.basedpyright]
 typeCheckingMode = "all"
 pythonVersion = "3.10"
 pythonPlatform = "All"
 include = ["src", "tests"]
+stubPath = "typings"
 exclude = ["**/__pycache__", "**/.venv", "**/build", "**/dist"]
 reportUnnecessaryTypeIgnoreComment = "error"
 reportUnusedVariable = "error"

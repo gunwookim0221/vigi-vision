@@ -16,6 +16,8 @@ content.
 - **Integrations — `integrations/`:** contracts and operating notes for external
   systems. Use `integrations/sdk-change-requests/` only for specific,
   evidence-backed changes requested of the separate VIGI SDK.
+  The live-stream capability request and its validation status are in
+  [sdk-change-requests/live-rtsp-url-builder.md](integrations/sdk-change-requests/live-rtsp-url-builder.md).
 - **ADR — `adr/`:** durable decisions whose alternatives and consequences matter.
   Read when revisiting a recorded choice.
 - **Submission — `submission/`:** material required for an actual demo, review,

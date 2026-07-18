@@ -5,3 +5,58 @@ An AI-assisted application for investigating TP-Link VIGI camera data.
 Start with the [project charter](PROJECT.md). Coding agents should also read
 [AGENTS.md](AGENTS.md); deeper documentation is routed from
 [docs/README.md](docs/README.md).
+
+## First Working Slice
+
+`vigi-vision inspect` performs one current-frame investigation:
+
+1. select the configured NVR or standalone IPC source;
+2. for NVR, authenticate and list channels through the public `VigiClient` API
+   and select the configured or sole online channel;
+3. build a credential-free RTSP URL through `client.stream.build_live_url` for
+   NVR or public `StreamService.build_ipc_live_url` for a standalone IPC;
+4. invoke installed `ffmpeg` with separate RTSP Digest credentials to save one
+   JPEG below git-ignored `artifacts/snapshots/`;
+5. send that image to the OpenAI Responses API and print a structured result.
+
+## Setup
+
+Install the project with `uv sync`, copy `.env.example` to `.env`, and set:
+
+- `OPENAI_API_KEY`
+- `VIGI_SOURCE=nvr` with `VIGI_HOST`, `VIGI_USERNAME`, and `VIGI_PASSWORD`; or
+- `VIGI_SOURCE=ipc` with `VIGI_IPC_HOST`, `VIGI_IPC_USERNAME`, and
+  `VIGI_IPC_PASSWORD`
+- optionally `VIGI_PORT`, `VIGI_VERIFY_SSL`, `VIGI_CHANNEL_ID`, `VIGI_STREAM`,
+  and `FFMPEG_PATH`
+
+VIGI Vision explicitly loads `.env` from the current working directory. OS
+environment variables override matching `.env` values when needed.
+
+`ffmpeg` must be available on `PATH` unless `FFMPEG_PATH` names its executable.
+The selected NVR or IPC credentials are supplied separately to ffmpeg for its
+RTSP Digest challenge; they are not embedded in the SDK-built URL. Standard IPC
+RTSP uses the SDK-generated default-port URL; Vision does not support
+`VIGI_IPC_PORT`. `VIGI_IPC_VERIFY_TLS` is an SDK/OpenAPI control-plane setting
+and is not read by this RTSP-only Vision path. Do not log or persist the URL,
+credentials, or extracted frame outside `artifacts/`.
+
+## Usage
+
+For NVR, list safe channel metadata first to choose `VIGI_CHANNEL_ID` when
+needed. This command is deliberately NVR-only:
+
+```text
+uv run vigi-vision channels
+```
+
+Then run the current-frame inspection:
+
+```text
+uv run vigi-vision inspect
+```
+
+For a standalone IPC, set `VIGI_SOURCE=ipc`; `inspect` uses the public IPC RTSP
+builder and does not perform IPC OpenAPI authentication. The first live run is
+only complete when its source validation, one-frame extraction, and OpenAI
+structured image analysis all succeed.
