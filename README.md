@@ -33,6 +33,18 @@ VIGI Vision uses profile-aware prompts and strict structured schemas to produce 
 - **Explainable reports** distinguish observable evidence, estimates, possible events, recommendations, unknowns, and limitations.
 - **Structured JSON output** keeps the analysis result as the source of truth.
 
+## Project Architecture
+
+<p align="center">
+  <img src="assets/vigi_vision_architecture.png" width="95%" alt="VIGI Vision architecture pipeline">
+</p>
+
+<p align="center">
+<i>
+The pipeline transforms CCTV footage into structured, explainable business reports through profile-aware analysis.
+</i>
+</p>
+
 ## Business Profiles
 
 ### Counter
@@ -56,6 +68,20 @@ For image analysis, choose exactly one canonical profile ID: `counter`, `dining`
 3. VIGI Vision analyzes the available visual evidence with that profile's prompt and structured schema.
 4. Review the report's evidence, estimates, possible events, recommendations, unknowns, and limitations.
 5. Use the report as an input to human operational review, not as a definitive record of identity, transaction, cause, or continuous activity.
+
+## Example Output
+
+The following report was generated from the public `sample_data/counter_ai.jpg` image using the `counter` profile.
+
+<p align="center">
+  <img src="assets/output_example.png" width="90%" alt="VIGI Vision counter profile example output showing summary, confidence, evidence, structured findings, and limitations">
+</p>
+
+<p align="center">
+<i>
+The report separates visible evidence and structured findings from conclusions the sampled frame cannot support.
+</i>
+</p>
 
 ## CLI Examples
 
@@ -103,9 +129,9 @@ For a standalone IPC, set `VIGI_SOURCE=ipc`; `inspect` uses the public IPC RTSP 
 Image analysis does not invoke ffmpeg and does not connect to a live camera:
 
 ```text
-uv run vigi-vision analyze-image artifacts/snapshots/ipc-20260718T094854Z.jpg --profile counter
-uv run vigi-vision analyze-image artifacts/snapshots/ipc-20260718T094854Z.jpg --profile dining
-uv run vigi-vision analyze-image artifacts/snapshots/ipc-20260718T094854Z.jpg --profile entrance
+uv run vigi-vision analyze-image sample_data/counter_ai.jpg --profile counter
+uv run vigi-vision analyze-image sample_data/dining.jpg --profile dining
+uv run vigi-vision analyze-image sample_data/entrance.jpg --profile entrance
 ```
 
 Short-video analysis accepts one local MP4 of 30 seconds or less. It sends 2–10 evenly spaced representative frames in exactly one OpenAI request, then removes its temporary extracted JPEGs when the command finishes. It does not connect to a camera, record video, or retain the local clip.
@@ -124,9 +150,6 @@ For a single frame, counter reports describe only a possible payment interaction
 
 Do not log or persist the RTSP URL, credentials, or extracted frame outside `artifacts/`. `sample_data/` contains public demonstration images for profile-based examples. `private_data/` is reserved for local real-camera captures and is ignored by Git; never commit production, customer, employee, surveillance footage, extracted frames, or report data that identifies people.
 
-## Project Architecture
-
-(Architecture diagram)
 
 ## Roadmap
 
