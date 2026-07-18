@@ -61,16 +61,16 @@ AI-specific logic must never be moved into the SDK.
 
 ## Current phase
 
-Session 2 implementation and live validation are complete. The First Working
-Slice has a typed CLI, public-SDK NVR and standalone-IPC RTSP adapters, a
-one-frame ffmpeg extraction boundary, and an OpenAI image-analysis boundary.
-The local IPC path has produced one real extracted frame and one successful
-structured OpenAI analysis without recording private frame or response details.
+Sessions 2 and 3 implementation are complete. The First Working Slice has a
+typed CLI, public-SDK NVR and standalone-IPC RTSP adapters, a one-frame ffmpeg
+extraction boundary, and an OpenAI image-analysis boundary. Session 3 adds
+profile-based analysis of previously captured frames for counter, dining, and
+entrance tasks without changing the live capture pipeline.
 
 ## Current priorities
 
 1. Preserve the public SDK / Vision ownership boundary in subsequent work.
-2. Retain the completed First Working Slice as the baseline for Session 3.
+2. Retain the completed live inspection pipeline and profile registry baseline.
 
 ## High-level roadmap
 

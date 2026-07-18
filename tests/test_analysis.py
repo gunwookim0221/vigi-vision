@@ -14,6 +14,7 @@ from openai import (
     PermissionDeniedError,
     RateLimitError,
 )
+from pydantic import BaseModel
 
 from vigi_vision.analysis import (
     AnalysisRequestError,
@@ -25,6 +26,7 @@ from vigi_vision.analysis import (
     diagnose_openai_error,
     parse_scene_analysis,
 )
+from vigi_vision.profiles import CounterAnalysis, get_profile
 
 _SECRET = token_urlsafe()
 _REQUEST = httpx.Request("POST", "https://api.openai.invalid/responses")
@@ -143,6 +145,41 @@ def test_analyzer_rejects_missing_api_key_before_reading_image() -> None:
         _ = analyzer.analyze(Path("not-read.jpg"))
 
     assert exception_info.value.kind is OpenAiFailureKind.MISSING_API_KEY
+
+
+def test_analyzer_routes_profile_to_its_prompt_and_schema(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Given
+    image_path = tmp_path / "captured-frame.jpg"
+    profile = get_profile("counter")
+    raw_response = (
+        '{"staff_visible":false,"customer_visible":false,"customer_at_counter":false,'
+        '"counter_occupied":false,"possible_payment_interaction":false,'
+        '"notable_observations":[],"limitations":"One still frame."}'
+    )
+
+    def _request_analysis(
+        _: OpenAiAnalyzer,
+        analyzed_path: Path,
+        prompt: str,
+        response_model: type[BaseModel],
+        response_name: str,
+    ) -> str:
+        assert analyzed_path == image_path
+        assert prompt == profile.prompt
+        assert response_model is CounterAnalysis
+        assert response_name == "counter_analysis"
+        return raw_response
+
+    monkeypatch.setattr(OpenAiAnalyzer, "_request_analysis", _request_analysis)
+
+    # When
+    analysis = OpenAiAnalyzer(_SECRET).analyze_profile(image_path, profile)
+
+    # Then
+    assert isinstance(analysis, CounterAnalysis)
+    assert analysis.counter_occupied is False
 
 
 def test_request_error_includes_safe_openai_metadata() -> None:

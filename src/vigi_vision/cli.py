@@ -3,7 +3,7 @@
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
-from typing import final
+from typing import Annotated, final
 
 import typer
 from pydantic import ValidationError
@@ -21,6 +21,14 @@ from vigi_vision.ffmpeg import (
 )
 from vigi_vision.gateway import select_source_gateway
 from vigi_vision.nvr import NvrRequestError, SdkNvrGateway
+from vigi_vision.profiles import (
+    ProfileAnalysis,
+    ProfileDefinition,
+    ProfileResponseError,
+    ProfileValue,
+    UnknownProfileError,
+    get_profile,
+)
 from vigi_vision.workflow import InspectionResult, InspectionWorkflow
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -73,6 +81,29 @@ def inspect() -> None:
 
 
 @app.command()
+def analyze_image(
+    image_path: Path,
+    profile: Annotated[str, typer.Option(help="Analysis profile: counter, dining, or entrance.")],
+) -> None:
+    """Analyze a previously captured image without using ffmpeg or a live camera."""
+    try:
+        settings = load_settings(Path.cwd() / ".env")
+        selected_profile = get_profile(profile)
+        analysis = OpenAiAnalyzer(settings.openai_api_key.get_secret_value()).analyze_profile(
+            image_path, selected_profile
+        )
+    except (
+        AnalysisRequestError,
+        ProfileResponseError,
+        UnknownProfileError,
+        ValidationError,
+    ) as error:
+        _console.print(f"Error: {error}", style="red")
+        raise typer.Exit(code=1) from error
+    _print_profile_report(image_path, selected_profile, analysis)
+
+
+@app.command()
 def channels() -> None:
     """List safe metadata for NVR channels discovered through the public SDK."""
     try:
@@ -110,6 +141,21 @@ def _print_inspection_report(result: InspectionResult) -> None:
     _console.print("Inspection completed successfully.", markup=False)
 
 
+def _print_profile_report(
+    image_path: Path, profile: ProfileDefinition, analysis: ProfileAnalysis
+) -> None:
+    _console.print("=" * 60, markup=False)
+    _console.print(f"VIGI Vision — Image Analysis ({profile.name})", markup=False)
+    _console.print("=" * 60, markup=False)
+    _console.print()
+    _print_section("Image", str(image_path))
+    for field, value in zip(profile.report_fields, analysis.display_values(), strict=True):
+        _print_section(field.label, _format_profile_value(value))
+    _print_observations(analysis.notable_observations)
+    _print_section("Analysis Limitations", analysis.limitations)
+    _console.print("Image analysis completed successfully.", markup=False)
+
+
 def _print_section(title: str, value: str) -> None:
     _console.print(title, markup=False)
     _console.print("-" * len(title), markup=False)
@@ -130,6 +176,12 @@ def _print_observations(observations: tuple[str, ...]) -> None:
     else:
         _console.print("Not available", markup=False)
     _console.print()
+
+
+def _format_profile_value(value: ProfileValue) -> str:
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    return str(value)
 
 
 def _wrapped_lines(value: str) -> tuple[str, ...]:

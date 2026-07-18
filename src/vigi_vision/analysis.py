@@ -23,6 +23,12 @@ from openai import (
 from pydantic import BaseModel, ConfigDict, ValidationError
 from typing_extensions import override
 
+from vigi_vision.profiles import (
+    ProfileAnalysis,
+    ProfileDefinition,
+    parse_profile_analysis,
+)
+
 _MODEL = "gpt-5.6-terra"
 _PROMPT = (
     "Inspect this one current camera frame. Return a concise scene summary, whether a person "
@@ -143,6 +149,27 @@ class OpenAiAnalyzer:
 
     def analyze(self, image_path: Path) -> SceneAnalysis:
         """Analyze one JPEG frame through the Responses API."""
+        raw_response = self._request_analysis(image_path, _PROMPT, SceneAnalysis, "scene_analysis")
+        return parse_scene_analysis(raw_response)
+
+    def analyze_profile(self, image_path: Path, profile: ProfileDefinition) -> ProfileAnalysis:
+        """Analyze one existing image with a registered business-task profile."""
+        raw_response = self._request_analysis(
+            image_path,
+            profile.prompt,
+            profile.response_model,
+            f"{profile.name}_analysis",
+        )
+        return parse_profile_analysis(raw_response, profile)
+
+    def _request_analysis(
+        self,
+        image_path: Path,
+        prompt: str,
+        response_model: type[BaseModel],
+        response_name: str,
+    ) -> str:
+        """Send one image using the supplied prompt and strict response model."""
         if not self.api_key:
             raise AnalysisRequestError(
                 OpenAiFailureKind.MISSING_API_KEY,
@@ -157,7 +184,7 @@ class OpenAiAnalyzer:
                     {
                         "role": "user",
                         "content": [
-                            {"type": "input_text", "text": _PROMPT},
+                            {"type": "input_text", "text": prompt},
                             {
                                 "type": "input_image",
                                 "image_url": f"data:image/jpeg;base64,{image_data}",
@@ -169,15 +196,15 @@ class OpenAiAnalyzer:
                 text={
                     "format": {
                         "type": "json_schema",
-                        "name": "scene_analysis",
+                        "name": response_name,
                         "strict": True,
-                        "schema": SceneAnalysis.model_json_schema(),
+                        "schema": response_model.model_json_schema(),
                     }
                 },
             )
         except OpenAIError as error:
             raise diagnose_openai_error(error) from error
-        return parse_scene_analysis(response.output_text)
+        return response.output_text
 
 
 def diagnose_openai_error(error: OpenAIError) -> AnalysisRequestError:

@@ -5,9 +5,10 @@ import pytest
 from typer.testing import CliRunner
 
 from vigi_vision import cli, nvr
-from vigi_vision.analysis import SceneAnalysis
+from vigi_vision.analysis import OpenAiAnalyzer, SceneAnalysis
 from vigi_vision.channel_selection import Channel
 from vigi_vision.config import Settings
+from vigi_vision.profiles import EntranceAnalysis, ProfileDefinition
 from vigi_vision.workflow import InspectionResult, InspectionWorkflow
 
 _TEST_OPENAI_KEY = token_urlsafe()
@@ -120,3 +121,43 @@ def test_cli_inspect_renders_a_wrapped_demonstration_report(
     assert "• Lighting is limited." in result.stdout
     assert "Inspection completed successfully." in result.stdout
     assert all(len(line) <= 100 for line in result.stdout.splitlines())
+
+
+def test_cli_analyze_image_uses_profile_without_ffmpeg(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Given
+    image_path = tmp_path / "captured-frame.jpg"
+    _ = image_path.write_bytes(b"jpeg")
+    monkeypatch.setattr(cli, "load_settings", _settings)
+
+    def _analyze_profile(
+        _: OpenAiAnalyzer, analyzed_path: Path, profile: ProfileDefinition
+    ) -> EntranceAnalysis:
+        assert analyzed_path == image_path
+        assert profile.name == "entrance"
+        return EntranceAnalysis(
+            estimated_shoe_pairs_on_rack=3,
+            estimated_shoe_pairs_on_floor=1,
+            person_near_entrance=False,
+            entrance_clear=True,
+            scattered_footwear=True,
+            notable_observations=("Shoes are visible near the entrance.",),
+            limitations="Counts are estimates from one still frame.",
+        )
+
+    def _ffmpeg_must_not_run() -> Path:
+        raise AssertionError
+
+    monkeypatch.setattr(OpenAiAnalyzer, "analyze_profile", _analyze_profile)
+    monkeypatch.setattr(cli, "resolve_ffmpeg", _ffmpeg_must_not_run)
+    runner = CliRunner()
+
+    # When
+    result = runner.invoke(cli.app, ["analyze-image", str(image_path), "--profile", "entrance"])
+
+    # Then
+    assert result.exit_code == 0
+    assert "VIGI Vision — Image Analysis (entrance)" in result.stdout
+    assert "Estimated Shoe Pairs on Rack" in result.stdout
+    assert "Image analysis completed successfully." in result.stdout

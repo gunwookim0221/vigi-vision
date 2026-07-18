@@ -19,6 +19,10 @@ Start with the [project charter](PROJECT.md). Coding agents should also read
    JPEG below git-ignored `artifacts/snapshots/`;
 5. send that image to the OpenAI Responses API and print a structured result.
 
+`vigi-vision analyze-image` analyzes a previously captured camera frame with a
+business-specific profile. It never invokes ffmpeg and does not connect to a
+live camera.
+
 ## Setup
 
 Install the project with `uv sync`, copy `.env.example` to `.env`, and set:
@@ -60,3 +64,17 @@ For a standalone IPC, set `VIGI_SOURCE=ipc`; `inspect` uses the public IPC RTSP
 builder and does not perform IPC OpenAPI authentication. The first live run is
 only complete when its source validation, one-frame extraction, and OpenAI
 structured image analysis all succeed.
+
+For hackathon demonstrations, analyze a previously captured real camera frame
+without taking a new live capture. Select exactly one of `counter`, `dining`,
+or `entrance`; each profile uses its own prompt and strict structured schema:
+
+```text
+uv run vigi-vision analyze-image artifacts/snapshots/ipc-20260718T094854Z.jpg --profile counter
+uv run vigi-vision analyze-image artifacts/snapshots/ipc-20260718T094854Z.jpg --profile dining
+uv run vigi-vision analyze-image artifacts/snapshots/ipc-20260718T094854Z.jpg --profile entrance
+```
+
+The `counter` profile reports only a possible payment interaction, never a
+definite payment conclusion from a single frame. Dining and entrance counts are
+estimates from a still image.
