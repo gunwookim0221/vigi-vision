@@ -3,8 +3,8 @@
 ## Purpose
 
 The recording retrieval layer obtains one bounded temporary MP4 from an NVR.
-It does not invoke OpenAI, inspect video content, generate reports, or expose a
-CLI command.
+It does not invoke OpenAI, inspect video content, or generate reports. The
+application CLI composes it with the existing local-video analysis workflow.
 
 ## Public interfaces
 
@@ -27,7 +27,12 @@ to UTC before replay planning. Replay URLs use lowercase UTC
 
 The planner verifies segment overlap before building a replay request. The
 extractor always uses RTSP-over-TCP and applies `-t <window duration>` because
-the NVR replay `endtime` is not a reliable ffmpeg EOF boundary.
+the NVR replay `endtime` is not a reliable ffmpeg EOF boundary. Its subprocess
+timeout is bounded to `requested duration + 30 seconds startup allowance + 10
+seconds finalization margin`: the startup term covers the observed roughly
+5.56-second RTSP connection latency, while the explicit finalization term gives
+`+faststart` time to finish the MP4 container without allowing an unbounded
+process.
 
 ## Security and failure behavior
 
@@ -41,7 +46,12 @@ RTSP 454 recording unavailable, ffmpeg timeout, and other extraction failures.
 
 ## Session 7 integration point
 
-Session 7 should pass `ReplayClip.temporary_mp4_path` into the existing local
-`analyze-video` service, then call `ReplayClip.remove()` in a `finally` block.
-The retrieval layer must remain unaware of analysis profiles, OpenAI, and
-business reports.
+`vigi-vision analyze-recording` accepts an NVR channel, a UTC start timestamp,
+a positive whole-second duration such as `30s`, and an analysis profile. It
+plans and extracts the replay, passes `ReplayClip.temporary_mp4_path` to the
+same internal service used by `analyze-video`, renders the existing temporal
+business report, and calls `ReplayClip.remove()` in a `finally` block.
+
+The retrieval layer remains unaware of analysis profiles, OpenAI, and business
+reports. The shared video-analysis service retains its own temporary-frame
+cleanup behavior.

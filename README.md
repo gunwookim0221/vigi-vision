@@ -8,7 +8,7 @@
 
 VIGI Vision is an AI-powered business video analysis system that transforms CCTV images and short videos into structured, explainable business reports.
 
-It can inspect a live RTSP source, analyze a previously captured image, or analyze a short local video using profile-aware analysis designed for different business environments.
+It can inspect a live RTSP source, analyze a previously captured image, analyze a short local video, or retrieve and analyze a bounded NVR recording using profile-aware analysis designed for different business environments.
 
 Rather than describe every visible object in a scene, VIGI Vision applies a selected business profile to focus its analysis on the operational questions relevant to that location. Its reports separate observable evidence, estimates, possible events, recommendations, and limitations.
 
@@ -29,6 +29,7 @@ VIGI Vision uses profile-aware prompts and strict structured schemas to produce 
 - **Live RTSP inspection** captures one current frame from a configured VIGI NVR or standalone IPC source for analysis.
 - **Image analysis** evaluates a previously captured camera frame without connecting to a live camera.
 - **Short-video temporal analysis** samples 2–10 evenly spaced frames from a local MP4 of 30 seconds or less in one OpenAI request.
+- **NVR recording analysis** retrieves one bounded replay clip through the public SDK, analyzes it through the same temporal workflow, then removes the temporary MP4.
 - **Profile-aware business analysis** uses a dedicated prompt and strict schema for each supported business context.
 - **Explainable reports** distinguish observable evidence, estimates, possible events, recommendations, unknowns, and limitations.
 - **Structured JSON output** keeps the analysis result as the source of truth.
@@ -103,6 +104,12 @@ Analyze a short local clip with temporal samples:
 uv run vigi-vision analyze-video private_data/clip.mp4 --profile dining
 ```
 
+Analyze a bounded NVR recording (the start time is UTC):
+
+```text
+uv run vigi-vision analyze-recording --channel 1 --start "2026-07-20 12:00:00" --duration 30s --profile counter
+```
+
 ## Installation
 
 Install the project with `uv sync`, copy `.env.example` to `.env`, and set:
@@ -142,13 +149,19 @@ uv run vigi-vision analyze-video private_data/clip.mp4 --profile dining
 uv run vigi-vision analyze-video private_data/clip.mp4 --profile entrance
 ```
 
+NVR recording analysis is available only with `VIGI_SOURCE=nvr`. It searches the configured NVR for a recording overlapping the requested UTC window, extracts one temporary MP4, and runs the same bounded local-video analysis and report renderer shown above. `--duration` accepts a positive whole-second value such as `30s`. The replay MP4 is removed whether analysis succeeds or fails; temporary frame cleanup remains the local-video workflow's responsibility. Authentication failures, unavailable recordings, replay extraction failures, video-analysis failures, and OpenAI failures are reported as separate user-facing errors.
+
+```text
+uv run vigi-vision analyze-recording --channel 1 --start "2026-07-20 12:00:00" --duration 30s --profile counter
+```
+
 ## Safety & Limitations
 
 VIGI Vision is deliberately bounded by the evidence in an image or sparse video samples. It does **not** support identity tracking, face recognition, payment confirmation, causal claims, or continuous tracking.
 
 For a single frame, counter reports describe only a possible payment interaction, never a definite payment conclusion. Dining and entrance counts are estimates. For short video, sparse samples do not support identity tracking, continuous activity claims, causal payment or transaction conclusions, or claims about unsampled intervals. Recommendations are tied to visible evidence or an explicit sampling limitation.
 
-Do not log or persist the RTSP URL, credentials, or extracted frame outside `artifacts/`. `sample_data/` contains public demonstration images for profile-based examples. `private_data/` is reserved for local real-camera captures and is ignored by Git; never commit production, customer, employee, surveillance footage, extracted frames, or report data that identifies people.
+Do not log or persist the RTSP URL, credentials, replay URL, extracted frame, or temporary replay MP4 outside `artifacts/`. `sample_data/` contains public demonstration images for profile-based examples. `private_data/` is reserved for local real-camera captures and is ignored by Git; never commit production, customer, employee, surveillance footage, extracted frames, replay clips, or report data that identifies people.
 
 
 ## Roadmap

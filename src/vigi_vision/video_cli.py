@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from rich.console import Console
 
 from vigi_vision.analysis import AnalysisRequestError, OpenAiAnalyzer, TemporalAnalysisRequest
-from vigi_vision.config import load_local_analysis_settings
+from vigi_vision.config import LocalAnalysisSettings, Settings, load_local_analysis_settings
 from vigi_vision.ffmpeg import FfmpegUnavailableError, resolve_ffmpeg
 from vigi_vision.profiles import UnknownProfileError, resolve_profile_alias
 from vigi_vision.temporal_profiles import (
@@ -37,17 +37,7 @@ def analyze_video(
     """Analyze a short local MP4 using sparse, ordered representative frames."""
     try:
         settings = load_local_analysis_settings(Path.cwd() / ".env")
-        selected_profile = get_temporal_profile(resolve_profile_alias(profile))
-        ffmpeg = resolve_ffmpeg(settings.ffmpeg_path)
-        sampler = VideoSampler(ffmpeg=ffmpeg, ffprobe=resolve_ffprobe(ffmpeg))
-        with sampler.sample(video_path) as sample:
-            analysis = OpenAiAnalyzer(settings.openai_api_key.get_secret_value()).analyze_temporal(
-                TemporalAnalysisRequest(
-                    profile=selected_profile,
-                    metadata=sample.metadata,
-                    frames=sample.frames,
-                )
-            )
+        analysis = analyze_video_file(video_path, profile, settings)
     except (
         AnalysisRequestError,
         FfmpegUnavailableError,
@@ -58,10 +48,28 @@ def analyze_video(
     ) as error:
         _console.print(f"Error: {error}", style="red")
         raise typer.Exit(code=1) from error
-    _print_temporal_report(video_path, analysis)
+    print_temporal_report(video_path, analysis)
 
 
-def _print_temporal_report(video_path: Path, analysis: TemporalProfileAnalysis) -> None:
+def analyze_video_file(
+    video_path: Path, profile: str, settings: LocalAnalysisSettings | Settings
+) -> TemporalProfileAnalysis:
+    """Run the shared temporal analysis workflow for one local MP4."""
+    selected_profile = get_temporal_profile(resolve_profile_alias(profile))
+    ffmpeg = resolve_ffmpeg(settings.ffmpeg_path)
+    sampler = VideoSampler(ffmpeg=ffmpeg, ffprobe=resolve_ffprobe(ffmpeg))
+    with sampler.sample(video_path) as sample:
+        return OpenAiAnalyzer(settings.openai_api_key.get_secret_value()).analyze_temporal(
+            TemporalAnalysisRequest(
+                profile=selected_profile,
+                metadata=sample.metadata,
+                frames=sample.frames,
+            )
+        )
+
+
+def print_temporal_report(video_path: Path, analysis: TemporalProfileAnalysis) -> None:
+    """Render the shared temporal business report for either video source."""
     _console.print("=" * 60, markup=False)
     _console.print(f"VIGI Vision — Video Analysis ({analysis.profile})", markup=False)
     _console.print("=" * 60, markup=False)

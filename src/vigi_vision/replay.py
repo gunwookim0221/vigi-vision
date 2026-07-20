@@ -16,6 +16,7 @@ from typing_extensions import override
 from vigi_vision.recording import ReplayRequest
 
 _STARTUP_ALLOWANCE_SECONDS = 30.0
+_FINALIZATION_MARGIN_SECONDS = 10.0
 
 ReplayRunner = Callable[[tuple[str, ...], float], subprocess.CompletedProcess[str]]
 
@@ -108,7 +109,11 @@ class ReplayExtractor:
         output_path = self._temporary_path()
         try:
             arguments = self._arguments(request, output_path)
-            timeout_seconds = request.window.duration_seconds + _STARTUP_ALLOWANCE_SECONDS
+            timeout_seconds = (
+                request.window.duration_seconds
+                + _STARTUP_ALLOWANCE_SECONDS
+                + _FINALIZATION_MARGIN_SECONDS
+            )
             completed = self.runner(arguments, timeout_seconds)
         except subprocess.TimeoutExpired:
             output_path.unlink(missing_ok=True)

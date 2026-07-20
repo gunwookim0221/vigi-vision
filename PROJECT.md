@@ -62,7 +62,7 @@ AI-specific logic must never be moved into the SDK.
 
 ## Current phase
 
-Sessions 2–6B are complete. The First Working Slice has a typed CLI,
+Sessions 2–7 are complete. The First Working Slice has a typed CLI,
 public-SDK NVR and standalone-IPC RTSP adapters, a one-frame ffmpeg extraction
 boundary, and an OpenAI image-analysis boundary. Session 3 added profile-based
 analysis of previously captured frames for counter, dining, and entrance tasks
@@ -73,14 +73,18 @@ cap, 2–10 ordered samples, one OpenAI request, temporary frame cleanup, and
 evidence-grounded temporal reports. Session 6B added a reusable recording
 retrieval layer that plans UTC replay from public SDK recording search results,
 extracts a bounded temporary MP4 with ffmpeg, and returns it without invoking
-OpenAI, video analysis, reports, or a public CLI.
+OpenAI, video analysis, reports, or a public CLI. Session 7 connected that
+stable retrieval layer to the existing local-video analysis service through the
+public `analyze-recording` command, preserving one temporal OpenAI workflow,
+one explainable report format, and cleanup of both temporary replay clips and
+sampled frames.
 
 ## Current priorities
 
 1. Preserve the public SDK / Vision ownership boundary in subsequent work.
 2. Retain the completed live inspection pipeline and profile registry baseline.
-3. Keep temporary replay retrieval bounded, credential-safe, and independent
-   from the local-video analysis workflow until Session 7 connects them.
+3. Keep recording retrieval bounded and credential-safe while preserving its
+   narrow boundary with the shared local-video analysis workflow.
 
 ## High-level roadmap
 

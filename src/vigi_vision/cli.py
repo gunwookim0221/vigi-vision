@@ -30,12 +30,14 @@ from vigi_vision.profiles import (
     get_profile,
     resolve_profile_alias,
 )
+from vigi_vision.recording_cli import analyze_recording
 from vigi_vision.video_cli import analyze_video
 from vigi_vision.workflow import InspectionResult, InspectionWorkflow
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 _console = Console()
 _ = app.command(name="analyze-video")(analyze_video)
+_ = app.command(name="analyze-recording")(analyze_recording)
 
 
 @final
@@ -127,7 +129,7 @@ def channels() -> None:
 
 
 def _nvr_channels(settings: Settings) -> tuple[Channel, ...]:
-    match settings.vigi_source:
+    match settings.vigi_source:  # noqa: RUF100  # noqa: MATCH_OK — Settings validates this closed source union before this command runs.
         case "nvr":
             return SdkNvrGateway(settings.nvr_connection).channels()
         case "ipc":
