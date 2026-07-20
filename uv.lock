@@ -606,7 +606,7 @@ wheels = [
 
 [[package]]
 name = "tp-link-vigi-sdk"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "../tp-link-vigi-sdk" }
 
 [package.metadata]
