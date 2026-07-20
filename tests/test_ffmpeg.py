@@ -1,10 +1,15 @@
 from pathlib import Path
 from secrets import token_urlsafe
-from subprocess import CompletedProcess
+from subprocess import CompletedProcess, TimeoutExpired
 
 import pytest
 
-from vigi_vision.ffmpeg import FfmpegExtractor, FfmpegUnavailableError, resolve_ffmpeg
+from vigi_vision.ffmpeg import (
+    FfmpegExtractor,
+    FfmpegTimeoutError,
+    FfmpegUnavailableError,
+    resolve_ffmpeg,
+)
 
 _TEST_PASSWORD = token_urlsafe()
 
@@ -73,3 +78,21 @@ def test_extract_frame_writes_one_frame_to_requested_artifact_path(tmp_path: Pat
     # Then
     assert extracted_path == output_path
     assert output_path.read_bytes() == b"jpeg"
+
+
+def test_extract_frame_reports_timeout_without_rtsp_credentials(tmp_path: Path) -> None:
+    output_path = tmp_path / "frame.jpg"
+
+    def timeout_runner(arguments: tuple[str, ...]) -> CompletedProcess[str]:
+        raise TimeoutExpired(arguments, 15.0)
+
+    extractor = FfmpegExtractor(Path("ffmpeg.exe"), runner=timeout_runner)
+
+    with pytest.raises(FfmpegTimeoutError, match="timed out"):
+        _ = extractor.extract(
+            "rtsp://nvr.local/live/1/1/avm",
+            username="operator",
+            password=_TEST_PASSWORD,
+            output_path=output_path,
+        )
+    assert not output_path.exists()

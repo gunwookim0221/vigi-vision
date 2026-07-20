@@ -156,6 +156,50 @@ class LocalAnalysisSettings(BaseSettings):
     ffmpeg_path: Path | None = Field(default=None, validation_alias="FFMPEG_PATH")
 
 
+class CaptureSettings(BaseSettings):
+    """Validate only the source and media-tool values needed for snapshots."""
+
+    model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(extra="ignore")
+
+    vigi_source: Literal["nvr", "ipc"] = Field(default=_NVR_SOURCE, validation_alias="VIGI_SOURCE")
+    vigi_host: str | None = Field(default=None, min_length=1, validation_alias="VIGI_HOST")
+    vigi_username: SecretStr | None = Field(default=None, validation_alias="VIGI_USERNAME")
+    vigi_password: SecretStr | None = Field(default=None, validation_alias="VIGI_PASSWORD")
+    vigi_port: int = Field(default=20443, gt=0, le=65535, validation_alias="VIGI_PORT")
+    vigi_verify_ssl: bool = Field(default=True, validation_alias="VIGI_VERIFY_SSL")
+    vigi_stream: Literal["main", "minor"] = Field(default="main", validation_alias="VIGI_STREAM")
+    ffmpeg_path: Path | None = Field(default=None, validation_alias="FFMPEG_PATH")
+
+    @model_validator(mode="after")
+    def validate_selected_source(self) -> Self:
+        """Require NVR credentials only when the NVR source is selected."""
+        if self.vigi_source == _NVR_SOURCE:
+            if self.vigi_host is None:
+                raise MissingSourceSettingError(_VIGI_HOST, _NVR_SOURCE)
+            if self.vigi_username is None:
+                raise MissingSourceSettingError(_VIGI_USERNAME, _NVR_SOURCE)
+            if self.vigi_password is None:
+                raise MissingSourceSettingError(_secret_key(_VIGI_HOST), _NVR_SOURCE)
+        return self
+
+    @property
+    def nvr_connection(self) -> NvrConnection:
+        """Return validated NVR values without requiring an OpenAI key."""
+        match self.vigi_host, self.vigi_username, self.vigi_password:
+            case str() as host, SecretStr() as username, SecretStr() as password:
+                return NvrConnection(
+                    host=host,
+                    username=username,
+                    password=password,
+                    port=self.vigi_port,
+                    verify_ssl=self.vigi_verify_ssl,
+                    channel_id=None,
+                    stream=self.vigi_stream,
+                )
+            case _:
+                raise SourceConfigurationError(_NVR_SOURCE)
+
+
 def load_settings(env_file: Path | None = None) -> Settings:
     """Load settings from process variables and an optional local dotenv file."""
     dotenv_file = Path(".env") if env_file is None else env_file
@@ -184,6 +228,21 @@ def load_local_analysis_settings(env_file: Path | None = None) -> LocalAnalysisS
         if value != "" or key not in _OPTIONAL_ENVIRONMENT_KEYS
     }
     return LocalAnalysisSettings.model_validate(normalized_values)
+
+
+def load_capture_settings(env_file: Path | None = None) -> CaptureSettings:
+    """Load capture settings while ignoring the optional OpenAI configuration."""
+    dotenv_file = Path(".env") if env_file is None else env_file
+    file_values = {
+        key: value for key, value in dotenv_values(dotenv_file).items() if value is not None
+    }
+    values = {**file_values, **environ}
+    normalized_values = {
+        key: value
+        for key, value in values.items()
+        if value != "" or key not in _OPTIONAL_ENVIRONMENT_KEYS
+    }
+    return CaptureSettings.model_validate(normalized_values)
 
 
 def _require_nvr_values(settings: Settings) -> None:

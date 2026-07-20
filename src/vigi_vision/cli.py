@@ -31,6 +31,7 @@ from vigi_vision.profiles import (
     resolve_profile_alias,
 )
 from vigi_vision.recording_cli import analyze_recording
+from vigi_vision.snapshot_cli import snapshot
 from vigi_vision.video_cli import analyze_video
 from vigi_vision.workflow import InspectionResult, InspectionWorkflow
 
@@ -38,6 +39,7 @@ app = typer.Typer(add_completion=False, no_args_is_help=True)
 _console = Console()
 _ = app.command(name="analyze-video")(analyze_video)
 _ = app.command(name="analyze-recording")(analyze_recording)
+_ = app.command(name="snapshot")(snapshot)
 
 
 @final

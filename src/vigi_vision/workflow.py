@@ -7,6 +7,7 @@ from typing import Protocol
 
 from vigi_vision.analysis import SceneAnalysis
 from vigi_vision.channel_selection import Channel
+from vigi_vision.ffmpeg import FfmpegExtractionError
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +57,43 @@ class InspectionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class SnapshotResult:
+    """The structured result of capturing one current frame."""
+
+    label: str
+    channel: Channel | None
+    snapshot_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotCapture:
+    """Coordinate source selection and one-frame extraction."""
+
+    gateway: SourceGateway
+    extractor: FrameExtractor
+    artifact_root: Path
+    artifact_directory: str = "snapshots"
+
+    def run(self) -> SnapshotResult:
+        """Capture one frame and remove a partial artifact if extraction fails."""
+        stream = self.gateway.stream()
+        snapshot_path = (
+            self.artifact_root / self.artifact_directory / _snapshot_name(stream.artifact_stem)
+        )
+        try:
+            extracted_path = self.extractor.extract(
+                stream.live_url,
+                username=stream.username,
+                password=stream.password,
+                output_path=snapshot_path,
+            )
+        except FfmpegExtractionError:
+            snapshot_path.unlink(missing_ok=True)
+            raise
+        return SnapshotResult(stream.label, stream.channel, extracted_path)
+
+
+@dataclass(frozen=True, slots=True)
 class InspectionWorkflow:
     """Coordinate the minimum safe vertical slice without logging secrets."""
 
@@ -66,19 +104,12 @@ class InspectionWorkflow:
 
     def run(self) -> InspectionResult:
         """Acquire and analyze exactly one current frame."""
-        stream = self.gateway.stream()
-        snapshot_path = self.artifact_root / "snapshots" / _snapshot_name(stream.artifact_stem)
-        extracted_path = self.extractor.extract(
-            stream.live_url,
-            username=stream.username,
-            password=stream.password,
-            output_path=snapshot_path,
-        )
-        analysis = self.analyzer.analyze(extracted_path)
+        snapshot = SnapshotCapture(self.gateway, self.extractor, self.artifact_root).run()
+        analysis = self.analyzer.analyze(snapshot.snapshot_path)
         return InspectionResult(
-            label=stream.label,
-            channel=stream.channel,
-            snapshot_path=extracted_path,
+            label=snapshot.label,
+            channel=snapshot.channel,
+            snapshot_path=snapshot.snapshot_path,
             analysis=analysis,
         )
 

@@ -24,7 +24,6 @@ class FfmpegUnavailableError(RuntimeError):
         return "ffmpeg is required. Install it or set FFMPEG_PATH to its executable."
 
 
-@final
 @dataclass(frozen=True, slots=True)
 class FfmpegExtractionError(RuntimeError):
     """Raised for an ffmpeg failure without leaking RTSP connection details."""
@@ -33,6 +32,16 @@ class FfmpegExtractionError(RuntimeError):
     def __str__(self) -> str:
         """Return a redacted extraction error."""
         return "ffmpeg could not extract a frame from the selected camera."
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class FfmpegTimeoutError(FfmpegExtractionError):
+    """Raised when ffmpeg exceeds the bounded frame-capture timeout."""
+
+    @override
+    def __str__(self) -> str:
+        return "ffmpeg timed out while extracting a frame from the selected camera."
 
 
 FfmpegRunner = Callable[[tuple[str, ...]], subprocess.CompletedProcess[str]]
@@ -90,7 +99,9 @@ class FfmpegExtractor:
         )
         try:
             completed = self.runner(arguments)
-        except (OSError, subprocess.TimeoutExpired) as error:
+        except subprocess.TimeoutExpired as error:
+            raise FfmpegTimeoutError from error
+        except OSError as error:
             raise FfmpegExtractionError from error
         if completed.returncode != 0 or not output_path.is_file():
             raise FfmpegExtractionError

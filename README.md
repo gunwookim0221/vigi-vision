@@ -110,11 +110,17 @@ Analyze a bounded NVR recording (the start time is UTC):
 uv run vigi-vision analyze-recording --channel 1 --start "2026-07-20 12:00:00" --duration 30s --profile counter
 ```
 
+Capture one current NVR channel frame without OpenAI analysis:
+
+```text
+uv run --active vigi-vision snapshot --channel 1
+```
+
 ## Installation
 
 Install the project with `uv sync`, copy `.env.example` to `.env`, and set:
 
-- `OPENAI_API_KEY`
+- `OPENAI_API_KEY` for analysis commands (the `snapshot` command does not require it)
 - `VIGI_SOURCE=nvr` with `VIGI_HOST`, `VIGI_USERNAME`, and `VIGI_PASSWORD`; or
 - `VIGI_SOURCE=ipc` with `VIGI_IPC_HOST`, `VIGI_IPC_USERNAME`, and `VIGI_IPC_PASSWORD`
 - optionally `VIGI_PORT`, `VIGI_VERIFY_SSL`, `VIGI_CHANNEL_ID`, `VIGI_STREAM`, and `FFMPEG_PATH`
@@ -129,6 +135,12 @@ For NVR, list safe channel metadata first to choose `VIGI_CHANNEL_ID` when neede
 
 ```text
 uv run vigi-vision channels
+```
+
+`snapshot` is NVR-only, verifies that the requested channel is online, and saves a persistent JPEG under `artifacts/channel-snapshots/` using a channel-and-UTC-timestamp filename. It reuses the same SDK live-URL and ffmpeg one-frame capture boundary as `inspect`, and never invokes OpenAI.
+
+```text
+uv run --active vigi-vision snapshot --channel 1
 ```
 
 For a standalone IPC, set `VIGI_SOURCE=ipc`; `inspect` uses the public IPC RTSP builder and does not perform IPC OpenAPI authentication. A live inspection completes only when source validation, one-frame extraction, and OpenAI structured image analysis all succeed.
