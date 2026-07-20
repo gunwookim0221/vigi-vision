@@ -6,6 +6,12 @@ small. Read only the category relevant to the current task, and do not create a
 document until real implementation or a concrete decision gives it lasting
 content.
 
+Documentation maintenance is part of feature completion. After implementation,
+verify `PROJECT.md` and the relevant routed document remain synchronized with
+the code and current phase. Prefer updating an existing document; create a new
+one only for durable architectural knowledge. Change this router only when a
+documentation route is added, removed, or relocated.
+
 ## Directory purpose and routes
 
 - **Architecture — `architecture/`:** implemented system boundaries, component

@@ -10,6 +10,11 @@ project documentation. Follow its category routes rather than scanning every
 document. Create a document only when current implementation or a concrete
 decision needs a durable home.
 
+Treat [PROJECT.md](PROJECT.md) as a living charter. After implementation work,
+verify that it still describes the current phase, completed sessions, priorities,
+roadmap, repository boundaries, and project status; update it when any of those
+become stale. Completed work must not remain described as future work.
+
 ## Working rules
 
 - Deliver the smallest complete, observable MVP increment.
@@ -22,10 +27,11 @@ decision needs a durable home.
   gap, document a concrete change request under
   `docs/integrations/sdk-change-requests/`; do not work around the boundary by
   moving AI logic into the SDK.
-- Update `PROJECT.md` when project direction, phase, priorities, or boundaries
-  change.
-- Update routed documentation when an implemented architecture, integration,
-  durable decision, design contract, or submission requirement changes.
+- Treat documentation maintenance as part of feature completion: update
+  existing routed documentation when an implemented architecture, integration,
+  durable decision, design contract, or submission requirement changes; create
+  a new document only when the implementation produces durable knowledge.
+- Update `docs/README.md` only when documentation routes change.
 - Avoid placeholder documents and keep documentation links relative.
 - Do not commit or push unless the user explicitly requests it.
 
@@ -38,3 +44,4 @@ practical and report:
 - tests and validation performed;
 - known limitations and unverified assumptions;
 - remaining work that is required, without implementing unrelated next steps.
+- confirmation that PROJECT.md and relevant routed documentation remain current.

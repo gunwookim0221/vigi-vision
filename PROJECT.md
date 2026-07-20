@@ -32,15 +32,17 @@ camera data and receiving grounded, understandable results.
 
 ## Build Week objective
 
-Build Week should establish and then prove a narrow MVP through end-to-end
-increments. This foundation session creates the charter, working guide,
-documentation router, and Python project skeleton only.
+Build Week established and proved a narrow MVP through end-to-end increments.
+The foundation session created the charter, working guide, documentation router,
+and Python project skeleton; later sessions extended that foundation with the
+working capture, analysis, reporting, and recording-retrieval slices.
 
 ## Repository boundary
 
 This repository owns the AI application. The neighboring
-`tp-link-vigi-sdk` repository owns authentication, OpenAPI communication,
-camera interaction, snapshots, SDK tests, SDK documentation, and SDK CI.
+`tp-link-vigi-sdk` repository owns authentication, documented OpenAPI
+communication, camera and recording metadata access, stream URL construction,
+SDK tests, SDK documentation, and SDK CI.
 AI-specific logic must never be moved into the SDK.
 
 ## Success criteria
@@ -55,21 +57,20 @@ AI-specific logic must never be moved into the SDK.
 
 - Rebuilding or embedding the TP-Link VIGI SDK.
 - Enterprise architecture, broad provider frameworks, or speculative services.
-- Designing now for recording search, receipt OCR, timestamp matching, event
-  search, clip extraction, or multimodal investigation.
-- Product functionality during the foundation session.
+- Designing now for receipt OCR, timestamp matching, event search, or
+  multimodal investigation.
 
 ## Current phase
 
 Sessions 2–6B are complete. The First Working Slice has a typed CLI,
 public-SDK NVR and standalone-IPC RTSP adapters, a one-frame ffmpeg extraction
-boundary, and an OpenAI image-analysis boundary. Session 3 adds profile-based
+boundary, and an OpenAI image-analysis boundary. Session 3 added profile-based
 analysis of previously captured frames for counter, dining, and entrance tasks
-without changing the live capture pipeline. Session 4 adds explainable business
+without changing the live capture pipeline. Session 4 added explainable business
 reports from the same single structured model response; the structured analysis
-remains authoritative. Session 5 adds bounded local-MP4 analysis: a 30-second
+remains authoritative. Session 5 added bounded local-MP4 analysis: a 30-second
 cap, 2–10 ordered samples, one OpenAI request, temporary frame cleanup, and
-evidence-grounded temporal reports. Session 6B adds a reusable recording
+evidence-grounded temporal reports. Session 6B added a reusable recording
 retrieval layer that plans UTC replay from public SDK recording search results,
 extracts a bounded temporary MP4 with ffmpeg, and returns it without invoking
 OpenAI, video analysis, reports, or a public CLI.
@@ -84,10 +85,10 @@ OpenAI, video analysis, reports, or a public CLI.
 ## High-level roadmap
 
 1. **Foundation (complete):** establish the project harness and boundaries.
-2. **First Working Slice (next):** choose one user-visible workflow and its
-   acceptance checks.
-3. **Vertical implementation:** connect the CLI, AI workflow, and SDK in the
-   smallest working path.
+2. **First Working Slice (complete):** choose and prove one user-visible
+   workflow with its acceptance checks.
+3. **Vertical implementation (complete):** connect the CLI, AI workflow, and
+   SDK in the smallest working path.
 4. **Hardening:** improve tests, errors, documentation, and operability based on
    observed MVP needs.
 5. **Expansion:** consider additional investigation capabilities only after the
