@@ -61,24 +61,25 @@ AI-specific logic must never be moved into the SDK.
 
 ## Current phase
 
-Sessions 2, 3, 4, and 5 are complete. The First Working Slice has a
-typed CLI, public-SDK NVR and standalone-IPC RTSP adapters, a one-frame ffmpeg
-extraction boundary, and an OpenAI image-analysis boundary. Session 3 adds
-profile-based analysis of previously captured frames for counter, dining, and
-entrance tasks without changing the live capture pipeline. Session 4 adds
-explainable business reports from the same single structured model response;
-the structured analysis remains authoritative. Session 5 adds bounded local-MP4
-analysis: a 30-second cap, 2–10 ordered samples, one OpenAI request, temporary
-frame cleanup, and evidence-grounded temporal reports for counter, dining, and
-entrance profiles. Sparse samples remain insufficient for identity tracking,
-continuous activity, causal transactions, or claims about unsampled gaps.
+Sessions 2–6B are complete. The First Working Slice has a typed CLI,
+public-SDK NVR and standalone-IPC RTSP adapters, a one-frame ffmpeg extraction
+boundary, and an OpenAI image-analysis boundary. Session 3 adds profile-based
+analysis of previously captured frames for counter, dining, and entrance tasks
+without changing the live capture pipeline. Session 4 adds explainable business
+reports from the same single structured model response; the structured analysis
+remains authoritative. Session 5 adds bounded local-MP4 analysis: a 30-second
+cap, 2–10 ordered samples, one OpenAI request, temporary frame cleanup, and
+evidence-grounded temporal reports. Session 6B adds a reusable recording
+retrieval layer that plans UTC replay from public SDK recording search results,
+extracts a bounded temporary MP4 with ffmpeg, and returns it without invoking
+OpenAI, video analysis, reports, or a public CLI.
 
 ## Current priorities
 
 1. Preserve the public SDK / Vision ownership boundary in subsequent work.
 2. Retain the completed live inspection pipeline and profile registry baseline.
-3. Keep local-video temporal analysis bounded, private, and grounded in named
-   sampled frames.
+3. Keep temporary replay retrieval bounded, credential-safe, and independent
+   from the local-video analysis workflow until Session 7 connects them.
 
 ## High-level roadmap
 

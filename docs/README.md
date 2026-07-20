@@ -18,6 +18,8 @@ content.
   evidence-backed changes requested of the separate VIGI SDK.
   The live-stream capability request and its validation status are in
   [sdk-change-requests/live-rtsp-url-builder.md](integrations/sdk-change-requests/live-rtsp-url-builder.md).
+  The implemented NVR recording-retrieval boundary is in
+  [integrations/recording-retrieval.md](integrations/recording-retrieval.md).
 - **ADR — `adr/`:** durable decisions whose alternatives and consequences matter.
   Read when revisiting a recorded choice.
 - **Submission — `submission/`:** material required for an actual demo, review,
