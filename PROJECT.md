@@ -81,7 +81,11 @@ sampled frames. Session 8B added a pure, deterministic Investigation Plan
 contract: it converts the current Asia/Seoul product input to a canonical UTC
 anchor, expands validated scenario role rules over assigned NVR channels, and
 produces ordered existing `RecordingWindow` values without external I/O, media
-collection, or AI work.
+collection, or AI work. Session 8C added the typed Investigation Collection
+boundary, which processes every planned window independently through the
+existing recording search and replay extraction interfaces, preserves plan
+order, returns caller-owned successful replay clips, and isolates safe
+per-item failures without analysis or reporting.
 
 ## Current priorities
 
@@ -89,8 +93,8 @@ collection, or AI work.
 2. Retain the completed live inspection pipeline and profile registry baseline.
 3. Keep recording retrieval bounded and credential-safe while preserving its
    narrow boundary with the shared local-video analysis workflow.
-4. Preserve the pure Investigation Plan boundary while the next increment
-   composes its individual items with existing recording retrieval.
+4. Preserve the Investigation Plan and Collection boundaries while the next
+   increment decides how collected replay clips enter existing analysis.
 
 ## High-level roadmap
 

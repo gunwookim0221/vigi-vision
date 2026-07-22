@@ -54,9 +54,17 @@ entrance: profile entrance, -30s to +480s, required
 dining:   profile dining,  -300s to +300s, optional
 ```
 
-## Deferred work
+## Collection boundary
 
-The plan neither claims recording availability nor creates artifacts. A later
-collection boundary may process each item with the existing recording retrieval
-layer and report per-item partial success. That boundary owns replay clips,
-artifact manifests, and cleanup; analysis remains downstream of collection.
+The plan neither claims recording availability nor creates artifacts.
+`InvestigationCollector` now processes each item independently with the
+existing `RecordingPlanner` and `ReplayExtractor`. It returns ordered typed
+results with one of: success, recording unavailable, authentication failed,
+extraction failed, timeout, or unexpected error. A failure does not stop later
+items. Successful caller-owned `ReplayClip` objects are returned unchanged;
+the collector neither removes them nor creates directories or manifests.
+
+## Remaining work
+
+Analysis, report generation, artifact manifests, and cross-camera reasoning
+remain downstream of collection.
