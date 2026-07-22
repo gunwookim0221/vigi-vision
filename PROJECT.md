@@ -85,7 +85,11 @@ collection, or AI work. Session 8C added the typed Investigation Collection
 boundary, which processes every planned window independently through the
 existing recording search and replay extraction interfaces, preserves plan
 order, returns caller-owned successful replay clips, and isolates safe
-per-item failures without analysis or reporting.
+per-item failures without analysis or reporting. Session 8D added the typed
+Investigation Artifact boundary, which transfers successful replay clips into
+deterministic durable investigation packages, creates one local-MP4 anchor
+snapshot per clip with ffmpeg, writes a credential-free manifest, and leaves
+analysis, reports, and event reasoning downstream.
 
 ## Current priorities
 
@@ -93,8 +97,9 @@ per-item failures without analysis or reporting.
 2. Retain the completed live inspection pipeline and profile registry baseline.
 3. Keep recording retrieval bounded and credential-safe while preserving its
    narrow boundary with the shared local-video analysis workflow.
-4. Preserve the Investigation Plan and Collection boundaries while the next
-   increment decides how collected replay clips enter existing analysis.
+4. Preserve the Investigation Plan, Collection, and Artifact boundaries while
+   the next increment decides how investigation artifacts enter existing
+   analysis.
 
 ## High-level roadmap
 

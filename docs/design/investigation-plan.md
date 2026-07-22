@@ -64,7 +64,29 @@ extraction failed, timeout, or unexpected error. A failure does not stop later
 items. Successful caller-owned `ReplayClip` objects are returned unchanged;
 the collector neither removes them nor creates directories or manifests.
 
+## Artifact boundary
+
+`InvestigationArtifactBuilder` consumes one `CollectionResult` and creates a
+new deterministic directory named from the safe scenario ID and canonical UTC
+anchor. It transfers each successful temporary `ReplayClip` into a
+role-and-channel-derived MP4 filename, then uses ffmpeg on that local file to
+write exactly one JPEG at the anchor offset. It creates no replay URLs, never
+passes credentials to ffmpeg, and uses no AI or analysis services.
+
+The builder returns an `InvestigationResult` containing the source plan and
+collection result, a typed `InvestigationManifest`, and the artifact directory.
+The manifest preserves plan order and contains only investigation identifiers,
+scenario and time metadata, channel/role/profile/window metadata, collection
+status, artifact filenames, and safe status-derived failure guidance. It never
+stores credentials, URLs, hosts, ffmpeg command lines, or diagnostics.
+
+Successful clip ownership transfers at preservation: the temporary source is
+moved into the package before snapshot generation and is subsequently removed
+through the existing `ReplayClip.remove()` cleanup operation. Successful MP4
+and JPEG artifacts are durable and are not cleaned up. Failed collection items
+produce manifest entries but no media artifacts.
+
 ## Remaining work
 
-Analysis, report generation, artifact manifests, and cross-camera reasoning
-remain downstream of collection.
+Analysis, report generation, and cross-camera reasoning remain downstream of
+the artifact package.
