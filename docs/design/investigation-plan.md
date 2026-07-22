@@ -86,6 +86,20 @@ through the existing `ReplayClip.remove()` cleanup operation. Successful MP4
 and JPEG artifacts are durable and are not cleaned up. Failed collection items
 produce manifest entries but no media artifacts.
 
+## Investigation service
+
+`InvestigationService.execute` is the sole typed execution entry point for a
+validated `InvestigationRequest`. It calls the existing `InvestigationPlanner`
+once, sends its resulting `InvestigationPlan` to `InvestigationCollector` once,
+then sends that `CollectionResult` unchanged to `InvestigationArtifactBuilder`
+once. It returns the builder's `InvestigationResult` unchanged.
+
+Planning failures stop execution before collection. Collection remains
+responsible for isolated per-item failures and may therefore return partial
+success. Artifact failures propagate through the service using the existing
+artifact error contract. The service parses no CLI/API input and has no media,
+AI, report, event-reasoning, or storage-policy behavior.
+
 ## Remaining work
 
 Analysis, report generation, and cross-camera reasoning remain downstream of

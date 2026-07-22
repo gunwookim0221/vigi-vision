@@ -89,7 +89,10 @@ per-item failures without analysis or reporting. Session 8D added the typed
 Investigation Artifact boundary, which transfers successful replay clips into
 deterministic durable investigation packages, creates one local-MP4 anchor
 snapshot per clip with ffmpeg, writes a credential-free manifest, and leaves
-analysis, reports, and event reasoning downstream.
+analysis, reports, and event reasoning downstream. Session 8E added
+`InvestigationService`, the single typed orchestration entry point that invokes
+the existing planner, collector, and artifact builder once each without adding
+media, AI, reporting, or storage behavior.
 
 ## Current priorities
 
@@ -97,9 +100,9 @@ analysis, reports, and event reasoning downstream.
 2. Retain the completed live inspection pipeline and profile registry baseline.
 3. Keep recording retrieval bounded and credential-safe while preserving its
    narrow boundary with the shared local-video analysis workflow.
-4. Preserve the Investigation Plan, Collection, and Artifact boundaries while
-   the next increment decides how investigation artifacts enter existing
-   analysis.
+4. Preserve the Investigation Service and its Plan, Collection, and Artifact
+   boundaries while the next increment decides how completed investigation
+   artifacts enter existing analysis.
 
 ## High-level roadmap
 
