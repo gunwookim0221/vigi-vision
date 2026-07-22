@@ -13,6 +13,7 @@ from vigi_vision.investigation_collection import (
     CollectionResult,
     CollectionStatus,
 )
+from vigi_vision.investigation_progress import InvestigationStage
 from vigi_vision.investigation_snapshot import AnchorSnapshotError, FfmpegAnchorSnapshotExtractor
 from vigi_vision.recording import RecordingWindow
 from vigi_vision.replay import ReplayClip
@@ -87,10 +88,13 @@ def test_builder_preserves_replays_generates_anchor_snapshots_and_writes_safe_ma
     plan = _plan(item)
     clip = _clip(item, tmp_path / "temporary-counter.mp4")
     snapshots = StubAnchorSnapshotExtractor()
+    progress: list[InvestigationStage] = []
     collection = _collection_result(plan, {1: clip})
 
     # When
-    result = InvestigationArtifactBuilder(tmp_path / "artifacts", snapshots).build(collection)
+    result = InvestigationArtifactBuilder(tmp_path / "artifacts", snapshots, progress.append).build(
+        collection
+    )
 
     # Then
     assert result.artifact_directory == (
@@ -120,6 +124,11 @@ def test_builder_preserves_replays_generates_anchor_snapshots_and_writes_safe_ma
     assert "secret" not in manifest_text
     assert "rtsp://" not in manifest_text
     assert "nvr.example.test" not in manifest_text
+    assert progress == [
+        InvestigationStage.MP4_PRESERVATION,
+        InvestigationStage.ANCHOR_SNAPSHOT,
+        InvestigationStage.MANIFEST_WRITING,
+    ]
 
 
 def test_builder_omits_failed_collection_items_from_artifacts_and_preserves_order(
@@ -239,3 +248,32 @@ def test_ffmpeg_anchor_snapshot_extractor_removes_a_partial_jpeg_on_failure(tmp_
             video_path, 60, output_path
         )
     assert not output_path.exists()
+
+
+def test_builder_removes_only_new_artifacts_after_snapshot_failure(tmp_path: Path) -> None:
+    # Given
+    item = _item(1, "counter", -60)
+    plan = _plan(item)
+    temporary_path = tmp_path / "temporary-counter.mp4"
+    clip = _clip(item, temporary_path)
+
+    class FailingSnapshotExtractor:
+        def extract(self, video_path: Path, anchor_offset_seconds: int, output_path: Path) -> Path:
+            _ = (video_path, anchor_offset_seconds)
+            _ = output_path.write_bytes(b"partial jpeg")
+            raise AnchorSnapshotError
+
+    collection = _collection_result(plan, {1: clip})
+    artifact_root = tmp_path / "artifacts"
+    preexisting_file = tmp_path / "keep.txt"
+    _ = preexisting_file.write_bytes(b"keep")
+
+    # When / Then
+    with pytest.raises(AnchorSnapshotError):
+        _ = InvestigationArtifactBuilder(artifact_root, FailingSnapshotExtractor()).build(
+            collection
+        )
+    artifact_directory = artifact_root / "restaurant-checkout-20260720T030000Z"
+    assert not artifact_directory.exists()
+    assert not temporary_path.exists()
+    assert preexisting_file.read_bytes() == b"keep"

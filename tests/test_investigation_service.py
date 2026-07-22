@@ -26,6 +26,7 @@ from vigi_vision.investigation_collection import (
     CollectionStatus,
 )
 from vigi_vision.investigation_manifest import InvestigationManifest
+from vigi_vision.investigation_progress import InvestigationStage
 from vigi_vision.investigation_service import InvestigationRequest, InvestigationService
 from vigi_vision.recording import RecordingWindow
 from vigi_vision.replay import ReplayClip
@@ -183,9 +184,12 @@ def test_service_orchestrates_each_existing_boundary_once_in_order() -> None:
     planner = StubPlanner(plan, events)
     collector = StubCollector(collection, events)
     artifacts = StubArtifactBuilder(expected, events)
+    progress: list[InvestigationStage] = []
 
     # When
-    result = InvestigationService(planner, collector, artifacts).execute(_request())
+    result = InvestigationService(planner, collector, artifacts, progress.append).execute(
+        _request()
+    )
 
     # Then
     assert result is expected
@@ -198,6 +202,11 @@ def test_service_orchestrates_each_existing_boundary_once_in_order() -> None:
     )
     assert collector.received is plan
     assert artifacts.received is collection
+    assert progress == [
+        InvestigationStage.PLANNING,
+        InvestigationStage.COLLECTION,
+        InvestigationStage.ARTIFACT_PACKAGE,
+    ]
 
 
 def test_service_returns_planner_failures_without_collecting_or_building() -> None:

@@ -8,7 +8,7 @@
 
 VIGI Vision is an AI-powered business video analysis system that transforms CCTV images and short videos into structured, explainable business reports.
 
-It can inspect a live RTSP source, analyze a previously captured image, analyze a short local video, or retrieve and analyze a bounded NVR recording using profile-aware analysis designed for different business environments.
+It can inspect a live RTSP source, analyze a previously captured image, analyze a short local video, retrieve and analyze a bounded NVR recording, or collect a configured multi-camera investigation package using profile-aware analysis designed for different business environments.
 
 Rather than describe every visible object in a scene, VIGI Vision applies a selected business profile to focus its analysis on the operational questions relevant to that location. Its reports separate observable evidence, estimates, possible events, recommendations, and limitations.
 
@@ -30,6 +30,7 @@ VIGI Vision uses profile-aware prompts and strict structured schemas to produce 
 - **Image analysis** evaluates a previously captured camera frame without connecting to a live camera.
 - **Short-video temporal analysis** samples 2–10 evenly spaced frames from a local MP4 of 30 seconds or less in one OpenAI request.
 - **NVR recording analysis** retrieves one bounded replay clip through the public SDK, analyzes it through the same temporal workflow, then removes the temporary MP4.
+- **Multi-camera investigation** collects the current restaurant-checkout deployment into a durable, credential-free artifact package with replay clips, anchor snapshots, and a manifest.
 - **Profile-aware business analysis** uses a dedicated prompt and strict schema for each supported business context.
 - **Explainable reports** distinguish observable evidence, estimates, possible events, recommendations, unknowns, and limitations.
 - **Structured JSON output** keeps the analysis result as the source of truth.
@@ -116,6 +117,12 @@ Capture one current NVR channel frame without OpenAI analysis:
 uv run --active vigi-vision snapshot --channel 1
 ```
 
+Collect the current restaurant-checkout investigation package (the supplied time is Asia/Seoul):
+
+```text
+uv run --active vigi-vision investigate --scenario restaurant-checkout --time "2026-07-20 12:34:18"
+```
+
 ## Installation
 
 Install the project with `uv sync`, copy `.env.example` to `.env`, and set:
@@ -141,6 +148,12 @@ uv run vigi-vision channels
 
 ```text
 uv run --active vigi-vision snapshot --channel 1
+```
+
+`investigate` is NVR-only and currently supports the fixed `restaurant-checkout` deployment: channel 1 is counter, channel 2 is entrance, and channel 3 is dining. It parses `--time` as `Asia/Seoul`, invokes the shared investigation service, and prints the resulting package path under `artifacts/investigations/`. Collection failures remain visible as a warning while successfully collected artifacts and the manifest are retained. The command requires no OpenAI API key and never prints replay URLs, credentials, hosts, temporary paths, or ffmpeg arguments.
+
+```text
+uv run --active vigi-vision investigate --scenario restaurant-checkout --time "2026-07-20 12:34:18"
 ```
 
 For a standalone IPC, set `VIGI_SOURCE=ipc`; `inspect` uses the public IPC RTSP builder and does not perform IPC OpenAPI authentication. A live inspection completes only when source validation, one-frame extraction, and OpenAI structured image analysis all succeed.

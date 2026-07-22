@@ -92,7 +92,10 @@ snapshot per clip with ffmpeg, writes a credential-free manifest, and leaves
 analysis, reports, and event reasoning downstream. Session 8E added
 `InvestigationService`, the single typed orchestration entry point that invokes
 the existing planner, collector, and artifact builder once each without adding
-media, AI, reporting, or storage behavior.
+media, AI, reporting, or storage behavior. Session 9A exposed that completed
+workflow through the public `investigate` CLI command for the current fixed
+restaurant-checkout deployment, preserving the service as the sole execution
+path and keeping output credential-safe.
 
 ## Current priorities
 
@@ -100,9 +103,9 @@ media, AI, reporting, or storage behavior.
 2. Retain the completed live inspection pipeline and profile registry baseline.
 3. Keep recording retrieval bounded and credential-safe while preserving its
    narrow boundary with the shared local-video analysis workflow.
-4. Preserve the Investigation Service and its Plan, Collection, and Artifact
-   boundaries while the next increment decides how completed investigation
-   artifacts enter existing analysis.
+4. Preserve the public investigation CLI and Investigation Service with their
+   Plan, Collection, and Artifact boundaries while the next increment decides
+   how completed investigation artifacts enter existing analysis.
 
 ## High-level roadmap
 

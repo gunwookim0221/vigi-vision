@@ -1,5 +1,6 @@
 """Durable, secret-safe investigation artifacts from collected replay clips."""
 
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, final
@@ -17,6 +18,7 @@ from vigi_vision.investigation_manifest import (
     ManifestItem,
     ManifestRecordingWindow,
 )
+from vigi_vision.investigation_progress import InvestigationStage, ProgressReporter
 from vigi_vision.investigation_snapshot import AnchorSnapshotBoundary, AnchorSnapshotError
 from vigi_vision.replay import ReplayClip
 
@@ -54,25 +56,35 @@ class InvestigationArtifactBuilder:
 
     artifact_root: Path
     snapshot_extractor: AnchorSnapshotBoundary
+    progress: ProgressReporter | None = None
 
     def build(self, collection_result: CollectionResult) -> InvestigationResult:
         """Create one deterministic durable package from ordered collection outcomes."""
         plan = collection_result.investigation_plan
         investigation_id = _investigation_id(plan)
         artifact_directory = self.artifact_root / investigation_id
-        artifact_directory.mkdir(parents=True, exist_ok=False)
-        manifest_items = tuple(
-            self._build_item(item, plan, artifact_directory) for item in collection_result.items
-        )
-        manifest = InvestigationManifest(
-            investigation_id,
-            plan.scenario_id,
-            plan.anchor_time.anchor_utc,
-            plan.anchor_time.source_timezone,
-            manifest_items,
-        )
-        manifest.write(artifact_directory / _MANIFEST_FILENAME)
-        return InvestigationResult(plan, collection_result, manifest, artifact_directory)
+        created_directory = False
+        try:
+            artifact_directory.mkdir(parents=True, exist_ok=False)
+            created_directory = True
+            manifest_items = tuple(
+                self._build_item(item, plan, artifact_directory) for item in collection_result.items
+            )
+            manifest = InvestigationManifest(
+                investigation_id,
+                plan.scenario_id,
+                plan.anchor_time.anchor_utc,
+                plan.anchor_time.source_timezone,
+                manifest_items,
+            )
+            self._report(InvestigationStage.MANIFEST_WRITING)
+            manifest.write(artifact_directory / _MANIFEST_FILENAME)
+            return InvestigationResult(plan, collection_result, manifest, artifact_directory)
+        except Exception:  # noqa: BROAD_EXCEPT_OK, BLE001 — cleanup covers every build boundary.
+            _remove_replay_clips(collection_result)
+            if created_directory:
+                shutil.rmtree(artifact_directory)
+            raise
 
     def _build_item(
         self,
@@ -92,10 +104,12 @@ class InvestigationArtifactBuilder:
                     raise InvestigationArtifactError(_INVALID_COLLECTION_RESULT)
                 video_filename = _video_filename(item)
                 video_path = artifact_directory / video_filename
-                _ = replay_clip.temporary_mp4_path.rename(video_path)
+                self._report(InvestigationStage.MP4_PRESERVATION)
+                _ = shutil.move(replay_clip.temporary_mp4_path, video_path)
                 snapshot_filename = _snapshot_filename(item)
                 snapshot_path = artifact_directory / snapshot_filename
                 try:
+                    self._report(InvestigationStage.ANCHOR_SNAPSHOT)
                     _ = self.snapshot_extractor.extract(
                         video_path,
                         _anchor_offset_seconds(replay_clip, plan),
@@ -134,6 +148,10 @@ class InvestigationArtifactBuilder:
                     None,
                     _safe_failure_reason(collection_item.collection_status),
                 )
+
+    def _report(self, stage: InvestigationStage) -> None:
+        if self.progress is not None:
+            self.progress(stage)
 
 
 def _plan_item(plan: InvestigationPlan, item_id: str) -> InvestigationItem:
@@ -177,3 +195,9 @@ def _safe_failure_reason(status: CollectionStatus) -> str:
             return "Replay extraction timed out."
         case CollectionStatus.UNEXPECTED_ERROR:
             return "Collection failure details were redacted."
+
+
+def _remove_replay_clips(collection_result: CollectionResult) -> None:
+    for item in collection_result.items:
+        if item.replay_clip is not None:
+            item.replay_clip.remove()

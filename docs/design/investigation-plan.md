@@ -86,6 +86,11 @@ through the existing `ReplayClip.remove()` cleanup operation. Successful MP4
 and JPEG artifacts are durable and are not cleaned up. Failed collection items
 produce manifest entries but no media artifacts.
 
+If package construction fails after this invocation creates the deterministic
+directory, the artifact boundary removes that directory and any replay clips
+still owned by the failed invocation. An existing directory conflict is never
+removed; only invocation-owned replay temporary files are cleaned in that case.
+
 ## Investigation service
 
 `InvestigationService.execute` is the sole typed execution entry point for a

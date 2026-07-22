@@ -1,6 +1,5 @@
 """Terminal interface for the first VIGI Vision inspection slice."""
 
-import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, final
@@ -12,6 +11,7 @@ from typing_extensions import override
 
 from vigi_vision.analysis import AnalysisRequestError, AnalysisResponseError, OpenAiAnalyzer
 from vigi_vision.channel_selection import Channel, ChannelSelectionError, format_channels
+from vigi_vision.cli_output import print_observations, print_section
 from vigi_vision.config import Settings, load_settings
 from vigi_vision.ffmpeg import (
     FfmpegExtractionError,
@@ -20,6 +20,7 @@ from vigi_vision.ffmpeg import (
     resolve_ffmpeg,
 )
 from vigi_vision.gateway import select_source_gateway
+from vigi_vision.investigate_cli import investigate
 from vigi_vision.nvr import NvrRequestError, SdkNvrGateway
 from vigi_vision.profiles import (
     ProfileAnalysis,
@@ -39,6 +40,7 @@ app = typer.Typer(add_completion=False, no_args_is_help=True)
 _console = Console()
 _ = app.command(name="analyze-video")(analyze_video)
 _ = app.command(name="analyze-recording")(analyze_recording)
+_ = app.command(name="investigate")(investigate)
 _ = app.command(name="snapshot")(snapshot)
 
 
@@ -180,40 +182,14 @@ def _print_profile_report(
 
 
 def _print_section(title: str, value: str) -> None:
-    _console.print(title, markup=False)
-    _console.print("-" * len(title), markup=False)
-    for line in _wrapped_lines(value):
-        _console.print(line, markup=False)
-    _console.print()
+    print_section(_console, title, value)
 
 
 def _print_observations(title: str, observations: tuple[str, ...]) -> None:
-    _console.print(title, markup=False)
-    _console.print("-" * len(title), markup=False)
-    if observations:
-        for observation in observations:
-            lines = _wrapped_lines(observation)
-            _console.print(f"• {lines[0]}", markup=False)
-            for line in lines[1:]:
-                _console.print(f"  {line}", markup=False)
-    else:
-        _console.print("Not available", markup=False)
-    _console.print()
+    print_observations(_console, title, observations)
 
 
 def _format_profile_value(value: ProfileValue) -> str:
     if isinstance(value, bool):
         return "Yes" if value else "No"
     return str(value)
-
-
-def _wrapped_lines(value: str) -> tuple[str, ...]:
-    cleaned = value.strip() or "Not available"
-    return tuple(
-        textwrap.wrap(
-            cleaned,
-            width=96,
-            break_long_words=False,
-            break_on_hyphens=False,
-        )
-    )
