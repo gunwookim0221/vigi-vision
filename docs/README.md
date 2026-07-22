@@ -18,7 +18,9 @@ documentation route is added, removed, or relocated.
   relationships, and runtime data flow. Read when changing cross-component
   structure.
 - **Design — `design/`:** user-visible behavior, workflows, and concrete feature
-  contracts. Read when implementing or revising a product experience.
+  contracts. Read when implementing or revising a product experience. The
+  implemented pure multi-camera planning contract is in
+  [design/investigation-plan.md](design/investigation-plan.md).
 - **Integrations — `integrations/`:** contracts and operating notes for external
   systems. Use `integrations/sdk-change-requests/` only for specific,
   evidence-backed changes requested of the separate VIGI SDK.
