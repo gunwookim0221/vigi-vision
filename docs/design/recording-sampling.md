@@ -2,9 +2,10 @@
 
 ## Status
 
-This is a planned design contract for `sample-recording`. It describes a
-future VIGI Vision command; it does not describe an implemented command or
-guarantee that the current SDK can supply every desired range.
+`sample-recording` is implemented as the first generic, bounded NVR
+frame-sampling command. It does not guarantee that an NVR has coverage for a
+requested range or that ffmpeg decodes an exact source frame at every requested
+second.
 
 ## Problem statement
 
@@ -49,41 +50,38 @@ semantic or visual search.
    final artifact directory. No OpenAI call, profile, report, or conclusion is
    produced.
 
-## Planned CLI contract
+## CLI contract
 
-The planned surface is:
+The implemented surface is:
 
 ```powershell
 vigi-vision sample-recording `
   --channel 3 `
   --start "2026-07-26 18:00:00" `
-  --timezone Asia/Seoul `
   --duration 2h `
-  --interval 5s `
-  --chunk-duration 10m `
-  --output-dir artifacts/recording-samples
+  --interval 5s
 ```
 
-| Input | Planned contract |
+| Input | Implemented contract |
 | --- | --- |
 | `--channel` | Required positive NVR channel ID. |
 | `--start` | Required naive wall-clock timestamp in `YYYY-MM-DD HH:MM:SS`; it is not UTC unless `--timezone UTC` is supplied. |
-| `--timezone` | Required IANA source timezone for `--start`, for example `Asia/Seoul`. It avoids the ambiguity between the existing UTC recording command and the Asia/Seoul investigation command. |
-| `--duration` | Required positive whole-second duration. The planned grammar is an integer plus `s`, `m`, or `h` (`5s`, `10m`, `2h`). |
-| `--interval` | Required positive whole-second cadence using the same grammar. Samples are anchored at requested UTC start, never reset at a segment or chunk boundary. |
-| `--chunk-duration` | Required positive whole-second bound using the same grammar. It limits one replay extraction; it must be at least the interval. No default is finalized because the repository contains no evidence for a safe long-replay default. |
-| `--output-dir` | Required or defaulted by implementation only after an explicit product decision. The intended parent is `artifacts/recording-samples/`, consistent with existing durable artifact roots. |
+| `--timezone` | Optional source timezone for `--start`; default `Asia/Seoul`. Version 1 supports the project-established `Asia/Seoul` and `UTC` values only because the runtime has no bundled general IANA timezone database. |
+| `--duration` | Required positive whole-second duration using an integer plus `s`, `m`, or `h` (`5s`, `10m`, `2h`). |
+| `--interval` | Required positive whole-second cadence using the same grammar. Samples are anchored at requested UTC start and never reset at a segment or chunk boundary. |
+| `--chunk-duration` | Optional positive whole-second bound using the same grammar; default `10m`. It must be at least the interval. Ten minutes is the conservative initial cap used by the documented invocation and keeps each replay extraction bounded. |
+| `--output-dir` | Optional artifact parent; default `artifacts/recording-samples/`, consistent with existing durable artifact roots. |
 
-The command is NVR-only and must reject an IPC source before SDK or ffmpeg work.
-It must not accept a profile or any OpenAI option. The duration grammar above is
-planned; the current `analyze-recording` command accepts only whole seconds
-ending in `s`, so its parser cannot be reused without an intentional change.
+The command is NVR-only and rejects an IPC source before SDK or ffmpeg work.
+It must not accept a profile or any OpenAI option. `analyze-recording` still
+accepts only whole seconds ending in `s`; sampling intentionally owns its
+extended duration parser.
 
 ## Input validation
 
-- Parse the source timestamp and IANA timezone at the CLI boundary, then create
-  a canonical whole-second UTC range. Reject nonexistent or ambiguous local
-  times rather than silently selecting an offset.
+- Parse the source timestamp and supported source timezone at the CLI boundary,
+  then create a canonical whole-second UTC range. The supported v1 zones have
+  no daylight-saving ambiguity.
 - Require positive channel, duration, interval, and chunk duration values.
 - Require `chunk-duration >= interval`; reject a range whose arithmetic would
   exceed the implementation's documented operational limit, if one is added.
@@ -94,7 +92,7 @@ ending in `s`, so its parser cannot be reused without an intentional change.
 
 ## Recording planning and segmentation
 
-VIGI Vision will use the same public SDK boundary already used by the recording
+VIGI Vision uses the same public SDK boundary already used by the recording
 retrieval layer: NVR-local recording-day discovery, public recording-result
 pages, epoch-second segment conversion, and public credential-free replay-URL
 construction. Existing behavior establishes that the configured NVR recording
@@ -102,7 +100,7 @@ calendar is Asia/Seoul and SDK segment timestamps are Unix epoch seconds;
 sampling must retain the requested source timezone separately from canonical
 UTC facts.
 
-The planner must enumerate every segment intersecting the requested UTC range,
+`SamplingCoverageResolver` enumerates every segment intersecting the requested UTC range,
 normalize them to UTC, and create a coverage map. It must not rely on the
 current `RecordingPlanner.plan()` result alone, because that boundary returns
 the first overlapping segment for one requested window.
@@ -126,16 +124,15 @@ implementation can prove they form continuous coverage.
 
 ## Chunked frame extraction flow
 
-For each planned chunk, VIGI Vision will obtain a bounded temporary replay MP4
+For each planned chunk, VIGI Vision obtains a bounded temporary replay MP4
 through the existing public-SDK replay path, then run ffmpeg against that local
 file to extract only the scheduled frames for the chunk. The temporary MP4 is
 removed after its frames and chunk metadata have been handled. A temporary
 frame file is renamed into the package only after successful extraction.
 
-The extraction plan must preserve the scheduled UTC timestamp for each frame;
-ffmpeg seek precision is an observed extraction fact and belongs in metadata if
-it differs from the requested schedule. The initial implementation need not
-deduplicate visual frames or reduce their resolution.
+The implementation preserves the scheduled UTC timestamp for each frame. It
+does not determine decoded presentation timestamps, so the manifest records the
+requested source timestamp rather than claiming exact ffmpeg seek accuracy.
 
 ## Output directory and artifacts
 
@@ -149,12 +146,10 @@ artifacts/recording-samples/
     frames/
       20260726T090000Z.jpg
       20260726T090005Z.jpg
-    chunks/
-      0001.json
 ```
 
-The exact directory spelling is proposed rather than frozen, but final names
-must be deterministic, filesystem-safe, and credential-free. Chunks are
+The implemented final directory name is
+`channel-<channel>_<start-utc>_<end-utc>`. Chunks are
 processed in an invocation-owned staging directory beside the final package.
 On complete success it is atomically promoted where the filesystem permits.
 Existing final paths are an error and are never overwritten.
@@ -170,14 +165,12 @@ Existing final paths are an error and are never overwritten.
 - every planned chunk with UTC bounds, source segment bounds, status, frame
   count, and a safe error category when applicable;
 - every requested timestamp with status (`written`, `skipped_gap`, or failed
-  extraction), frame relative path when written, and its preserved UTC source
-  timestamp;
+  extraction), frame relative path when written, its preserved UTC source
+  timestamp, and its containing source-coverage interval when covered;
 - coverage gaps and totals for requested, written, skipped, and failed frames;
-- tool/version fields that enable later inspection without exposing command
-  arguments, URLs, hosts, credentials, or ffmpeg stderr.
+- no replay URLs, hosts, credentials, ffmpeg command lines, or stderr.
 
-Per-chunk JSON may mirror the chunk entry for interruption-tolerant progress,
-but the manifest remains the authoritative package index. This is sufficient
+The manifest remains the authoritative package index. This is sufficient
 for inspection of a partial package; it does not promise resume support. A
 later implementation may add resumability only after it defines how it verifies
 manifest compatibility and completed frame integrity.
@@ -185,23 +178,22 @@ manifest compatibility and completed frame integrity.
 ## Timestamp and timezone handling
 
 The command retains three distinct facts: the user-entered wall-clock start and
-IANA source timezone, the canonical UTC range used for SDK and replay planning,
+supported source timezone, the canonical UTC range used for SDK and replay planning,
 and each SDK segment's epoch-second endpoints converted to UTC. Frame names use
 UTC. The manifest preserves both the source-time representation and UTC values.
 No local machine timezone may influence parsing, directory names, or sampling.
 
 ## Progress reporting
 
-The command should report safe aggregate progress: validated request, recording
-coverage discovered, `chunk X/Y`, frames written versus scheduled, and final
-package state. It must not print replay URLs, NVR hosts, credentials, ffmpeg
-arguments, or temporary paths. Gaps and partial failures must be summarized by
-UTC range and safe category.
+The command reports safe `chunk X/Y` progress and a final package directory,
+status, written-frame count, and skipped-frame count. It does not print replay
+URLs, NVR hosts, credentials, ffmpeg arguments, or temporary paths. Gaps are
+visible through the final `completed_with_gaps` status and warning.
 
 ## Interruption, failure, and cleanup
 
-- **User cancellation:** stop scheduling new chunks, terminate the active
-  ffmpeg process, remove its incomplete temporary MP4 and frame, write a
+- **User cancellation:** stop scheduling new chunks, remove the current replay
+  MP4 through its existing cleanup boundary, write a
   credential-free `cancelled` manifest when possible, and preserve already
   completed frames in a clearly marked partial package.
 - **ffmpeg failure:** remove the incomplete temporary files for that chunk,
@@ -219,8 +211,8 @@ UTC range and safe category.
 - **Existing output path:** fail without writing into, deleting, or renaming
   the existing path.
 
-Partial packages must use a deterministic safe base name plus an
-invocation-unique `-partial` suffix to avoid overwriting another failed run.
+Partial packages use a deterministic safe base name plus an invocation-unique
+`-partial` suffix to avoid overwriting another failed run.
 Only files created by the active invocation may be removed during cleanup.
 
 ## Credential and URL security
@@ -244,20 +236,16 @@ prohibition on a separately justified SDK enhancement.
 
 ## Test strategy
 
-- Unit-test duration/timezone parsing, whole-second schedule generation, UTC
-  conversion, segment-to-coverage planning, chunk boundaries, gap handling,
-  naming, manifest serialization, and redaction.
-- Use public-SDK-shaped fakes to test multi-segment planning, no coverage,
-  overlapping segments, and SDK data errors without NVR access.
-- Test ffmpeg orchestration with a narrow runner seam: extraction failure,
-  cancellation, cleanup ownership, and no sensitive values in surfaced errors.
-- Add CLI tests for required options, NVR-only rejection, progress summaries,
-  existing-output refusal, and final versus partial package observable state.
-- Add a controlled end-to-end fixture with local media or a recorded public
-  contract fixture to prove bounded chunk extraction and timestamps without
-  requiring a real NVR in the normal test suite.
+- Automated tests cover duration/timezone parsing, stable source-anchored
+  schedules, chunk boundaries, gaps, duplicate-boundary prevention, help,
+  package naming, manifest redaction, existing-output refusal, missing coverage,
+  frame failure cleanup, and cancellation partial packages.
+- Tests use public-SDK-shaped and ffmpeg-shaped fakes. They do not require a
+  real camera or NVR.
+- A future controlled local-media fixture can measure actual decoded timestamp
+  accuracy without requiring a real NVR in the normal test suite.
 
-## Acceptance criteria for the first implementation
+## Acceptance criteria for this implementation
 
 1. A valid NVR range is resolved through public SDK recording information.
 2. Work is split into bounded chunks that do not cross unsupported coverage.
@@ -271,10 +259,10 @@ prohibition on a separately justified SDK enhancement.
 7. No OpenAI request, profile analysis, report, event conclusion, or SDK
    modification occurs.
 
-## Scope boundary for the first implementation
+## Implemented scope boundary
 
-The first coding session implements range resolution, bounded chunk planning,
-interval frame extraction, timestamp preservation, structured artifacts,
+This implementation covers range resolution, bounded chunk planning, interval
+frame extraction, requested timestamp preservation, structured artifacts,
 progress, and safe partial cleanup only. It stops before every capability listed
 under Non-goals.
 

@@ -30,6 +30,7 @@ VIGI Vision uses profile-aware prompts and strict structured schemas to produce 
 - **Image analysis** evaluates a previously captured camera frame without connecting to a live camera.
 - **Short-video temporal analysis** samples 2–10 evenly spaced frames from a local MP4 of 30 seconds or less in one OpenAI request.
 - **NVR recording analysis** retrieves one bounded replay clip through the public SDK, analyzes it through the same temporal workflow, then removes the temporary MP4.
+- **Recording frame sampling** collects timestamped JPEGs from a long NVR range in bounded replay chunks without analysis or OpenAI calls.
 - **Multi-camera investigation** collects the current restaurant-checkout deployment into a durable, credential-free artifact package with replay clips, anchor snapshots, and a manifest.
 - **Profile-aware business analysis** uses a dedicated prompt and strict schema for each supported business context.
 - **Explainable reports** distinguish observable evidence, estimates, possible events, recommendations, unknowns, and limitations.
@@ -111,6 +112,12 @@ Analyze a bounded NVR recording (the start time is UTC):
 uv run vigi-vision analyze-recording --channel 1 --start "2026-07-20 12:00:00" --duration 30s --profile counter
 ```
 
+Sample a longer NVR range as generic timestamped frames (the default source time is Asia/Seoul):
+
+```text
+uv run --active vigi-vision sample-recording --channel 3 --start "2026-07-26 18:00:00" --duration 2h --interval 5s
+```
+
 Capture one current NVR channel frame without OpenAI analysis:
 
 ```text
@@ -178,6 +185,13 @@ NVR recording analysis is available only with `VIGI_SOURCE=nvr`. It searches the
 
 ```text
 uv run vigi-vision analyze-recording --channel 1 --start "2026-07-20 12:00:00" --duration 30s --profile counter
+```
+
+`sample-recording` is NVR-only and does not call OpenAI. It interprets `--start` in `Asia/Seoul` by default; `--timezone UTC` is also supported. Durations accept positive whole seconds, minutes, or hours such as `5s`, `10m`, and `2h`. The default `--chunk-duration` is `10m`, which bounds each replay download; `--output-dir` defaults to `artifacts/recording-samples/`. The command writes timestamped JPEGs and a credential-free manifest. Gaps are recorded as skipped samples, existing complete package paths are never overwritten, and a failure after progress preserves a clearly named partial package for inspection.
+
+```text
+uv run --active vigi-vision sample-recording --channel 3 --start "2026-07-26 18:00:00" --duration 2h --interval 5s
+uv run --active vigi-vision sample-recording --channel 3 --start "2026-07-26 09:00:00" --timezone UTC --duration 2h --interval 5s --chunk-duration 5m --output-dir artifacts/recording-samples
 ```
 
 ## Safety & Limitations
