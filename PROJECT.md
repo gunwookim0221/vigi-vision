@@ -95,7 +95,12 @@ the existing planner, collector, and artifact builder once each without adding
 media, AI, reporting, or storage behavior. Session 9A exposed that completed
 workflow through the public `investigate` CLI command for the current fixed
 restaurant-checkout deployment, preserving the service as the sole execution
-path and keeping output credential-safe.
+path and keeping output credential-safe. Session 10 added the public NVR-only
+`sample-recording` command: it resolves public-SDK recording coverage for a
+source-time range, processes bounded replay chunks, writes generic timestamped
+JPEGs and a credential-free manifest, records gaps, and preserves inspectable
+partial artifacts on safe failures without OpenAI, semantic search, or SDK
+changes.
 
 ## Current priorities
 

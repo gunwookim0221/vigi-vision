@@ -32,6 +32,7 @@ from vigi_vision.profiles import (
     resolve_profile_alias,
 )
 from vigi_vision.recording_cli import analyze_recording
+from vigi_vision.sampling_cli import sample_recording
 from vigi_vision.snapshot_cli import snapshot
 from vigi_vision.video_cli import analyze_video
 from vigi_vision.workflow import InspectionResult, InspectionWorkflow
@@ -42,6 +43,7 @@ _ = app.command(name="analyze-video")(analyze_video)
 _ = app.command(name="analyze-recording")(analyze_recording)
 _ = app.command(name="investigate")(investigate)
 _ = app.command(name="snapshot")(snapshot)
+_ = app.command(name="sample-recording")(sample_recording)
 
 
 @final
