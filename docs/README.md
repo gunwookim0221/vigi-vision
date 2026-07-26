@@ -20,7 +20,10 @@ documentation route is added, removed, or relocated.
 - **Design — `design/`:** user-visible behavior, workflows, and concrete feature
   contracts. Read when implementing or revising a product experience. The
   implemented pure multi-camera planning contract is in
-  [design/investigation-plan.md](design/investigation-plan.md).
+  [design/investigation-plan.md](design/investigation-plan.md). The public CLI
+  inventory is in [design/cli-workflows.md](design/cli-workflows.md), and the
+  planned generic NVR frame-sampling contract is in
+  [design/recording-sampling.md](design/recording-sampling.md).
 - **Integrations — `integrations/`:** contracts and operating notes for external
   systems. Use `integrations/sdk-change-requests/` only for specific,
   evidence-backed changes requested of the separate VIGI SDK.
