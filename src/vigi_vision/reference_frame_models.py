@@ -40,6 +40,14 @@ class TimingPrecisionStatus(str, Enum):
     INDETERMINATE = "indeterminate"
 
 
+@final
+class ReferenceFrameOutcome(str, Enum):
+    """The durable-resource outcome of one reference-frame execution."""
+
+    CREATED = "created"
+    REUSED = "reused"
+
+
 class ReferenceFrameError(RuntimeError):
     """Base class for safe reference-frame domain failures."""
 
@@ -127,6 +135,36 @@ class ReferenceFrameArtifactError(ReferenceFrameError):
 
 @final
 @dataclass(frozen=True, slots=True)
+class ReferenceFrameResourceNotFoundError(ReferenceFrameError):
+    """Raised when a completed resource cannot be found safely."""
+
+    @override
+    def __str__(self) -> str:
+        return "The requested reference-frame resource was not found."
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class ReferenceFrameResourceIncompatibleError(ReferenceFrameError):
+    """Raised when a durable resource cannot satisfy the current request semantics."""
+
+    @override
+    def __str__(self) -> str:
+        return "The existing reference-frame resource is not compatible with this request."
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class ReferenceFrameResourceCorruptError(ReferenceFrameError):
+    """Raised when a durable resource is incomplete or fails integrity checks."""
+
+    @override
+    def __str__(self) -> str:
+        return "The stored reference-frame resource could not be read safely."
+
+
+@final
+@dataclass(frozen=True, slots=True)
 class ReferenceFrameCleanupError(ReferenceFrameError):
     """Raised when invocation-owned temporary replay media cannot be removed."""
 
@@ -204,6 +242,14 @@ class ReferenceFrameResult:
     offset_from_requested_seconds: float | None
     timing_precision_status: TimingPrecisionStatus
     warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceFrameResolution:
+    """One completed reference-frame result with its durable-resource outcome."""
+
+    result: ReferenceFrameResult
+    outcome: ReferenceFrameOutcome
 
 
 def parse_reference_frame_request(

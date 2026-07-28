@@ -9,6 +9,7 @@ description = "AI-assisted investigation workflows for TP-Link VIGI camera data.
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "fastapi>=0.140.11",
     "openai>=2.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
@@ -16,6 +17,7 @@ dependencies = [
     "rich>=13.0",
     "tp-link-vigi-sdk>=0.1.0",
     "typer>=0.12",
+    "uvicorn[standard]>=0.51.0",
 ]
 
 [project.scripts]
@@ -24,6 +26,7 @@ vigi-vision = "vigi_vision.cli:app"
 [dependency-groups]
 dev = [
     "basedpyright>=1.21",
+    "httpx2[brotli,http2,zstd]>=2.9.1",
     "pytest>=8",
     "ruff>=0.8",
 ]

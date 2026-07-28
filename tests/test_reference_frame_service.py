@@ -21,11 +21,13 @@ from vigi_vision.reference_frame_models import (
     ReferenceFrameChannelNotFoundError,
     ReferenceFrameCleanupError,
     ReferenceFrameDecodeError,
+    ReferenceFrameOutcome,
     ReferenceFrameRequest,
     ReferenceFrameSegmentMismatchError,
     TimingPrecisionStatus,
     parse_reference_frame_request,
 )
+from vigi_vision.reference_frame_resources import ReferenceFrameResourceStore
 from vigi_vision.reference_frame_service import ReferenceFrameService
 from vigi_vision.replay import ReplayClip
 
@@ -332,6 +334,56 @@ def test_reference_frame_service_does_not_overwrite_completed_artifact(tmp_path:
         _ = service.execute(request)
 
     assert not replay_path.exists()
+
+
+def test_reference_frame_service_reuses_compatible_completed_resource(tmp_path: Path) -> None:
+    # Given
+    request = _request()
+    output_root = tmp_path / "artifacts"
+    replay_extractor = FakeReplayExtractor(tmp_path / "temporary.mp4")
+    decoder = FakeDecoder()
+    service = ReferenceFrameService(
+        FakePlanner(_segment(request.requested_time_utc)),
+        replay_extractor,
+        decoder,
+        ReferenceFrameArtifactStore(output_root),
+        completed_resources=ReferenceFrameResourceStore(output_root),
+    )
+
+    # When
+    created = service.execute_or_resolve(request)
+    reused = service.execute_or_resolve(request)
+
+    # Then
+    assert created.outcome is ReferenceFrameOutcome.CREATED
+    assert reused.outcome is ReferenceFrameOutcome.REUSED
+    assert reused.result.resource_id == created.result.resource_id
+    assert replay_extractor.calls == 1
+    assert len(decoder.requests) == 1
+
+
+def test_reference_frame_service_preserves_corrupt_completed_resource(tmp_path: Path) -> None:
+    # Given
+    request = _request()
+    output_root = tmp_path / "artifacts"
+    replay_extractor = FakeReplayExtractor(tmp_path / "temporary.mp4")
+    service = ReferenceFrameService(
+        FakePlanner(_segment(request.requested_time_utc)),
+        replay_extractor,
+        FakeDecoder(),
+        ReferenceFrameArtifactStore(output_root),
+        completed_resources=ReferenceFrameResourceStore(output_root),
+    )
+    created = service.execute_or_resolve(request)
+    jpeg_path = output_root / created.result.resource_id / "frame.jpg"
+    _ = jpeg_path.write_bytes(b"not-a-jpeg")
+
+    # When / Then
+    with pytest.raises(ReferenceFrameArtifactConflictError):
+        _ = service.execute_or_resolve(request)
+
+    assert jpeg_path.read_bytes() == b"not-a-jpeg"
+    assert replay_extractor.calls == 1
 
 
 @pytest.mark.parametrize("target_contents", ["empty", "nonempty"])
