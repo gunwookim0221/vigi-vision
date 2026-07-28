@@ -180,8 +180,13 @@ def create_reference_frame_app(
         response_model=None,
         response_class=FileResponse,
         responses={
+            status.HTTP_200_OK: {
+                "content": {"image/jpeg": {}},
+                "description": "Durable reference-frame JPEG.",
+            },
             status.HTTP_404_NOT_FOUND: {"model": ReferenceFrameErrorResponse},
             status.HTTP_409_CONFLICT: {"model": ReferenceFrameErrorResponse},
+            status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ReferenceFrameErrorResponse},
             status.HTTP_500_INTERNAL_SERVER_ERROR: {"model": ReferenceFrameErrorResponse},
         },
         summary="Retrieve a durable reference-frame JPEG",

@@ -93,6 +93,56 @@ def test_completed_resource_lookup_rejects_incompatible_manifest(tmp_path: Path)
         _ = resources.resolve_for_request(request, segment)
 
 
+@pytest.mark.parametrize(
+    ("current", "incompatible"),
+    [
+        (
+            '"timing_precision_status": "measured_clip_relative"',
+            '"timing_precision_status": "estimated"',
+        ),
+        (
+            '"estimated_source_time_utc": null',
+            '"estimated_source_time_utc": "2026-07-20T03:34:18Z"',
+        ),
+        ('"offset_from_requested_seconds": null', '"offset_from_requested_seconds": 0.0'),
+    ],
+)
+def test_completed_resource_lookup_rejects_unsupported_timing_claim(
+    tmp_path: Path, current: str, incompatible: str
+) -> None:
+    # Given
+    resources, request, segment, resource_id = _completed_resource(tmp_path)
+    manifest_path = tmp_path / "artifacts" / resource_id / "manifest.json"
+    manifest = manifest_path.read_text(encoding="utf-8")
+    _ = manifest_path.write_text(manifest.replace(current, incompatible, 1), encoding="utf-8")
+
+    # When / Then
+    with pytest.raises(ReferenceFrameResourceIncompatibleError):
+        _ = resources.resolve_for_request(request, segment)
+
+
+def test_completed_resource_lookup_rejects_incompatible_extraction_window(
+    tmp_path: Path,
+) -> None:
+    # Given
+    resources, request, segment, resource_id = _completed_resource(tmp_path)
+    manifest_path = tmp_path / "artifacts" / resource_id / "manifest.json"
+    manifest = manifest_path.read_text(encoding="utf-8")
+    expected_start = (request.requested_time_utc - timedelta(seconds=2)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    incompatible_start = (request.requested_time_utc - timedelta(seconds=1)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    _ = manifest_path.write_text(
+        manifest.replace(expected_start, incompatible_start, 1), encoding="utf-8"
+    )
+
+    # When / Then
+    with pytest.raises(ReferenceFrameResourceIncompatibleError):
+        _ = resources.resolve_for_request(request, segment)
+
+
 @pytest.mark.parametrize("resource_id", ["../frame.jpg", "C:\\private.jpg", "invalid%2fpath"])
 def test_image_lookup_rejects_non_resource_identifier(tmp_path: Path, resource_id: str) -> None:
     # Given

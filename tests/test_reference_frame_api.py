@@ -340,13 +340,13 @@ def test_openapi_describes_safe_creation_and_jpeg_contract(tmp_path: Path) -> No
 
     # When
     document = client.get("/openapi.json").text
+    image_path = '"/api/v1/reference-frames/{resource_id}/image"'
+    image_operation = document[document.index(image_path) : document.index('"components"')]
 
     # Then
-    assert '"/api/v1/reference-frames"' in document
-    assert '"/api/v1/reference-frames/{resource_id}/image"' in document
-    assert '"201"' in document
-    assert '"200"' in document
-    assert '"image/jpeg"' in document
+    assert '"content":{"image/jpeg":{}}' in image_operation
+    assert '"$ref":"#/components/schemas/ReferenceFrameErrorResponse"' in image_operation
+    assert '"$ref":"#/components/schemas/HTTPValidationError"' not in image_operation
     assert '"measured_clip_relative"' in document
     assert '"exact"' not in document
     assert "password" not in document

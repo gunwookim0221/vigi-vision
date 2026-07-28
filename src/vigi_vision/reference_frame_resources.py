@@ -19,6 +19,7 @@ from vigi_vision.reference_frame_models import (
     ReferenceFrameResourceNotFoundError,
     ReferenceFrameResult,
     TimingPrecisionStatus,
+    build_reference_replay_window,
     segment_identity,
 )
 
@@ -117,6 +118,7 @@ class ReferenceFrameResourceStore:
         segment: RecordingSegment,
         resource_id: str,
     ) -> None:
+        expected_window = build_reference_replay_window(request, segment)
         if (
             document.schema_version != MANIFEST_SCHEMA_VERSION
             or document.generation_policy_version != request.generation_policy_version
@@ -126,7 +128,15 @@ class ReferenceFrameResourceStore:
             or document.selected_segment_id != segment_identity(segment)
             or document.selected_segment_start_utc != _utc_text(segment.start_utc)
             or document.selected_segment_end_utc != _utc_text(segment.end_utc)
+            or document.extraction_start_utc != _utc_text(expected_window.start_utc)
+            or document.extraction_end_utc != _utc_text(expected_window.end_utc)
             or document.frame_selection_policy != request.frame_selection_policy.value
+            or (
+                document.timing_precision_status
+                != TimingPrecisionStatus.MEASURED_CLIP_RELATIVE.value
+            )
+            or document.estimated_source_time_utc is not None
+            or document.offset_from_requested_seconds is not None
         ):
             raise ReferenceFrameResourceIncompatibleError
 
