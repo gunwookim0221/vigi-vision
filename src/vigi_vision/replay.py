@@ -4,7 +4,8 @@ import os
 import subprocess
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass
+from contextlib import suppress
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import final
@@ -72,8 +73,8 @@ class ReplayClip:
     channel_id: int
     requested_start_utc: datetime
     requested_end_utc: datetime
-    replay_url: str
-    temporary_mp4_path: Path
+    replay_url: str = field(repr=False)
+    temporary_mp4_path: Path = field(repr=False)
     duration_seconds: int
 
     def remove(self) -> None:
@@ -98,15 +99,18 @@ def _run_ffmpeg(
 class ReplayExtractor:
     """Extract one temporary video-only MP4 with RTSP/TCP and client-side duration."""
 
-    executable: Path
-    username: str
-    password: SecretStr
-    temporary_directory: Path | None = None
-    runner: ReplayRunner = _run_ffmpeg
+    executable: Path = field(repr=False)
+    username: str = field(repr=False)
+    password: SecretStr = field(repr=False)
+    temporary_directory: Path | None = field(default=None, repr=False)
+    runner: ReplayRunner = field(default=_run_ffmpeg, repr=False)
 
     def extract(self, request: ReplayRequest) -> ReplayClip:
         """Extract one bounded MP4 from a credential-free replay request."""
-        output_path = self._temporary_path()
+        try:
+            output_path = self._temporary_path()
+        except OSError:
+            raise ReplayExtractionError from None
         try:
             arguments = self._arguments(request, output_path)
             timeout_seconds = (
@@ -116,19 +120,22 @@ class ReplayExtractor:
             )
             completed = self.runner(arguments, timeout_seconds)
         except subprocess.TimeoutExpired:
-            output_path.unlink(missing_ok=True)
+            _remove_partial(output_path)
             raise ReplayTimeoutError from None
         except OSError:
-            output_path.unlink(missing_ok=True)
+            _remove_partial(output_path)
             raise ReplayExtractionError from None
         except ReplayExtractionError:
-            output_path.unlink(missing_ok=True)
+            _remove_partial(output_path)
+            raise
+        except BaseException:
+            _remove_partial(output_path)
             raise
         if completed.returncode != 0:
-            output_path.unlink(missing_ok=True)
+            _remove_partial(output_path)
             raise _process_error(completed.stderr)
-        if not output_path.is_file() or output_path.stat().st_size == 0:
-            output_path.unlink(missing_ok=True)
+        if not _is_nonempty_file(output_path):
+            _remove_partial(output_path)
             raise ReplayExtractionError
         return ReplayClip(
             channel_id=request.window.channel_id,
@@ -177,6 +184,18 @@ class ReplayExtractor:
             "-y",
             str(output_path),
         )
+
+
+def _remove_partial(path: Path) -> None:
+    with suppress(OSError):
+        path.unlink(missing_ok=True)
+
+
+def _is_nonempty_file(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def _process_error(stderr: str) -> ReplayError:

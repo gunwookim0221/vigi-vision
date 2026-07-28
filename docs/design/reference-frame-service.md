@@ -2,13 +2,27 @@
 
 ## Status
 
-**Status: Phase 2A design; not implemented and not a public API contract.**
+**Status: Phase 2B internal service implemented and exercised against the real
+NVR; absolute source-time calibration, FastAPI, frontend, ROI, and
+object-comparison work remain deferred.**
+
+The implemented internal slice validates source time into UTC, resolves a
+deterministic covering segment through `RecordingPlanner`, constrains its replay
+window to that segment, extracts a bounded temporary clip, selects the nearest
+ffprobe-reported local PTS with an earlier-frame tie-break, extracts that exact
+decoded-frame index, validates the JPEG with ffprobe, and publishes a
+credential-free JPEG plus manifest. It reports only
+`measured_clip_relative` timing for the current decoder; the real-NVR check did
+not establish an exact or absolute source-frame timestamp.
+When a host lacks an IANA timezone database, the established default
+`Asia/Seoul` input uses a fixed KST (+09:00) fallback; other requested zones
+still require valid zoneinfo data.
 
 This document specifies the next internal boundary needed by the approved
 [object-disappearance investigation](object-disappearance-investigation.md):
 retrieve one reviewable recorded frame for a requested NVR channel and time.
-It does not implement a service, FastAPI application, frontend, ROI selection,
-presence classification, temporal search, or review-clip generation.
+It does not implement a public service, FastAPI application, frontend, ROI
+selection, presence classification, temporal search, or review-clip generation.
 
 ## Purpose
 
@@ -40,8 +54,8 @@ with a person.
 
 ## Existing reusable foundation
 
-The future implementation should reuse the following existing code and
-contracts rather than create parallel recording or ffmpeg workflows.
+The implementation reuses the following existing code and contracts rather
+than creating parallel recording or ffmpeg workflows.
 
 | Existing component | Actual responsibility | Reuse in this slice |
 | --- | --- | --- |
@@ -64,34 +78,28 @@ Current safe errors to propagate or translate include `RecordingWindowError`,
 `AnchorSnapshotError`. Existing errors already redact credentials and raw
 subprocess diagnostics.
 
-## Current implementation gaps
+## Remaining implementation gaps
 
-The implemented foundation does not yet provide any of the following:
+The internal service does not yet provide:
 
-- a point-in-time request model or source-time parser dedicated to reference
-  frames;
-- a public `RecordingPlanner` operation that returns the particular
-  `RecordingSegment` selected for a point;
-- a decoder that selects among frames around a target and reports decoded
-  timing, decoded image dimensions, or timing precision;
-- a reference-frame artifact writer or manifest;
+- a concrete settings-to-service composition or public entry point;
 - cancellation-aware replay extraction;
 - FastAPI, HTTP serialization, CORS configuration, or an image endpoint.
 
-In particular, `RecordingPlanner.plan()` proves only that one segment overlaps
-a supplied interval and returns a `ReplayRequest`. `SamplingCoverageResolver`
-enumerates coverage but discards the source `RecordingSegment` identity.
-`FfmpegAnchorSnapshotExtractor.extract()` accepts an integer offset and writes
-one JPEG, but it does not measure presentation timestamps. None can truthfully
-state that a JPEG equals the requested source instant.
+`RecordingPlanner` now exposes the selected covering segment and a
+segment-constrained replay plan. The focused decoder measures clip-relative PTS
+and retains conservative timing status because real-NVR validation has not
+proven an absolute replay-start mapping. Compatible completed-resource lookup
+is also deferred; any existing deterministic resource is currently a safe
+artifact conflict rather than silent reuse.
 
 ## User and system workflow
 
-The proposed internal workflow is:
+The implemented internal workflow is:
 
-1. A composition boundary loads `CaptureSettings`, rejects `VIGI_SOURCE=ipc`,
-   resolves ffmpeg, authenticates the public SDK planner, and optionally reads
-   safe channel inventory.
+1. A future composition boundary will load `CaptureSettings`, reject
+   `VIGI_SOURCE=ipc`, resolve ffmpeg and ffprobe, authenticate the public SDK
+   planner, and optionally read safe channel inventory.
 2. The internal service validates and canonicalizes a point request to a
    whole-second UTC instant.
 3. It finds the `RecordingSegment` that covers that instant using half-open
@@ -131,11 +139,12 @@ strings. A separate input adapter may accept either:
 - the existing naive `YYYY-MM-DD HH:MM:SS` text with an explicit supported
   source timezone, default `Asia/Seoul`.
 
-Current recording sampling supports only `Asia/Seoul` and `UTC`; Phase 2 must
-retain that constrained set until a separately implemented timezone boundary
-proves broader IANA-zone handling. A naive input without an explicitly supplied
-or defaulted source timezone is invalid. A timezone-aware input supplies its
-own offset and must not be reinterpreted using the server's local timezone.
+The reference-frame parser supports valid IANA zones without consulting the
+system-local timezone. `Asia/Seoul` has the established fixed KST fallback when
+the host has no timezone database; other missing zones fail safely. A naive
+input uses its explicitly supplied zone or the documented `Asia/Seoul` default.
+A timezone-aware input supplies its own offset; an optional declared zone must
+agree with that offset at the requested instant.
 
 `Asia/Seoul` has no current DST ambiguity. If a future source zone observes
 DST, a naive ambiguous or nonexistent local time must be rejected unless an
@@ -161,6 +170,11 @@ At an exact segment start, select that segment. At an exact segment end, the
 old segment does not cover the point; select a subsequent segment only when its
 start covers the point. Otherwise report a recording gap/no recording rather
 than borrowing a frame from the preceding segment.
+
+If malformed NVR metadata contains multiple segments covering the same point,
+selection is deterministic: choose the earliest segment start, then the
+earliest end. The constrained replay window must still fit the selected
+segment.
 
 The narrowest expected refactor is to add an internal
 `RecordingPlanner.find_covering_segment(channel_id, instant_utc)` operation,
@@ -416,6 +430,12 @@ an explicit artifact conflict; it must never be silently reused. Existing
 completed artifacts must never be overwritten or deleted. An existing path that
 is incomplete or unreadable is likewise an artifact conflict.
 
+The implemented store takes an exclusive sibling claim before staging an
+identity. This prevents concurrent identical invocations from reaching
+promotion together. Promotion rechecks the final path and renames only to an
+absent destination; a late existing path is a conflict, including an empty
+directory.
+
 Temporary replay MP4s and incomplete JPEGs are removed in every failure or
 cancellation path. The initial slice should not preserve failed or partial
 reference-frame packages: there is no useful ROI resource until a valid JPEG
@@ -615,8 +635,8 @@ may the implementation strengthen `estimated` timing statements.
    decoder, and artifact boundaries.
 5. Add hermetic service, cleanup, redaction, segment-boundary, and artifact
    tests.
-6. Implement versioned reference-frame artifact/manifest handling and
-   compatible completed-resource lookup.
+6. Implement compatible completed-resource lookup; versioned identity and safe
+   conflict handling are already present.
 7. Add the minimal FastAPI boundary and API tests.
 8. Perform real-NVR validation and adjust only evidence-backed defaults or
    timing-status guarantees.

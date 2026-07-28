@@ -11,15 +11,18 @@ from vigi import (
     RecordDaysResponse,
     RecordSearchProcessResponse,
     RecordSearchResultsResponse,
+    VigiError,
 )
 from vigi import (
     RecordSegment as SdkRecordSegment,
 )
 
+from vigi_vision.nvr import NvrRequestError
 from vigi_vision.recording import (
     RecordingPlanner,
     RecordingUnavailableError,
     RecordingWindow,
+    ReplayRequest,
 )
 from vigi_vision.replay import (
     ReplayAuthenticationError,
@@ -119,6 +122,116 @@ def test_recording_planner_raises_when_no_segment_overlaps_requested_window() ->
     # When / Then
     with pytest.raises(RecordingUnavailableError, match="No recording"):
         _ = planner.plan(_window())
+
+
+def test_recording_planner_selects_covering_segment_with_half_open_boundaries() -> None:
+    # Given
+    start = datetime(2026, 6, 30, 16, 0, tzinfo=timezone.utc)
+    first_end = start.replace(second=10)
+    second_end = start.replace(second=20)
+    records = FakeRecords(
+        (
+            SdkRecordSegment(
+                start_time=str(int(start.timestamp())),
+                end_time=str(int(first_end.timestamp())),
+            ),
+            SdkRecordSegment(
+                start_time=str(int(first_end.timestamp())),
+                end_time=str(int(second_end.timestamp())),
+            ),
+        )
+    )
+    planner = RecordingPlanner(FakeClient(records), "nvr.example.test")
+
+    # When
+    selected = planner.find_covering_segment(1, first_end)
+
+    # Then
+    assert selected.start_utc == first_end
+    with pytest.raises(RecordingUnavailableError):
+        _ = planner.find_covering_segment(1, second_end)
+
+
+def test_recording_planner_selects_overlapping_segment_deterministically() -> None:
+    # Given
+    target = datetime(2026, 6, 30, 16, 0, 10, tzinfo=timezone.utc)
+    earlier_start = target.replace(second=0)
+    later_start = target.replace(second=5)
+    records = FakeRecords(
+        (
+            SdkRecordSegment(
+                start_time=str(int(later_start.timestamp())),
+                end_time=str(int(target.replace(second=20).timestamp())),
+            ),
+            SdkRecordSegment(
+                start_time=str(int(earlier_start.timestamp())),
+                end_time=str(int(target.replace(second=30).timestamp())),
+            ),
+        )
+    )
+    planner = RecordingPlanner(FakeClient(records), "nvr.example.test")
+
+    # When
+    selected = planner.find_covering_segment(1, target)
+
+    # Then
+    assert selected.start_utc == earlier_start
+
+
+def test_recording_planner_redacts_sdk_cause_and_internal_representations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    sensitive_marker = "opaque-sdk-sensitive-marker"
+    records = FakeRecords(())
+    planner = RecordingPlanner(FakeClient(records), "private.example")
+
+    def failing_process(_: FakeRecords) -> RecordSearchProcessResponse:
+        raise VigiError(sensitive_marker)
+
+    monkeypatch.setattr(FakeRecords, "get_free_process", failing_process)
+
+    # When
+    with pytest.raises(NvrRequestError) as exception_info:
+        _ = planner.find_covering_segment(1, datetime(2026, 6, 30, 16, 0, tzinfo=timezone.utc))
+
+    # Then
+    rendered = "".join(
+        traceback.format_exception(
+            type(exception_info.value),
+            exception_info.value,
+            exception_info.value.__traceback__,
+        )
+    )
+    replay_request = ReplayRequest(_window(), "rtsp://private.example/replay")
+    assert sensitive_marker not in rendered
+    assert "private.example" not in repr(planner)
+    assert "rtsp://" not in repr(replay_request)
+
+
+def test_recording_planner_rejects_replay_window_that_crosses_selected_segment() -> None:
+    # Given
+    start = datetime(2026, 6, 30, 16, 0, tzinfo=timezone.utc)
+    end = start.replace(second=10)
+    planner = RecordingPlanner(
+        FakeClient(
+            FakeRecords(
+                (
+                    SdkRecordSegment(
+                        start_time=str(int(start.timestamp())),
+                        end_time=str(int(end.timestamp())),
+                    ),
+                )
+            )
+        ),
+        "nvr.example.test",
+    )
+    segment = planner.find_covering_segment(1, start)
+    crossing_window = RecordingWindow(1, start, end.replace(second=11))
+
+    # When / Then
+    with pytest.raises(RecordingUnavailableError):
+        _ = planner.plan_for_segment(segment, crossing_window)
 
 
 def test_replay_extractor_writes_removable_mp4_with_tcp_and_client_duration(

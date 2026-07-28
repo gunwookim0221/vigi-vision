@@ -1,6 +1,6 @@
 """Recording search, overlap planning, and credential-free replay requests."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Protocol, final
 
@@ -159,8 +159,8 @@ class RecordingSegment:
         try:
             start_epoch_seconds = int(segment.start_time)
             end_epoch_seconds = int(segment.end_time)
-        except ValueError as error:
-            raise RecordingDataError from error
+        except ValueError:
+            raise RecordingDataError from None
         if end_epoch_seconds <= start_epoch_seconds:
             raise RecordingDataError
         return cls(
@@ -178,15 +178,15 @@ class ReplayRequest:
     """A credential-free NVR replay request ready for ffmpeg extraction."""
 
     window: RecordingWindow
-    replay_url: str
+    replay_url: str = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
 class RecordingPlanner:
     """Use public SDK recording APIs to plan a replay interval without ffmpeg."""
 
-    client: RecordingClient
-    host: str
+    client: RecordingClient = field(repr=False)
+    host: str = field(repr=False)
     recording_timezone: tzinfo = _RECORDING_TIMEZONE
 
     @classmethod
@@ -204,7 +204,7 @@ class RecordingPlanner:
         try:
             client.login()
         except VigiError as error:
-            raise diagnose_nvr_error(error) from error
+            raise diagnose_nvr_error(error) from None
         return cls(client, connection.host)
 
     def plan(self, window: RecordingWindow) -> ReplayRequest:
@@ -225,8 +225,44 @@ class RecordingPlanner:
                             ),
                         )
         except VigiError as error:
-            raise diagnose_nvr_error(error) from error
+            raise diagnose_nvr_error(error) from None
         raise RecordingUnavailableError
+
+    def find_covering_segment(self, channel_id: int, instant_utc: datetime) -> RecordingSegment:
+        """Return the deterministic segment covering one whole UTC second."""
+        window = RecordingWindow(channel_id, instant_utc, instant_utc + timedelta(seconds=1))
+        try:
+            process_id = self.client.records.get_free_process().process_id
+            candidates = tuple(
+                segment
+                for recording_day in self._matching_days(window)
+                for segment in self._segments(channel_id, process_id, recording_day)
+                if segment.start_utc <= instant_utc < segment.end_utc
+            )
+        except VigiError as error:
+            raise diagnose_nvr_error(error) from None
+        if not candidates:
+            raise RecordingUnavailableError
+        return min(candidates, key=lambda segment: (segment.start_utc, segment.end_utc))
+
+    def plan_for_segment(self, segment: RecordingSegment, window: RecordingWindow) -> ReplayRequest:
+        """Build a replay request only when its whole window stays in ``segment``."""
+        if (
+            segment.channel_id != window.channel_id
+            or window.start_utc < segment.start_utc
+            or window.end_utc > segment.end_utc
+        ):
+            raise RecordingUnavailableError
+        try:
+            replay_url = self.client.stream.build_replay_url(
+                self.host,
+                window.channel_id,
+                window.start_utc.strftime(_REPLAY_TIME_FORMAT),
+                window.end_utc.strftime(_REPLAY_TIME_FORMAT),
+            )
+        except VigiError as error:
+            raise diagnose_nvr_error(error) from None
+        return ReplayRequest(window, replay_url)
 
     def _matching_days(self, window: RecordingWindow) -> tuple[date, ...]:
         local_start = window.start_utc.astimezone(self.recording_timezone).date()
@@ -264,8 +300,8 @@ class RecordingPlanner:
 def _parse_recording_day(value: str) -> date:
     try:
         return date.fromisoformat(f"{value[:4]}-{value[4:6]}-{value[6:]}")
-    except ValueError as error:
-        raise RecordingDataError from error
+    except ValueError:
+        raise RecordingDataError from None
 
 
 def _overlaps(window: RecordingWindow, segment: RecordingSegment) -> bool:
