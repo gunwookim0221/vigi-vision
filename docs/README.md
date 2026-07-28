@@ -29,7 +29,10 @@ documentation route is added, removed, or relocated.
   investigation slice and its later reference-frame, ROI, and temporal-search
   boundaries. Read [design/reference-frame-service.md](design/reference-frame-service.md)
   when implementing or reviewing the proposed recorded reference-frame service,
-  its timing evidence, durable artifacts, or minimal HTTP boundary.
+  its timing evidence or durable artifacts. Read
+  [design/reference-frame-api.md](design/reference-frame-api.md) for the
+  approved synchronous FastAPI transport contract, safe JPEG retrieval, and
+  Phase 3B implementation boundary.
 - **Integrations — `integrations/`:** contracts and operating notes for external
   systems. Use `integrations/sdk-change-requests/` only for specific,
   evidence-backed changes requested of the separate VIGI SDK.
