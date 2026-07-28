@@ -3,8 +3,9 @@
 ## Status
 
 **Status: Phase 2B internal service implemented and exercised against the real
-NVR; absolute source-time calibration, FastAPI, frontend, ROI, and
-object-comparison work remain deferred.**
+NVR; [Phase 3A has approved the synchronous HTTP contract](reference-frame-api.md),
+but FastAPI production code, frontend, ROI, and object-comparison work remain
+deferred.**
 
 The implemented internal slice validates source time into UTC, resolves a
 deterministic covering segment through `RecordingPlanner`, constrains its replay
@@ -267,14 +268,12 @@ A reference-frame result preserves these separate facts:
 | Offset | Estimated or measured frame time minus requested UTC time, never inferred from the requested filename. |
 | Precision status | Declares whether the timing is measured, estimated, or unknown and carries warnings. |
 
-Initial result statuses should be limited to:
-
-- `measured_clip_relative`: local PTS was measured, but mapping to NVR source
-  time still has an explicit warning unless validated;
-- `estimated_from_replay_window`: a selected local frame is associated with the
-  requested replay window, but no independently verified source timestamp is
-  available;
-- `unknown`: a JPEG exists but no trustworthy PTS/offset can be reported.
+The implemented `TimingPrecisionStatus` enum is `measured_clip_relative`,
+`estimated`, `unavailable`, or `indeterminate`. The current decoder returns
+only `measured_clip_relative`: local PTS was measured, while mapping to an NVR
+source time still has an explicit warning unless validated. A JPEG must not be
+given a source-time estimate merely because it belongs to a requested replay
+window.
 
 Do not introduce an `exact` status in the first implementation. It can be
 added only after real-NVR validation demonstrates the replay start-to-decoded
@@ -469,7 +468,12 @@ candidate window, estimated timing, unknown timing, or an offset outside a
 future validated normal range. No warning may be used to conceal a missing
 JPEG or a policy violation.
 
-## Minimal FastAPI alternatives
+## Historical Phase 2 transport exploration (superseded)
+
+The comparative notes below informed Phase 2 service boundaries. The approved
+Phase 3A HTTP contract is now in [reference-frame-api.md](reference-frame-api.md).
+Phase 3B must follow that document for endpoint paths, request fields, timing
+serialization, error mapping, reuse, concurrency, and transport composition.
 
 ### Alternative A: direct image endpoint
 
@@ -497,7 +501,7 @@ A `202 Accepted` job and polling endpoint would handle long or concurrent
 extraction, but it introduces job persistence, cancellation state, cleanup,
 and retry semantics not justified by the current local single-user MVP.
 
-## Recommended API boundary
+### Superseded recommendation
 
 Adopt **Alternative B** for the first local MVP, after the internal service has
 been accepted and tested:
@@ -518,7 +522,7 @@ POST /api/reference-frames
   "generation_policy_version": 1,
   "requested_time_utc": "2026-07-20T03:34:18Z",
   "frame_selection_policy": "nearest_decoded_frame",
-  "timing_precision_status": "estimated_from_replay_window",
+  "timing_precision_status": "measured_clip_relative",
   "warnings": ["..."],
   "image_url": "/api/reference-frames/.../image"
 }
