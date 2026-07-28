@@ -130,6 +130,12 @@ Collect the current restaurant-checkout investigation package (the supplied time
 uv run --active vigi-vision investigate --scenario restaurant-checkout --time "2026-07-20 12:34:18"
 ```
 
+Run the local reference-frame API on loopback only:
+
+```text
+uv run uvicorn vigi_vision.reference_frame_api:create_reference_frame_app_from_environment --factory --host 127.0.0.1 --port 8000
+```
+
 ## Installation
 
 Install the project with `uv sync`, copy `.env.example` to `.env`, and set:
@@ -162,6 +168,23 @@ uv run --active vigi-vision snapshot --channel 1
 ```text
 uv run --active vigi-vision investigate --scenario restaurant-checkout --time "2026-07-20 12:34:18"
 ```
+
+The reference-frame API is NVR-only and requires the existing capture settings,
+but no OpenAI key. It synchronously creates or reuses one durable JPEG and has
+no authentication, so keep it on trusted loopback only. The API permits one
+in-flight operation per application; a client disconnect does not guarantee
+cancellation of replay or media work.
+
+```text
+uv run uvicorn vigi_vision.reference_frame_api:create_reference_frame_app_from_environment --factory --host 127.0.0.1 --port 8000
+curl -X POST http://127.0.0.1:8000/api/v1/reference-frames -H "Content-Type: application/json" -d '{"channel_id":1,"requested_time":"2026-07-20T12:34:18+09:00","source_timezone":"Asia/Seoul"}'
+curl http://127.0.0.1:8000/api/v1/reference-frames/<resource_id>/image --output reference-frame.jpg
+```
+
+Creation returns `201` with `created`; a verified compatible completed resource
+returns `200` with `reused`. The decoded PTS is only relative to the replay
+clip. Current responses do not claim an exact source-frame time and leave
+absolute source-time estimates `null`.
 
 For a standalone IPC, set `VIGI_SOURCE=ipc`; `inspect` uses the public IPC RTSP builder and does not perform IPC OpenAPI authentication. A live inspection completes only when source validation, one-frame extraction, and OpenAI structured image analysis all succeed.
 

@@ -19,13 +19,18 @@ from vigi_vision.reference_frame_decoder import (
 from vigi_vision.reference_frame_models import (
     MANIFEST_SCHEMA_VERSION,
     DecodedFrameEvidence,
+    ReferenceFrameArtifactConflictError,
     ReferenceFrameChannelNotFoundError,
     ReferenceFrameCleanupError,
+    ReferenceFrameOutcome,
     ReferenceFrameRequest,
+    ReferenceFrameResolution,
+    ReferenceFrameResourceCorruptError,
     ReferenceFrameResult,
     ReferenceFrameSegmentMismatchError,
     build_reference_replay_window,
 )
+from vigi_vision.reference_frame_resources import ReferenceFrameResourceStore
 from vigi_vision.replay import ReplayClip
 
 
@@ -67,15 +72,29 @@ class ReferenceFrameService:
     decoder: ReferenceFrameDecoder = field(repr=False)
     artifacts: ReferenceFrameArtifactStore = field(repr=False)
     channel_inventory: ChannelInventoryBoundary | None = field(default=None, repr=False)
+    completed_resources: ReferenceFrameResourceStore | None = field(default=None, repr=False)
 
     def execute(self, request: ReferenceFrameRequest) -> ReferenceFrameResult:
         """Run selected-segment replay extraction, decoding, and durable artifact publication."""
+        return self.execute_or_resolve(request).result
+
+    def execute_or_resolve(self, request: ReferenceFrameRequest) -> ReferenceFrameResolution:
+        """Create a new frame or return a verified compatible completed resource."""
         inventory_warnings = self._inventory_warnings(request)
         segment = self.planner.find_covering_segment(request.channel_id, request.requested_time_utc)
         extraction_window = build_reference_replay_window(request, segment)
         replay_request = self.planner.plan_for_segment(segment, extraction_window)
         _validate_replay_plan(segment, extraction_window, replay_request)
-        session = self.artifacts.begin(request, segment)
+        existing = self._completed_resource(request, segment)
+        if existing is not None:
+            return ReferenceFrameResolution(existing, ReferenceFrameOutcome.REUSED)
+        try:
+            session = self.artifacts.begin(request, segment)
+        except ReferenceFrameArtifactConflictError:
+            existing = self._completed_resource(request, segment)
+            if existing is not None:
+                return ReferenceFrameResolution(existing, ReferenceFrameOutcome.REUSED)
+            raise
         clip: ReplayClip | None = None
         completed = False
         try:
@@ -113,7 +132,7 @@ class ReferenceFrameService:
             clip = None
             _, _ = session.finalize(manifest)
             completed = True
-            return ReferenceFrameResult(
+            result = ReferenceFrameResult(
                 resource_id=session.resource_id,
                 manifest_schema_version=MANIFEST_SCHEMA_VERSION,
                 generation_policy_version=request.generation_policy_version,
@@ -134,6 +153,7 @@ class ReferenceFrameService:
                 timing_precision_status=combined_evidence.timing_precision_status,
                 warnings=combined_evidence.warnings,
             )
+            return ReferenceFrameResolution(result, ReferenceFrameOutcome.CREATED)
         finally:
             if clip is not None:
                 with suppress(OSError):
@@ -157,6 +177,16 @@ class ReferenceFrameService:
         if channel.online:
             return ()
         return ("The channel is currently offline; historical recordings may still be available.",)
+
+    def _completed_resource(
+        self, request: ReferenceFrameRequest, segment: RecordingSegment
+    ) -> ReferenceFrameResult | None:
+        if self.completed_resources is None:
+            return None
+        try:
+            return self.completed_resources.resolve_for_request(request, segment)
+        except ReferenceFrameResourceCorruptError:
+            raise ReferenceFrameArtifactConflictError from None
 
 
 def _validate_replay_plan(

@@ -2,7 +2,7 @@
 
 ## Status and purpose
 
-**Status: approved Phase 3A design; no FastAPI production code exists yet.**
+**Status: implemented Phase 3B local API.**
 
 This document defines the local, synchronous HTTP boundary for the implemented
 [reference-frame service](reference-frame-service.md). It exposes a durable
@@ -31,8 +31,8 @@ The Phase 2 service accepts a validated `ReferenceFrameRequest` and returns a
 - refuses an existing deterministic resource with
   `ReferenceFrameArtifactConflictError`.
 
-Therefore Phase 3B needs a **narrow completed-resource adapter** before it can
-truthfully return an existing compatible resource as reused. It must validate a
+Phase 3B adds a **narrow completed-resource adapter** so the API can truthfully
+return an existing compatible resource as reused. It validates a
 completed manifest and JPEG under the configured artifact root, compare schema
 and generation-policy versions, and return a typed credential-free package.
 It must not scan arbitrary paths, infer compatibility from a readable manifest,
@@ -183,7 +183,8 @@ timing claim.
 
 The internal deterministic resource ID remains opaque at HTTP boundary. Phase
 3B validates it as a single ASCII URL segment matching
-`^[a-z0-9][a-z0-9_-]{0,191}$`; invalid and unknown IDs both return the same
+`^[A-Za-z0-9][A-Za-z0-9_-]{0,191}$`, preserving the established Phase 2 UTC
+`T` and `Z` separators; invalid and unknown IDs both return the same
 safe `404 resource_not_found` response. Clients may receive and use an ID but
 must not construct it as a supported request input. Raw artifact paths never
 become identifiers.
@@ -318,8 +319,8 @@ the service returns a compatible completed resource or fails. It is not a job
 API and does not use `202`, polling, queues, WebSockets, Celery, or background
 tasks.
 
-Phase 3B should use an `async def` route solely to call the existing
-synchronous `ReferenceFrameService.execute` through `anyio.to_thread.run_sync`
+Phase 3B uses an `async def` route solely to call the existing synchronous
+`ReferenceFrameService.execute_or_resolve` through `anyio.to_thread.run_sync`
 with an application-owned `CapacityLimiter(1)`. This avoids event-loop blocking
 and bounds the local MVP to one NVR/ffmpeg extraction at a time. It is more
 explicit than relying on FastAPI's shared thread pool for a long-running media
@@ -353,7 +354,7 @@ application state/dependencies and never read environment variables directly.
 | HTTP transport | FastAPI app factory | Own schemas, limiter, handlers, error mapping, and FileResponse only. |
 
 Missing capture settings, IPC configuration, inaccessible artifact root, or
-unavailable ffmpeg/ffprobe are startup failures. The app must fail to start
+unavailable ffmpeg/ffprobe are startup failures. The app fails to start
 with a fixed safe configuration error, not serve a partially composed API.
 Credentials remain only inside established settings and media/SDK dependencies;
 they never appear in OpenAPI examples, logs, requests, responses, or manifests.
@@ -399,37 +400,48 @@ must be replaced so every documented error follows the stable envelope.
 
 ## Dependency decision
 
-FastAPI is not currently declared in `pyproject.toml`; the project uses Pydantic
-2, which is compatible with current FastAPI releases. Phase 3B should add the
-narrow runtime dependency set:
+The project uses Pydantic 2 and declares the narrow Phase 3B dependency set:
 
 - `fastapi` for schemas, routing, OpenAPI, and `FileResponse` transport;
 - `uvicorn[standard]` only as the local ASGI execution entry point; and
 - no new HTTP client or job framework.
 
-FastAPI's AnyIO dependency provides the required thread offload support. Tests
-should use the FastAPI/Starlette-supported in-process test client already
-compatible with the chosen FastAPI version; declare an additional test-only
-dependency only if the selected compatible version requires it.
+FastAPI's AnyIO dependency provides the required thread offload support. The
+in-process tests use the FastAPI/Starlette-compatible `httpx2` test dependency.
 
-## Phase 3B implementation plan
+## Local startup
 
-No files are scaffolded in this design phase. Likely implementation files are:
+Start the trusted-loopback API with the application factory:
+
+```text
+uv run uvicorn vigi_vision.reference_frame_api:create_reference_frame_app_from_environment --factory --host 127.0.0.1 --port 8000
+```
+
+The API has no authentication and must not be exposed publicly. It loads only
+the existing NVR capture settings, not an OpenAI key. The first `POST` produces
+`201 created`; later verified compatible requests produce `200 reused`. A
+client disconnect does not guarantee cancellation of the underlying replay,
+decoder, or artifact work.
+
+## Phase 3B implementation
+
+The implementation uses these files:
 
 | File or module | Phase 3B responsibility |
 | --- | --- |
-| `src/vigi_vision/reference_frame_artifacts.py` | Add typed completed-package lookup and safe JPEG resolution confined to the artifact root. |
+| `src/vigi_vision/reference_frame_artifacts.py` | Existing staged non-overwrite publication for durable packages. |
+| `src/vigi_vision/reference_frame_resources.py` | Typed completed-package lookup and fixed JPEG resolution confined to the artifact root. |
 | `src/vigi_vision/reference_frame_service.py` | Add compatible completed-resource resolution at the existing deterministic identity seam; preserve existing extraction behavior for new resources. |
 | `src/vigi_vision/reference_frame_api_models.py` | Pydantic HTTP request, response, timing, and error schemas. |
 | `src/vigi_vision/reference_frame_api_errors.py` | Pure safe domain-error-to-HTTP mapping. |
 | `src/vigi_vision/reference_frame_api.py` | Application factory, dependency composition, one-slot limiter, routes, and safe FileResponse boundary. |
-| `src/vigi_vision/__main__.py` or a new API entry module | Deliberate local ASGI launch surface, selected after dependency integration. |
-| `tests/test_reference_frame_artifacts.py` | Completed-resource lookup, compatibility, traversal, corruption, and concurrent-resolution tests. |
+| `uvicorn` factory command | Deliberate documented local ASGI launch surface. |
+| `tests/test_reference_frame_resources.py` | Completed-resource lookup, compatibility, traversal, and corruption tests. |
 | `tests/test_reference_frame_api_errors.py` | Hermetic error-mapping tests. |
 | `tests/test_reference_frame_api.py` | In-process creation, image retrieval, reuse, concurrency, validation, OpenAPI, and redaction tests. |
 | `PROJECT.md`, `docs/README.md`, and this document | Update implementation status and public API contract once runtime behavior exists. |
 
-Phase 3B is accepted only when:
+Phase 3B is complete when:
 
 - domain modules remain free of FastAPI imports;
 - a synchronous creation request avoids event-loop blocking through the bounded

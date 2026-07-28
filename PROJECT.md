@@ -109,12 +109,13 @@ segment, extracts a bounded replay, selects the exact ffprobe candidate by
 decoded-frame index, validates and persists one credential-free reference JPEG
 with truthful clip-relative timing evidence, and is covered by hermetic tests.
 An initial real-NVR run produced a validated `2560x1440` JPEG while retaining
-the conservative `measured_clip_relative` status. Phase 3A has approved the
-local synchronous FastAPI transport design for durable resource creation and
-separate JPEG retrieval; production API implementation remains Phase 3B.
-Absolute source-time calibration and any frontend, ROI, or object-comparison
-work remain deferred. Generic Event Discovery remains a longer-term direction
-rather than a current capability.
+the conservative `measured_clip_relative` status. Phase 3B has implemented the
+approved local synchronous FastAPI transport: it composes the existing service,
+safely reuses compatible completed resources, and exposes a separate durable
+JPEG endpoint without introducing frontend or background work. Absolute
+source-time calibration and any frontend, ROI, or object-comparison work remain
+deferred. Generic Event Discovery remains a longer-term direction rather than a
+current capability.
 
 ## Current priorities
 
@@ -125,9 +126,9 @@ rather than a current capability.
 4. Preserve the public investigation CLI and Investigation Service with their
    Plan, Collection, and Artifact boundaries while the next increment decides
    how completed investigation artifacts enter existing analysis.
-5. Implement the approved Phase 3B local reference-frame API without changing
-   the recording, replay, decoder, or conservative timing boundaries, then use
-   that durable JPEG surface for later ROI work.
+5. Independently review and harden the implemented Phase 3B local reference-frame
+   API while preserving the recording, replay, decoder, and conservative timing
+   boundaries before later ROI work.
 
 ## High-level roadmap
 

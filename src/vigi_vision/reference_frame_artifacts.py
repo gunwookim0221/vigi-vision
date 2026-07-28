@@ -105,7 +105,7 @@ class ReferenceFrameArtifactStore:
         self, request: ReferenceFrameRequest, segment: RecordingSegment
     ) -> "ReferenceFrameArtifactSession":
         """Create staging for a new deterministic resource without overwriting completed output."""
-        resource_id = _resource_id(request, segment)
+        resource_id = reference_frame_resource_id(request, segment)
         final_directory = _direct_child(self.output_root, resource_id)
         claim_path = _direct_child(self.output_root, f".{resource_id}.claim")
         staging_directory = _direct_child(self.output_root, f".{resource_id}-{token_hex(4)}")
@@ -196,7 +196,8 @@ class ReferenceFrameArtifactSession:
         _remove_claim(self.claim_path)
 
 
-def _resource_id(request: ReferenceFrameRequest, segment: RecordingSegment) -> str:
+def reference_frame_resource_id(request: ReferenceFrameRequest, segment: RecordingSegment) -> str:
+    """Return the deterministic safe resource identifier for one request and segment."""
     return (
         f"channel-{request.channel_id}_"
         f"{request.requested_time_utc.strftime('%Y%m%dT%H%M%SZ')}_"
