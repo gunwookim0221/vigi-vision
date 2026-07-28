@@ -27,7 +27,9 @@ documentation route is added, removed, or relocated.
   [design/object-disappearance-investigation.md](design/object-disappearance-investigation.md)
   when planning the approved, not-yet-implemented user-selected object change
   investigation slice and its later reference-frame, ROI, and temporal-search
-  boundaries.
+  boundaries. Read [design/reference-frame-service.md](design/reference-frame-service.md)
+  when implementing or reviewing the proposed recorded reference-frame service,
+  its timing evidence, durable artifacts, or minimal HTTP boundary.
 - **Integrations — `integrations/`:** contracts and operating notes for external
   systems. Use `integrations/sdk-change-requests/` only for specific,
   evidence-backed changes requested of the separate VIGI SDK.
