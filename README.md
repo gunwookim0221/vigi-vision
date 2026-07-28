@@ -205,6 +205,9 @@ Do not log or persist the RTSP URL, credentials, replay URL, extracted frame, or
 
 ## Roadmap
 
+- Planned progression: user-selected object change investigation, then object
+  relocation and broader event types, then generic Event Discovery with
+  optional VLM interpretation. This roadmap item is not yet implemented.
 - Add natural-language event search and clip discovery on top of the current analysis pipeline.
 - Expand evaluation with representative, privacy-safe demonstration scenarios.
 - Refine profile prompts and structured report schemas using human review feedback.

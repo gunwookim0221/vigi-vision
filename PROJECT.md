@@ -102,6 +102,12 @@ JPEGs and a credential-free manifest, records gaps, and preserves inspectable
 partial artifacts on safe failures without OpenAI, semantic search, or SDK
 changes.
 
+Post-submission, recording retrieval and sampling are the existing foundation.
+The next bounded product slice is a user-selected object-disappearance
+investigation; its Phase 1 design is approved, but implementation has not
+started. Generic Event Discovery remains a longer-term direction rather than a
+current capability.
+
 ## Current priorities
 
 1. Preserve the public SDK / Vision ownership boundary in subsequent work.
@@ -111,6 +117,9 @@ changes.
 4. Preserve the public investigation CLI and Investigation Service with their
    Plan, Collection, and Artifact boundaries while the next increment decides
    how completed investigation artifacts enter existing analysis.
+5. Use the approved object-disappearance design as the next bounded product
+   slice, building on recording retrieval and sampling without claiming generic
+   Event Discovery or object relocation before evidence supports them.
 
 ## High-level roadmap
 
@@ -121,5 +130,6 @@ changes.
    SDK in the smallest working path.
 4. **Hardening:** improve tests, errors, documentation, and operability based on
    observed MVP needs.
-5. **Expansion:** consider additional investigation capabilities only after the
-   MVP proves demand.
+5. **Expansion:** validate user-selected object change investigation before
+   broader event types, object relocation, generic Event Discovery, or optional
+   VLM interpretation.
