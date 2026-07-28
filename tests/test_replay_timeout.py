@@ -110,3 +110,24 @@ def test_replay_timeout_removes_partial_file_and_redacts_credentials(
 
     assert "password" not in str(exception_info.value)
     assert not tuple(tmp_path.glob("*.mp4"))
+
+
+def test_replay_extraction_removes_partial_file_on_keyboard_interrupt(tmp_path: Path) -> None:
+    # Given
+    def interrupted_runner(arguments: tuple[str, ...], _: float) -> CompletedProcess[str]:
+        _ = Path(arguments[-1]).write_bytes(b"partial")
+        raise KeyboardInterrupt
+
+    extractor = ReplayExtractor(
+        executable=Path("ffmpeg.exe"),
+        username="operator",
+        password=SecretStr("password"),
+        temporary_directory=tmp_path,
+        runner=interrupted_runner,
+    )
+
+    # When / Then
+    with pytest.raises(KeyboardInterrupt):
+        _ = extractor.extract(_request(30))
+
+    assert not tuple(tmp_path.glob("*.mp4"))

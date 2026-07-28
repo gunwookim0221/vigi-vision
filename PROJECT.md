@@ -103,10 +103,16 @@ partial artifacts on safe failures without OpenAI, semantic search, or SDK
 changes.
 
 Post-submission, recording retrieval and sampling are the existing foundation.
-The next bounded product slice is a user-selected object-disappearance
-investigation; its Phase 1 design is approved, but implementation has not
-started. Generic Event Discovery remains a longer-term direction rather than a
-current capability.
+The user-selected object-disappearance investigation now has its Phase 1 design
+and an internal Phase 2B reference-frame service: it selects one recorded NVR
+segment, extracts a bounded replay, selects the exact ffprobe candidate by
+decoded-frame index, validates and persists one credential-free reference JPEG
+with truthful clip-relative timing evidence, and is covered by hermetic tests.
+An initial real-NVR run produced a validated `2560x1440` JPEG while retaining
+the conservative `measured_clip_relative` status. Absolute source-time
+calibration and any HTTP, frontend, ROI, or object-comparison work remain
+deferred. Generic Event Discovery remains a longer-term direction rather than
+a current capability.
 
 ## Current priorities
 
