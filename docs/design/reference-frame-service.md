@@ -2,10 +2,11 @@
 
 ## Status
 
-**Status: Phase 2B internal service implemented and exercised against the real
-NVR; [Phase 3A has approved the synchronous HTTP contract](reference-frame-api.md),
-but FastAPI production code, frontend, ROI, and object-comparison work remain
-deferred.**
+**Status: Phase 2B internal service, Phase 3B synchronous HTTP transport, and
+Phase 3C hardening/real-NVR validation are complete. The implemented Phase 4A
+candidate-set contract is in
+[reference-frame-candidates.md](reference-frame-candidates.md); frontend, ROI,
+and object-comparison work remain deferred.**
 
 The implemented internal slice validates source time into UTC, resolves a
 deterministic covering segment through `RecordingPlanner`, constrains its replay
@@ -19,11 +20,12 @@ When a host lacks an IANA timezone database, the established default
 `Asia/Seoul` input uses a fixed KST (+09:00) fallback; other requested zones
 still require valid zoneinfo data.
 
-This document specifies the next internal boundary needed by the approved
+This document specifies the implemented internal boundary used by the approved
 [object-disappearance investigation](object-disappearance-investigation.md):
 retrieve one reviewable recorded frame for a requested NVR channel and time.
-It does not implement a public service, FastAPI application, frontend, ROI
-selection, presence classification, temporal search, or review-clip generation.
+The public HTTP transport is documented separately; this service still does not
+implement frontend, ROI selection, presence classification, temporal search, or
+review-clip generation.
 
 ## Purpose
 
@@ -81,18 +83,18 @@ subprocess diagnostics.
 
 ## Remaining implementation gaps
 
-The internal service does not yet provide:
+The implemented service and HTTP transport intentionally do not provide:
 
-- a concrete settings-to-service composition or public entry point;
 - cancellation-aware replay extraction;
-- FastAPI, HTTP serialization, CORS configuration, or an image endpoint.
+- browser/frontend configuration or UI; or
+- ROI selection, object comparison, and temporal search.
 
-`RecordingPlanner` now exposes the selected covering segment and a
+`RecordingPlanner` exposes the selected covering segment and a
 segment-constrained replay plan. The focused decoder measures clip-relative PTS
 and retains conservative timing status because real-NVR validation has not
-proven an absolute replay-start mapping. Compatible completed-resource lookup
-is also deferred; any existing deterministic resource is currently a safe
-artifact conflict rather than silent reuse.
+proven an absolute replay-start mapping. The API composes settings safely and
+validates/reuses compatible completed resources through the implemented
+artifact/resource boundary.
 
 ## User and system workflow
 

@@ -27,19 +27,27 @@ from vigi_vision.reference_frame_api_models import (
     reference_frame_response,
 )
 from vigi_vision.reference_frame_artifacts import ReferenceFrameArtifactStore
+from vigi_vision.reference_frame_candidate_api_models import (
+    ReferenceFrameCandidateSetBody,
+    ReferenceFrameCandidateSetResponse,
+    parse_reference_frame_candidate_set_request,
+    reference_frame_candidate_set_response,
+)
+from vigi_vision.reference_frame_candidate_service import ReferenceFrameCandidateSetService
 from vigi_vision.reference_frame_decoder import FfmpegReferenceFrameDecoder
 from vigi_vision.reference_frame_models import (
     ReferenceFrameError,
     ReferenceFrameOutcome,
-    ReferenceFrameRequest,
-    ReferenceFrameResolution,
     parse_reference_frame_request,
 )
 from vigi_vision.reference_frame_resources import (
     ReferenceFrameImageResource,
     ReferenceFrameResourceStore,
 )
-from vigi_vision.reference_frame_service import ReferenceFrameService
+from vigi_vision.reference_frame_service import (
+    ReferenceFrameExecutionBoundary,
+    ReferenceFrameService,
+)
 from vigi_vision.replay import ReplayExtractor
 from vigi_vision.video import resolve_ffprobe
 
@@ -52,14 +60,6 @@ _OUTCOME_STATUS: Final = {
     ReferenceFrameOutcome.CREATED: status.HTTP_201_CREATED,
     ReferenceFrameOutcome.REUSED: status.HTTP_200_OK,
 }
-
-
-class ReferenceFrameExecutionBoundary(Protocol):
-    """The existing synchronous service surface required by the HTTP creation route."""
-
-    def execute_or_resolve(self, request: ReferenceFrameRequest) -> ReferenceFrameResolution:
-        """Create or resolve a durable compatible frame."""
-        ...
 
 
 class ReferenceFrameImageBoundary(Protocol):
@@ -138,7 +138,7 @@ def create_reference_frame_app(
             response.status_code = _OUTCOME_STATUS[resolution.outcome]
         except ReferenceFrameError as error:
             return domain_error(error).response()
-        except Exception as error:  # noqa: BLE001 - required top-level HTTP redaction boundary.
+        except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK - HTTP redaction boundary.
             return domain_error(error).response()
         else:
             return api_response
@@ -152,7 +152,7 @@ def create_reference_frame_app(
                 limiter=dependencies.limiter,
             )
             return FileResponse(image.jpeg_path, media_type="image/jpeg", headers=_IMAGE_HEADERS)
-        except Exception as error:  # noqa: BLE001 - required top-level HTTP redaction boundary.
+        except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK - HTTP redaction boundary.
             return domain_error(error).response()
 
     router.add_api_route(
@@ -192,7 +192,49 @@ def create_reference_frame_app(
         summary="Retrieve a durable reference-frame JPEG",
     )
     app.include_router(router)
+    _add_candidate_route(app, dependencies)
     return app
+
+
+def _add_candidate_route(app: FastAPI, dependencies: ReferenceFrameApiDependencies) -> None:
+    candidate_router = APIRouter(
+        prefix="/api/v1/reference-frame-candidate-sets", tags=["reference-frames"]
+    )
+    candidate_service = ReferenceFrameCandidateSetService(dependencies.service)
+
+    async def create_candidate_set(
+        body: ReferenceFrameCandidateSetBody,
+    ) -> ReferenceFrameCandidateSetResponse | JSONResponse:
+        try:
+            request = parse_reference_frame_candidate_set_request(body=body)
+            result = await run_sync(
+                candidate_service.execute,
+                request,
+                limiter=dependencies.limiter,
+            )
+        except ReferenceFrameError as error:
+            return domain_error(error).response()
+        except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK - HTTP redaction boundary.
+            return domain_error(error).response()
+        else:
+            return reference_frame_candidate_set_response(result)
+
+    candidate_router.add_api_route(
+        "",
+        create_candidate_set,
+        methods=["POST"],
+        response_model=ReferenceFrameCandidateSetResponse,
+        status_code=status.HTTP_200_OK,
+        responses={
+            status.HTTP_400_BAD_REQUEST: {"model": ReferenceFrameErrorResponse},
+            status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ReferenceFrameErrorResponse},
+            status.HTTP_500_INTERNAL_SERVER_ERROR: {"model": ReferenceFrameErrorResponse},
+            status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ReferenceFrameErrorResponse},
+            status.HTTP_504_GATEWAY_TIMEOUT: {"model": ReferenceFrameErrorResponse},
+        },
+        summary="Create or reuse bounded reference-frame candidates",
+    )
+    app.include_router(candidate_router)
 
 
 def create_reference_frame_app_from_environment() -> FastAPI:
@@ -222,7 +264,7 @@ def create_reference_frame_app_from_environment() -> FastAPI:
         return create_reference_frame_app(service, resources)
     except ReferenceFrameApiStartupError:
         raise
-    except Exception:  # noqa: BLE001 - fixed safe startup failure boundary.
+    except Exception:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK - safe startup redaction boundary.
         raise ReferenceFrameApiStartupError from None
 
 
