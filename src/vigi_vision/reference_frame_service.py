@@ -62,6 +62,14 @@ class ChannelInventoryBoundary(Protocol):
         ...
 
 
+class ReferenceFrameExecutionBoundary(Protocol):
+    """Execute or resolve one durable reference frame."""
+
+    def execute_or_resolve(self, request: ReferenceFrameRequest) -> ReferenceFrameResolution:
+        """Create or resolve a durable compatible frame."""
+        ...
+
+
 @final
 @dataclass(frozen=True, slots=True)
 class ReferenceFrameService:

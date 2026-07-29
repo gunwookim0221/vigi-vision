@@ -15,6 +15,12 @@ replay extraction, frame decoding, candidate selection, artifact publication,
 and timing evidence remain in the existing domain modules. No endpoint reads
 NVR credentials, builds replay URLs, or invokes ffmpeg directly.
 
+The implemented Phase 4A candidate-set transport is specified separately in
+[reference-frame-candidates.md](reference-frame-candidates.md). It is a sibling
+endpoint that delegates each child to this existing single-frame boundary. It
+does not change the route, schema, status behavior, or explicit naïve-timezone
+requirement documented here.
+
 ## Current-contract constraints
 
 The Phase 2 service accepts a validated `ReferenceFrameRequest` and returns a

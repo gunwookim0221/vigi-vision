@@ -206,6 +206,25 @@ class ReferenceFrameRequest:
         if type(self.generation_policy_version) is not int or self.generation_policy_version <= 0:
             raise ReferenceFrameInputError(_INVALID_GENERATION_POLICY)
 
+    def with_offset(self, offset_seconds: int) -> "ReferenceFrameRequest":
+        """Return a whole-second request derived from this request's source-time interpretation."""
+        if type(offset_seconds) is not int:
+            raise ReferenceFrameInputError(_INVALID_TIME_OR_TIMEZONE)
+        try:
+            requested_time_utc = self.requested_time_utc + timedelta(seconds=offset_seconds)
+        except OverflowError:
+            raise ReferenceFrameInputError(_INVALID_TIME_OR_TIMEZONE) from None
+        source_time = requested_time_utc.astimezone(_request_source_zone(self))
+        return ReferenceFrameRequest(
+            channel_id=self.channel_id,
+            requested_time_text=source_time.isoformat(),
+            source_timezone=self.source_timezone,
+            requested_time_utc=requested_time_utc,
+            frame_selection_policy=self.frame_selection_policy,
+            generation_policy_version=self.generation_policy_version,
+            source_kind=self.source_kind,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class DecodedFrameEvidence:
@@ -315,6 +334,19 @@ def _source_zone(source_timezone: str) -> ZoneInfo | timezone:
         except ZoneInfoNotFoundError:
             return _KST
     return ZoneInfo(source_timezone)
+
+
+def _request_source_zone(request: ReferenceFrameRequest) -> ZoneInfo | timezone:
+    try:
+        return _source_zone(request.source_timezone)
+    except (ValueError, ZoneInfoNotFoundError):
+        parsed = _parse_requested_time(request.requested_time_text)
+        if parsed.tzinfo is None:
+            raise ReferenceFrameInputError(_INVALID_TIME_OR_TIMEZONE) from None
+        offset = parsed.utcoffset()
+        if offset is None:
+            raise ReferenceFrameInputError(_INVALID_TIME_OR_TIMEZONE) from None
+        return timezone(offset)
 
 
 def _parse_requested_time(requested_time_text: str) -> datetime:

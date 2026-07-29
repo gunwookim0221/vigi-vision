@@ -32,7 +32,10 @@ documentation route is added, removed, or relocated.
   its timing evidence or durable artifacts. Read
   [design/reference-frame-api.md](design/reference-frame-api.md) for the
   implemented synchronous FastAPI transport contract, safe JPEG retrieval, and
-  Phase 3B operational boundary.
+  Phase 3B operational boundary. Read
+  [design/reference-frame-candidates.md](design/reference-frame-candidates.md)
+  for the implemented Phase 4A bounded candidate-set contract that reuses those
+  single-frame resources without making absolute timing claims.
 - **Integrations — `integrations/`:** contracts and operating notes for external
   systems. Use `integrations/sdk-change-requests/` only for specific,
   evidence-backed changes requested of the separate VIGI SDK.

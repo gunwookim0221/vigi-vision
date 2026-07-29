@@ -112,10 +112,18 @@ An initial real-NVR run produced a validated `2560x1440` JPEG while retaining
 the conservative `measured_clip_relative` status. Phase 3B has implemented the
 approved local synchronous FastAPI transport: it composes the existing service,
 safely reuses compatible completed resources, and exposes a separate durable
-JPEG endpoint without introducing frontend or background work. Absolute
-source-time calibration and any frontend, ROI, or object-comparison work remain
-deferred. Generic Event Discovery remains a longer-term direction rather than a
-current capability.
+JPEG endpoint without introducing frontend or background work. Phase 3C then
+hardened that loopback boundary and validated it against the real NVR: an
+initial request created a `2560x1440` JPEG and a repeated compatible request
+reused the same resource, while timing remained conservatively
+`measured_clip_relative`. Phase 4A added a bounded, loopback candidate-set API
+around a user-entered reference time: it serially reuses the existing
+single-frame service and child resource lifecycle, preserves partial results,
+and does not change the single-frame API. Automated coverage is complete; real-
+NVR validation remains pending observed user results. Absolute source-time
+calibration and any frontend, ROI, or object-comparison work remain deferred.
+Generic Event Discovery remains a longer-term direction rather than a current
+capability.
 
 ## Current priorities
 
@@ -126,9 +134,9 @@ current capability.
 4. Preserve the public investigation CLI and Investigation Service with their
    Plan, Collection, and Artifact boundaries while the next increment decides
    how completed investigation artifacts enter existing analysis.
-5. Independently review and harden the implemented Phase 3B local reference-frame
-   API while preserving the recording, replay, decoder, and conservative timing
-   boundaries before later ROI work.
+5. Preserve the implemented bounded Phase 4A reference-frame candidate-set API
+   and its conservative timing boundary while Phase 4B/4C adds frontend display
+   and user selection without changing recording or artifact ownership.
 
 ## High-level roadmap
 
