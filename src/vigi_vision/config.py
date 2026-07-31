@@ -20,6 +20,8 @@ _VIGI_USERNAME: Final = "VIGI_USERNAME"
 _OPTIONAL_ENVIRONMENT_KEYS: Final = frozenset(
     {
         "FFMPEG_PATH",
+        "VIGI_REPLAY_TIMEOUT_DIAGNOSTIC_DIRECTORY",
+        "VIGI_REPLAY_PROGRESS_DIAGNOSTICS",
         "VIGI_CHANNEL_ID",
         "VIGI_HOST",
         "VIGI_IPC_HOST",
@@ -169,6 +171,14 @@ class CaptureSettings(BaseSettings):
     vigi_verify_ssl: bool = Field(default=True, validation_alias="VIGI_VERIFY_SSL")
     vigi_stream: Literal["main", "minor"] = Field(default="main", validation_alias="VIGI_STREAM")
     ffmpeg_path: Path | None = Field(default=None, validation_alias="FFMPEG_PATH")
+    replay_timeout_diagnostic_directory: Path | None = Field(
+        default=None,
+        validation_alias="VIGI_REPLAY_TIMEOUT_DIAGNOSTIC_DIRECTORY",
+    )
+    replay_progress_diagnostics: bool = Field(
+        default=False,
+        validation_alias="VIGI_REPLAY_PROGRESS_DIAGNOSTICS",
+    )
 
     @model_validator(mode="after")
     def validate_selected_source(self) -> Self:

@@ -13,6 +13,8 @@ application CLI composes it with the existing local-video analysis workflow.
   seconds, converted UTC endpoints, and duration.
 - `RecordingPlanner.plan(window)` uses the public SDK to find an overlapping
   segment and returns a credential-free `ReplayRequest`.
+- A `RecordingPlanner` lazily retains one SDK recording-search process for its
+  authenticated client lifetime; all of its segment searches reuse that process.
 - `ReplayExtractor.extract(request)` supplies RTSP credentials only to ffmpeg
   and returns a removable `ReplayClip` after a successful video-only MP4
   extraction.
@@ -40,6 +42,23 @@ process.
 command receives encoded credentials in memory; stderr and command arguments
 are not stored in returned values or exceptions. Partial MP4 files are removed
 for timeouts and non-zero ffmpeg exits.
+
+For a controlled local media investigation only, the loopback reference-frame
+application accepts the optional `VIGI_REPLAY_TIMEOUT_DIAGNOSTIC_DIRECTORY`.
+When set, it copies a nonempty timeout partial to that explicit directory using
+a channel-and-UTC-start diagnostic filename; it remains a failed extraction,
+is not returned by the API, and is never logged. The setting is disabled by
+default, does not preserve non-timeout failures, and the operator must remove
+the diagnostic file after local inspection.
+
+`VIGI_REPLAY_PROGRESS_DIAGNOSTICS=true` is a separate, disabled-by-default
+loopback reference-frame diagnostic. It adds FFmpeg's machine-readable progress
+stream and logs only bounded aggregates on timeout: frame, output media time,
+output size, progress/stall ages, duration reachability, and `progress=end`.
+It does not preserve media, change timeout/retry/container behavior, or expose
+progress data through the API, browser, manifests, or artifacts. Run
+`tools/reference-frame-replay-progress.ps1` for the local NVR procedure; it
+prints only the allowlisted summary and removes its temporary server logs.
 
 The layer distinguishes no matching SDK segment, RTSP 401 authentication,
 RTSP 454 recording unavailable, ffmpeg timeout, and other extraction failures.

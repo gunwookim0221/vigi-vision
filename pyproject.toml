@@ -34,6 +34,9 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+vigi_vision = ["reference_frame_web/*.css", "reference_frame_web/*.html", "reference_frame_web/*.js"]
+
 [tool.uv.sources]
 tp-link-vigi-sdk = { path = "../tp-link-vigi-sdk", editable = true }
 

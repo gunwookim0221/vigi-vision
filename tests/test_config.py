@@ -3,7 +3,13 @@ from secrets import token_urlsafe
 
 import pytest
 
-from vigi_vision.config import IpcConnection, Settings, load_settings
+from vigi_vision.config import (
+    CaptureSettings,
+    IpcConnection,
+    Settings,
+    load_capture_settings,
+    load_settings,
+)
 
 _TEST_OPENAI_KEY = token_urlsafe()
 _TEST_PASSWORD = token_urlsafe()
@@ -21,6 +27,7 @@ _CONFIGURATION_KEYS = (
     "VIGI_IPC_USERNAME",
     "VIGI_IPC_PASSWORD",
     "FFMPEG_PATH",
+    "VIGI_REPLAY_TIMEOUT_DIAGNOSTIC_DIRECTORY",
 )
 
 
@@ -154,6 +161,32 @@ def test_load_settings_treats_blank_optional_values_as_unset(tmp_path: Path) -> 
     # Then
     assert settings.vigi_channel_id is None
     assert settings.ffmpeg_path is None
+
+
+def test_load_capture_settings_reads_optional_replay_timeout_diagnostic_directory(
+    tmp_path: Path,
+) -> None:
+    # Given
+    diagnostic_directory = tmp_path / "replay-timeout-diagnostics"
+    env_file = tmp_path / ".env"
+    _ = env_file.write_text(
+        "\n".join(
+            (
+                "VIGI_HOST=nvr.example.invalid",
+                "VIGI_USERNAME=operator",
+                f"VIGI_PASSWORD={_TEST_PASSWORD}",
+                f"VIGI_REPLAY_TIMEOUT_DIAGNOSTIC_DIRECTORY={diagnostic_directory}",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    # When
+    settings = load_capture_settings(env_file)
+
+    # Then
+    assert isinstance(settings, CaptureSettings)
+    assert settings.replay_timeout_diagnostic_directory == diagnostic_directory
 
 
 def test_settings_redacts_secret_values() -> None:

@@ -14,6 +14,7 @@ from vigi_vision.reference_frame_artifacts import (
     ReferenceFrameManifest,
 )
 from vigi_vision.reference_frame_decoder import ReferenceFrameDecodeRequest
+from vigi_vision.reference_frame_direct_support import DirectReferenceFrameRequest
 from vigi_vision.reference_frame_models import (
     DecodedFrameEvidence,
     ReferenceFrameArtifactConflictError,
@@ -150,6 +151,26 @@ class FakeDecoder:
 
 
 @final
+class FakeDirectAcquirer:
+    requests: list[DirectReferenceFrameRequest]
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    def acquire(self, request: DirectReferenceFrameRequest) -> DecodedFrameEvidence:
+        self.requests.append(request)
+        _ = request.output_path.write_bytes(_JPEG_BYTES)
+        return DecodedFrameEvidence(
+            request.output_path,
+            request.target_offset_seconds,
+            1280,
+            720,
+            TimingPrecisionStatus.MEASURED_CLIP_RELATIVE,
+            ("Source timestamp mapping is unavailable pending real-NVR replay validation.",),
+        )
+
+
+@final
 class FakeInventory:
     entries: tuple[Channel, ...]
 
@@ -193,6 +214,30 @@ def test_reference_frame_service_publishes_credential_free_artifact_and_removes_
     assert "safe.example" not in manifest
     assert not replay_path.exists()
     assert not tuple((tmp_path / "artifacts").glob(".*"))
+
+
+def test_reference_frame_service_uses_direct_acquisition_without_creating_a_replay_clip(
+    tmp_path: Path,
+) -> None:
+    request = _request()
+    replay = FakeReplayExtractor(tmp_path / "temporary.mp4")
+    decoder = FakeDecoder()
+    direct_acquirer = FakeDirectAcquirer()
+    service = ReferenceFrameService(
+        FakePlanner(_segment(request.requested_time_utc)),
+        replay,
+        decoder,
+        ReferenceFrameArtifactStore(tmp_path / "artifacts"),
+        direct_acquirer=direct_acquirer,
+    )
+
+    result = service.execute(request)
+
+    assert result.decoded_local_pts_seconds == 2.0
+    assert replay.calls == 0
+    assert decoder.requests == []
+    assert direct_acquirer.requests[0].target_offset_seconds == 2.0
+    assert (tmp_path / "artifacts" / result.resource_id / "frame.jpg").read_bytes() == _JPEG_BYTES
 
 
 def test_reference_frame_service_rejects_mismatched_plan_before_replay_or_artifact(
@@ -477,7 +522,9 @@ def test_reference_frame_artifact_identity_separates_generation_policy_versions(
 ) -> None:
     # Given
     request = _request()
-    changed_request = replace(request, generation_policy_version=2)
+    changed_request = replace(
+        request, generation_policy_version=request.generation_policy_version + 1
+    )
     segment = _segment(request.requested_time_utc)
     store = ReferenceFrameArtifactStore(tmp_path / "artifacts")
 

@@ -2,8 +2,8 @@
 
 ## Status and purpose
 
-**Status: implemented Phase 4A API; real-NVR validation pending user-supplied
-observations.**
+**Status: implemented Phase 4A API and Phase 4B loopback shell; real-browser
+and NVR validation of the shell remains pending user-supplied observations.**
 
 This design adds a bounded synchronous API for several reviewable reference-frame
 candidates around one user-entered reference time. It builds on the implemented
@@ -17,7 +17,7 @@ existing `measured_clip_relative` evidence and null absolute source-time estimat
 unless a future evidence-backed policy changes that contract.
 
 Phase 4A is a server-side candidate-generation boundary only. Phase 4B adds a
-basic frontend; Phase 4C displays thumbnails and lets a user select one.
+basic frontend shell; Phase 4C displays thumbnails and lets a user select one.
 
 ## Goals and exclusions
 
@@ -48,7 +48,7 @@ basic frontend; Phase 4C displays thumbnails and lets a user select one.
 | `parse_reference_frame_request` | Normalizes derived child input and retains existing whole-second/timezone rules. | New individual-frame timing semantics. |
 | `ReferenceFrameService.execute_or_resolve` | Executes or reuses exactly one candidate. | Segment selection, replay, decoding, publication, and cleanup. |
 | Artifact/resource stores | Preserve existing deterministic child identity, claims, promotion, and compatible reuse. | Set-level persistence. |
-| `RecordingPlanner` | Selects every candidate's segment independently. | Cross-boundary borrowing or a new recording path. |
+| `RecordingPlanner` | Selects every candidate's segment independently while reusing its existing SDK recording-search process. | Cross-boundary borrowing or a new recording path. |
 | Existing error mapping | Produces fixed safe child categories. | Raw exception text or subprocess diagnostics. |
 
 ## API boundary
@@ -231,7 +231,7 @@ staging packages; one failure cannot delete a completed sibling. Client
 disconnect does not currently cancel synchronous work, and Phase 4A adds no
 cancellation claim or background worker.
 
-## Frontend handoff
+## Phase 4B frontend shell
 
 | User action | Request |
 | --- | --- |
@@ -240,8 +240,18 @@ cancellation claim or background worker.
 | Different absolute time | Submit a new `reference_time`; do not page server-side. |
 | Retrieve JPEG | Follow the nested existing relative `image_url`; never construct a path. |
 
-The UI must label values as requested candidate positions and show existing
-timing warnings. It must not call an offset a known actual event-time distance.
+The loopback root route serves a native HTML/CSS/JavaScript shell that submits
+`channel_id` and a naïve local `reference_time`, relying on the candidate API's
+existing KST default. It omits `offsets_seconds`, exposes loading and top-level
+safe error states, and shows ordered text-only candidate results. It renders
+the returned offset, requested UTC time, succeeded/failed status, created or
+reused outcome, and fixed safe failure code/message. It never renders a JPEG,
+constructs an image URL, or turns an offset into a known event-time distance.
+
+The shell is served from the existing FastAPI application at `/`, with fixed
+static assets under `/static`. It introduces no frontend framework, build
+system, extra dependency, API route, CORS policy, or candidate-set persistence.
+Phase 4C alone may add thumbnail display and a selection workflow.
 
 ## Security and compatibility
 

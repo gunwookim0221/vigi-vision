@@ -119,9 +119,17 @@ reused the same resource, while timing remained conservatively
 `measured_clip_relative`. Phase 4A added a bounded, loopback candidate-set API
 around a user-entered reference time: it serially reuses the existing
 single-frame service and child resource lifecycle, preserves partial results,
-and does not change the single-frame API. Automated coverage is complete; real-
-NVR validation remains pending observed user results. Absolute source-time
-calibration and any frontend, ROI, or object-comparison work remain deferred.
+and does not change the single-frame API. Automated and observed real-NVR
+validation are complete with conservative timing limitations retained. Phase 4B
+adds a native browser shell at the same loopback application root: it submits
+the default candidate request for a KST local time and renders ordered safe text
+results without thumbnails, selection, or new persistence. Real-browser/NVR
+validation of that shell remains pending. The reference-frame path now also
+has a direct decoder for new resources. It retains structured clip-relative
+timing evidence, stops after a validated selected JPEG, and uses generation
+policy `gpv-2` without changing generic replay-clip behavior. The real-NVR
+release validation for this path is still pending. Absolute source-time calibration, UI
+thumbnail/selection work, ROI, and object comparison remain deferred.
 Generic Event Discovery remains a longer-term direction rather than a current
 capability.
 
@@ -134,9 +142,9 @@ capability.
 4. Preserve the public investigation CLI and Investigation Service with their
    Plan, Collection, and Artifact boundaries while the next increment decides
    how completed investigation artifacts enter existing analysis.
-5. Preserve the implemented bounded Phase 4A reference-frame candidate-set API
-   and its conservative timing boundary while Phase 4B/4C adds frontend display
-   and user selection without changing recording or artifact ownership.
+5. Preserve the implemented bounded Phase 4A candidate API and Phase 4B
+   loopback review shell while Phase 4C adds thumbnails and user selection
+   without changing recording or artifact ownership.
 
 ## High-level roadmap
 
