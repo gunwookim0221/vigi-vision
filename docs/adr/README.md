@@ -1,4 +1,4 @@
-# Architecture Decision Records (ADR)
+﻿# Architecture Decision Records (ADR)
 
 This directory records durable architectural and design decisions that are
 expected to outlive individual implementations.
@@ -57,6 +57,14 @@ Each ADR should include:
 - Consequences
 
 Focus on the reasoning behind the decision rather than implementation details.
+
+## Index
+
+- [ADR-0001: Repository Boundary Between AI and SDK](ADR-0001-repository-boundary.md)
+- [ADR-0002: Bounded Recording Replay Extraction](ADR-0002-bounded-replay-extraction.md)
+- [ADR-0003: Credential-Free Persisted Artifacts](ADR-0003-credential-free-artifacts.md)
+- [ADR-0004: Direct Reference-Frame Decoding and Nearest-Frame Selection](ADR-0004-direct-decoder-and-nearest-frame.md)
+- [ADR-0005: Reference Frame Artifact Lifecycle and Immutable Identity](ADR-0005-reference-frame-artifact-lifecycle.md)
 
 ## Relationship with other documentation
 
