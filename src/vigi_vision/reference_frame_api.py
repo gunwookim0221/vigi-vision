@@ -35,6 +35,7 @@ from vigi_vision.reference_frame_candidate_api_models import (
 )
 from vigi_vision.reference_frame_candidate_service import ReferenceFrameCandidateSetService
 from vigi_vision.reference_frame_decoder import FfmpegReferenceFrameDecoder
+from vigi_vision.reference_frame_direct import FfmpegDirectReferenceFrameAcquirer
 from vigi_vision.reference_frame_models import (
     ReferenceFrameError,
     ReferenceFrameOutcome,
@@ -48,6 +49,7 @@ from vigi_vision.reference_frame_service import (
     ReferenceFrameExecutionBoundary,
     ReferenceFrameService,
 )
+from vigi_vision.reference_frame_web_ui import install_reference_frame_web_ui
 from vigi_vision.replay import ReplayExtractor
 from vigi_vision.video import resolve_ffprobe
 
@@ -114,9 +116,9 @@ def create_reference_frame_app(
             "Timing is clip-relative and not an exact source-frame timestamp."
         ),
     )
-    app.add_exception_handler(RequestValidationError, safe_error_response)
-    app.add_exception_handler(StarletteHttpException, safe_error_response)
-    app.add_exception_handler(Exception, safe_error_response)
+    for exception_type in (RequestValidationError, StarletteHttpException, Exception):
+        app.add_exception_handler(exception_type, safe_error_response)
+    install_reference_frame_web_ui(app)
     router = APIRouter(prefix="/api/v1/reference-frames", tags=["reference-frames"])
 
     async def create_frame(
@@ -247,6 +249,7 @@ def create_reference_frame_app_from_environment() -> FastAPI:
         if _ARTIFACT_ROOT.is_symlink() or not _ARTIFACT_ROOT.is_dir():
             raise ReferenceFrameApiStartupError  # noqa: TRY301 - safe startup validation.
         planner = RecordingPlanner.connect(connection)
+        ffprobe = resolve_ffprobe(ffmpeg)
         artifacts = ReferenceFrameArtifactStore(_ARTIFACT_ROOT)
         resources = ReferenceFrameResourceStore(_ARTIFACT_ROOT)
         service = ReferenceFrameService(
@@ -255,9 +258,17 @@ def create_reference_frame_app_from_environment() -> FastAPI:
                 executable=ffmpeg,
                 username=connection.username.get_secret_value(),
                 password=connection.password,
+                timeout_diagnostic_directory=settings.replay_timeout_diagnostic_directory,
+                progress_diagnostics=settings.replay_progress_diagnostics,
             ),
-            decoder=FfmpegReferenceFrameDecoder(ffmpeg, resolve_ffprobe(ffmpeg)),
+            decoder=FfmpegReferenceFrameDecoder(ffmpeg, ffprobe),
             artifacts=artifacts,
+            direct_acquirer=FfmpegDirectReferenceFrameAcquirer(
+                ffmpeg=ffmpeg,
+                ffprobe=ffprobe,
+                username=connection.username.get_secret_value(),
+                password=connection.password,
+            ),
             channel_inventory=SdkNvrGateway(connection),
             completed_resources=resources,
         )

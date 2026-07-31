@@ -16,6 +16,10 @@ from vigi_vision.reference_frame_decoder import (
     ReferenceFrameDecoder,
     ReferenceFrameDecodeRequest,
 )
+from vigi_vision.reference_frame_direct import (
+    DirectReferenceFrameAcquisitionBoundary,
+)
+from vigi_vision.reference_frame_direct_support import DirectReferenceFrameRequest
 from vigi_vision.reference_frame_models import (
     MANIFEST_SCHEMA_VERSION,
     DecodedFrameEvidence,
@@ -81,6 +85,9 @@ class ReferenceFrameService:
     artifacts: ReferenceFrameArtifactStore = field(repr=False)
     channel_inventory: ChannelInventoryBoundary | None = field(default=None, repr=False)
     completed_resources: ReferenceFrameResourceStore | None = field(default=None, repr=False)
+    direct_acquirer: DirectReferenceFrameAcquisitionBoundary | None = field(
+        default=None, repr=False
+    )
 
     def execute(self, request: ReferenceFrameRequest) -> ReferenceFrameResult:
         """Run selected-segment replay extraction, decoding, and durable artifact publication."""
@@ -106,18 +113,28 @@ class ReferenceFrameService:
         clip: ReplayClip | None = None
         completed = False
         try:
-            clip = self.replay_extractor.extract(replay_request)
             target_offset_seconds = (
                 request.requested_time_utc - extraction_window.start_utc
             ).total_seconds()
-            evidence = self.decoder.decode(
-                ReferenceFrameDecodeRequest(
-                    clip.temporary_mp4_path,
-                    target_offset_seconds,
-                    request.frame_selection_policy,
-                    session.jpeg_path,
+            if self.direct_acquirer is not None:
+                evidence = self.direct_acquirer.acquire(
+                    DirectReferenceFrameRequest(
+                        replay_request,
+                        target_offset_seconds,
+                        request.frame_selection_policy,
+                        session.jpeg_path,
+                    )
                 )
-            )
+            else:
+                clip = self.replay_extractor.extract(replay_request)
+                evidence = self.decoder.decode(
+                    ReferenceFrameDecodeRequest(
+                        clip.temporary_mp4_path,
+                        target_offset_seconds,
+                        request.frame_selection_policy,
+                        session.jpeg_path,
+                    )
+                )
             warnings = inventory_warnings + evidence.warnings
             combined_evidence = DecodedFrameEvidence(
                 evidence.jpeg_path,
@@ -136,8 +153,9 @@ class ReferenceFrameService:
                 None,
                 None,
             )
-            _remove_replay_clip(clip)
-            clip = None
+            if clip is not None:
+                _remove_replay_clip(clip)
+                clip = None
             _, _ = session.finalize(manifest)
             completed = True
             result = ReferenceFrameResult(

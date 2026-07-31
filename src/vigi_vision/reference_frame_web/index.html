@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="Local review shell for requested VIGI reference-frame candidates."
+    >
+    <title>VIGI Vision | Reference frame candidates</title>
+    <link rel="stylesheet" href="/static/reference-frame-ui.css">
+    <script src="/static/reference-frame-ui.js" defer></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="content-limiter header-content">
+        <p class="product-name">VIGI Vision</p>
+        <p class="product-context">Local reference-frame review</p>
+      </div>
+    </header>
+    <main class="content-limiter page-content">
+      <section class="intro" aria-labelledby="page-title">
+        <p class="section-kicker">Candidate review</p>
+        <h1 id="page-title">Generate requested frame candidates</h1>
+        <p>
+          Review bounded positions around one recorded instant. Candidate times are requested
+          positions, not exact real-world capture times.
+        </p>
+      </section>
+
+      <section class="panel" aria-labelledby="candidate-form-title">
+        <div class="section-heading">
+          <h2 id="candidate-form-title">Request details</h2>
+          <p>Default offsets are used for this first review step.</p>
+        </div>
+        <form id="candidate-form" class="candidate-form" novalidate>
+          <div class="field">
+            <label for="channel-id">Channel ID</label>
+            <input id="channel-id" name="channel-id" type="number" min="1" step="1" required>
+          </div>
+          <div class="field">
+            <label for="reference-time">Reference date and time</label>
+            <input
+              id="reference-time"
+              name="reference-time"
+              type="datetime-local"
+              step="1"
+              required
+              aria-describedby="reference-time-hint"
+            >
+            <p id="reference-time-hint" class="field-hint">
+              Interpreted as Asia/Seoul time (KST).
+            </p>
+          </div>
+          <button id="generate-button" type="submit">Generate candidates</button>
+        </form>
+      </section>
+
+      <section class="panel results-panel" aria-labelledby="candidate-results-title">
+        <div class="section-heading">
+          <h2 id="candidate-results-title">Candidate results</h2>
+          <p>Results remain in the server-provided requested order.</p>
+        </div>
+        <p id="request-status" class="request-status" role="status" aria-live="polite">
+          Ready to generate candidates.
+        </p>
+        <p id="request-error" class="request-error" role="alert" hidden></p>
+        <ol id="candidate-results" class="candidate-results" aria-live="polite" aria-relevant="all"></ol>
+      </section>
+    </main>
+  </body>
+</html>

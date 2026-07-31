@@ -12,7 +12,7 @@ from typing_extensions import override
 from vigi_vision.recording import RecordingSegment, RecordingWindow
 
 MANIFEST_SCHEMA_VERSION: Final = 1
-GENERATION_POLICY_VERSION: Final = 1
+GENERATION_POLICY_VERSION: Final = 2
 REPLAY_DURATION: Final = timedelta(seconds=6)
 _KST: Final = timezone(timedelta(hours=9), "KST")
 _INVALID_CHANNEL: Final = "invalid_channel"

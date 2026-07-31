@@ -1,6 +1,8 @@
 """Temporary MP4 extraction for credential-free NVR replay requests."""
 
+import logging
 import os
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
@@ -8,6 +10,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import final
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -15,9 +18,16 @@ from pydantic import SecretStr
 from typing_extensions import override
 
 from vigi_vision.recording import ReplayRequest
+from vigi_vision.replay_progress import (
+    ReplayProgressDiagnostics,
+    ReplayProgressRunner,
+    log_progress_timeout,
+    run_ffmpeg_with_progress,
+)
 
 _STARTUP_ALLOWANCE_SECONDS = 30.0
 _FINALIZATION_MARGIN_SECONDS = 10.0
+_LOGGER = logging.getLogger(__name__)
 
 ReplayRunner = Callable[[tuple[str, ...], float], subprocess.CompletedProcess[str]]
 
@@ -103,7 +113,10 @@ class ReplayExtractor:
     username: str = field(repr=False)
     password: SecretStr = field(repr=False)
     temporary_directory: Path | None = field(default=None, repr=False)
+    timeout_diagnostic_directory: Path | None = field(default=None, repr=False)
+    progress_diagnostics: bool = field(default=False, repr=False)
     runner: ReplayRunner = field(default=_run_ffmpeg, repr=False)
+    progress_runner: ReplayProgressRunner = field(default=run_ffmpeg_with_progress, repr=False)
 
     def extract(self, request: ReplayRequest) -> ReplayClip:
         """Extract one bounded MP4 from a credential-free replay request."""
@@ -111,6 +124,12 @@ class ReplayExtractor:
             output_path = self._temporary_path()
         except OSError:
             raise ReplayExtractionError from None
+        started_at = perf_counter()
+        diagnostics: ReplayProgressDiagnostics | None = (
+            ReplayProgressDiagnostics(request.window.duration_seconds)
+            if self.progress_diagnostics
+            else None
+        )
         try:
             arguments = self._arguments(request, output_path)
             timeout_seconds = (
@@ -118,9 +137,30 @@ class ReplayExtractor:
                 + _STARTUP_ALLOWANCE_SECONDS
                 + _FINALIZATION_MARGIN_SECONDS
             )
-            completed = self.runner(arguments, timeout_seconds)
+            completed = self._run(arguments, timeout_seconds, diagnostics)
         except subprocess.TimeoutExpired:
-            _remove_partial(output_path)
+            try:
+                partial_output_bytes = output_path.stat().st_size
+            except OSError:
+                partial_output_bytes = 0
+            elapsed_ms = round((perf_counter() - started_at) * 1_000)
+            _LOGGER.warning(
+                "replay.timeout channel_id=%d window_start_utc=%s window_end_utc=%s duration_seconds=%d elapsed_ms=%d partial_output_bytes=%d",  # noqa: E501
+                request.window.channel_id,
+                request.window.start_utc.isoformat(),
+                request.window.end_utc.isoformat(),
+                request.window.duration_seconds,
+                elapsed_ms,
+                partial_output_bytes,
+            )
+            if diagnostics is not None:
+                log_progress_timeout(
+                    request.window.channel_id,
+                    request.window.duration_seconds,
+                    elapsed_ms,
+                    diagnostics.summary(now=perf_counter()),
+                )
+            self._preserve_timeout_partial(request, output_path)
             raise ReplayTimeoutError from None
         except OSError:
             _remove_partial(output_path)
@@ -128,7 +168,7 @@ class ReplayExtractor:
         except ReplayExtractionError:
             _remove_partial(output_path)
             raise
-        except BaseException:
+        except KeyboardInterrupt:
             _remove_partial(output_path)
             raise
         if completed.returncode != 0:
@@ -157,11 +197,56 @@ class ReplayExtractor:
         os.close(descriptor)
         return Path(temporary_path)
 
+    def _run(
+        self,
+        arguments: tuple[str, ...],
+        timeout_seconds: float,
+        diagnostics: ReplayProgressDiagnostics | None,
+    ) -> subprocess.CompletedProcess[str]:
+        if diagnostics is None:
+            return self.runner(arguments, timeout_seconds)
+        return self.progress_runner(arguments, timeout_seconds, diagnostics)
+
+    def _preserve_timeout_partial(self, request: ReplayRequest, output_path: Path) -> None:
+        if self.timeout_diagnostic_directory is None or not _is_nonempty_file(output_path):
+            _remove_partial(output_path)
+            return
+        diagnostic_path = self.timeout_diagnostic_directory / (
+            f"channel-{request.window.channel_id}-"
+            f"{request.window.start_utc:%Y%m%dT%H%M%SZ}-timeout.mp4"
+        )
+        created_diagnostic_file = False
+        try:
+            self.timeout_diagnostic_directory.mkdir(parents=True, exist_ok=True)
+            if (
+                self.timeout_diagnostic_directory.is_symlink()
+                or not self.timeout_diagnostic_directory.is_dir()
+            ):
+                _remove_partial(output_path)
+                return
+            descriptor = os.open(
+                diagnostic_path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            )
+            os.close(descriptor)
+            created_diagnostic_file = True
+            _ = shutil.copyfile(output_path, diagnostic_path)
+        except OSError:
+            if created_diagnostic_file:
+                _remove_partial(diagnostic_path)
+        finally:
+            _remove_partial(output_path)
+
     def _arguments(self, request: ReplayRequest, output_path: Path) -> tuple[str, ...]:
-        authenticated_url = _with_rtsp_credentials(
+        authenticated_url = authenticated_replay_url(
             request.replay_url,
             self.username,
             self.password.get_secret_value(),
+        )
+        progress_arguments = (
+            ("-progress", "pipe:1", "-nostats", "-stats_period", "0.5")
+            if self.progress_diagnostics
+            else ()
         )
         return (
             str(self.executable),
@@ -169,6 +254,7 @@ class ReplayExtractor:
             "-loglevel",
             "error",
             "-nostdin",
+            *progress_arguments,
             "-rtsp_transport",
             "tcp",
             "-i",
@@ -206,7 +292,8 @@ def _process_error(stderr: str) -> ReplayError:
     return ReplayExtractionError()
 
 
-def _with_rtsp_credentials(replay_url: str, username: str, password: str) -> str:
+def authenticated_replay_url(replay_url: str, username: str, password: str) -> str:
+    """Embed replay credentials only in an in-memory RTSP URL for ffmpeg."""
     parsed = urlsplit(replay_url)
     if parsed.scheme != "rtsp" or not parsed.hostname or parsed.username or parsed.password:
         raise ReplayExtractionError

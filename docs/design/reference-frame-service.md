@@ -96,6 +96,283 @@ proven an absolute replay-start mapping. The API composes settings safely and
 validates/reuses compatible completed resources through the implemented
 artifact/resource boundary.
 
+## Design decision: direct reference-frame acquisition after replay stalls
+
+**Status: implemented for new reference-frame resources. The direct acquirer
+uses structured FFmpeg timing evidence and increments the generation policy to
+`gpv-2`; real-NVR validation remains the release gate.**
+
+### 1. Problem statement and proven evidence
+
+The current reference-frame product is one durable, temporally evidenced JPEG.
+Its implementation first requires a complete temporary MP4, even after the
+frame needed by the product has been decoded. That coupling failed on one
+otherwise ordinary NVR window.
+
+For channel 1, KST `2026-07-20 12:34:18` normalizes to
+`2026-07-20T03:34:18Z`. The selected segment for offsets `-10`, `0`, and `+10`
+was the same interval, `03:33:15Z` through `03:36:16Z`. The zero-offset replay
+window was `03:34:16Z` through `03:34:22Z`; the requested frame position was
+local 2 seconds in its 6-second clip. The `-10` and `+10` requests succeeded;
+the zero request failed with `replay_timeout`.
+
+The allowlisted timeout summary for that zero request showed `147` frames,
+`out_time_us=5840000`, and `total_size=1048620`, followed by about 40 seconds
+without media-time or byte progress. It never reached the requested 6 seconds
+and did not emit `progress=end`. This is evidence of an input/packet/GOP/
+timestamp/decoder stall approximately 0.16 seconds before the requested output
+end, not MP4 finalization alone. It is NVR-specific evidence for this window;
+synthetic FFmpeg checks are not evidence about the NVR.
+
+### 2. Current execution flow and root-cause boundary
+
+```text
+candidate-set API (KST input and ordered offsets)
+  -> one-slot, serial ReferenceFrameCandidateSetService
+  -> ReferenceFrameService.execute_or_resolve
+  -> RecordingPlanner.find_covering_segment / plan_for_segment
+  -> ReplayExtractor: temporary complete MP4
+  -> FfmpegReferenceFrameDecoder: ffprobe all local frame PTS
+  -> nearest frame, earlier on ties, then JPEG extraction and validation
+  -> staged manifest and durable package promotion
+```
+
+`build_reference_replay_window` supplies the 6-second window: normally
+`[requested - 2 s, requested + 4 s)`, clipped to the selected segment. The
+two-second pre-roll puts the requested point at clip-relative PTS 2. The
+current decoder uses `ffprobe -show_frames` on the completed MP4, selects the
+minimum absolute local-PTS distance with the earlier PTS as a tie-break, then
+uses `select=eq(n\\,index)` to create and validate `frame.jpg`.
+
+`ReplayExtractor` does not seek: it supplies the replay stream as `-i`, then
+places `-t <window-duration>` after that input, with video copy to MP4. The
+installed FFmpeg help defines `-t` as stopping transcoding after the specified
+duration. Thus this is an output-duration cap, not an input-side `-ss` seek.
+Its bounded timeout is `duration + 30 s startup allowance + 10 s finalization
+margin`; for this request, 46 seconds. The timeout was correct for a command
+whose success contract required a finalized 6-second MP4.
+
+The candidate-set service invokes the existing single-frame service serially
+under the one-slot limiter. Its one shared `RecordingPlanner` retains its public
+SDK recording-search process ID for the authenticated planner lifetime, while
+every candidate independently plans its segment/window and owns its replay and
+staging cleanup. Compatible durable-resource reuse is checked after safe
+segment/window planning and before replay extraction.
+
+The root-cause boundary is therefore **generic replay completion**, not the
+planner, segment selection, artifact writer, or local JPEG decoder. Generic
+recording callers (`analyze-recording`, sampling, and investigation collection)
+do require a complete reusable MP4 and must retain this behavior. A reference
+frame does not.
+
+### 3. Requirement mismatch
+
+The generic replay boundary must reject an incomplete MP4: it cannot safely
+return a clip whose container or media ends early. The reference-frame boundary
+instead needs one valid JPEG, selected according to the existing policy, with
+the requested time, selected segment, replay window, clip-relative timing
+evidence, warnings, and credential-free durable manifest. It must not claim an
+absolute source timestamp: the current `estimated_source_time_utc` and request
+offset remain `null` and the precision remains `measured_clip_relative` until
+separate calibration evidence exists.
+
+Consequently, increasing the generic outer timeout is not the primary fix. It
+would merely wait longer after the measured stall and would still require the
+unusable partial MP4. Accepting that partial MP4 is explicitly unsafe.
+
+### 4. Alternatives considered
+
+| Option | Assessment |
+| --- | --- |
+| A. Direct single-frame extraction | Best match for the JPEG-only product if it can retain ordered per-frame timing evidence and terminate after the selection is decided. It isolates the fix from generic replay clips. |
+| B. Shorter bounded MP4 | Small code change, but still requires a complete container and can fail on a stall after the target. A new duration would be an operational guess, not a semantic solution. |
+| C. Longer window | Moves the vulnerable output boundary and increases latency/media work. It has no evidence that it avoids the deterministic zero-offset stall. |
+| D. Streaming/fragmented intermediate container | Could make partial media inspectable, but adds container and lifecycle complexity while the product needs one JPEG. It risks weakening the generic clip contract. |
+| E. Direct-first fallback | A hidden retry can produce different timing behavior and temporal drift. It is not selected. A future explicit fallback requires its own policy version, failure trigger, and real-NVR evidence. |
+
+### 5. Selected approach and rationale
+
+Select **A: a reference-frame-specific direct stream decoder**. It is the
+smallest safe production change that satisfies the actual product requirement:
+decode sequentially from the existing bounded replay window, retain only the
+two neighboring timestamped candidates around local PTS 2, write/validate the
+selected JPEG, then intentionally end the direct decoder process. It does not
+create, inspect, or accept a partial MP4.
+
+The existing 6-second request window and two-second pre-roll remain unchanged.
+The direct decoder has a six-second *maximum* media horizon for no-frame,
+one-sided, and segment-boundary cases, but it has no fixed post-target wait:
+the minimum post-target allowance is the first valid timestamped decoded frame
+at or after the target. That is exactly the information needed to compare it
+with the last valid earlier frame. The normal direct success path therefore
+finishes near the target rather than waiting for local 5.84--6 seconds, avoiding
+the observed stall location without changing the requested reference time.
+
+This approach is release-gated by the timing-evidence proof below. If the NVR
+cannot supply the required ordered timing facts without raw diagnostics, do not
+silently ship a less precise direct path; retain the existing clip path and
+record the direct path as not validated. Option B is a rollback investigation,
+not an automatic fallback.
+
+### 6. Proposed component and API boundaries
+
+Keep `ReferenceFrameRequest`, public HTTP schemas, candidate offsets/order,
+`ReferenceFrameService`, `RecordingPlanner`, artifact/resource stores, one-slot
+limiter, and serial candidate orchestration intact. Replace only the
+reference-frame-specific dependency currently named `ReferenceFrameDecoder` and
+the preceding `ReplayExtractionBoundary` call on the *new-resource* path with
+one narrow internal boundary, conceptually:
+
+```text
+DirectReferenceFrameAcquirer.acquire(
+  replay_request, target_local_seconds, selection_policy, staging_jpeg_path
+) -> DecodedFrameEvidence
+```
+
+It owns credential injection only through the same in-memory replay URL helper,
+bounded ffprobe/FFmpeg child lifecycle, machine-readable per-frame evidence,
+candidate selection, JPEG validation, and removal of its invocation-owned
+temporary candidates. `ReferenceFrameService` continues to own segment/window
+selection, completed-resource reuse, staging session, manifest, promotion, and
+failure cleanup. `ReplayExtractor` is not changed and remains used by every
+non-reference-frame flow.
+
+The service invokes the direct acquirer only after `RecordingPlanner` has
+produced the same selected-segment-constrained `ReplayRequest`; it never builds
+a replay URL itself. Existing API responses and manifest fields are sufficient:
+they already include the request, segment, window, local PTS, timing status,
+warnings, and image dimensions. Because acquisition semantics change, the
+implementation must intentionally increment the generation-policy version
+(for example, `gpv-2`); completed `gpv-1` resources remain readable but are not
+compatible reuse candidates for the new policy.
+
+### 7. Conceptual FFmpeg semantics and timing proof
+
+The direct process must use the existing RTSP/TCP input rules and bounded
+window, decode from its beginning, and create JPEG candidates in an
+invocation-owned staging subdirectory. It must use no input-side `-ss`; input
+seeking can land on a keyframe and would not prove the current nearest-decoded
+policy. A post-input maximum duration still bounds the no-result path. The
+implementation must not log or persist its authenticated URL, command,
+stderr, or raw per-frame diagnostic text.
+
+The implementation needs a structured per-frame record with **both an emitted
+ordinal and normalized clip-relative PTS**. It must not infer a timestamp from
+the requested filename. Local FFmpeg experiments established that `image2`
+supports atomic image writing and frame-PTS-based names, and that preserving an
+encoder source time base can make those names represent input PTS. Those checks
+prove only local FFmpeg capability. Before use against the NVR, a focused
+implementation spike must prove that its selected structured channel preserves
+an ordered ordinal and PTS without raw stderr parsing, duplicate loss, or
+unexplained timestamp rewriting. If a frame's PTS is missing, non-finite,
+negative, duplicate without a reliable ordinal, or regresses/discontinues, the
+acquirer fails conservatively rather than declaring the JPEG precisely selected.
+
+The active candidate state is bounded to the last valid frame strictly before
+the target and the first valid frame at or after it. For monotonically emitted
+PTS, no later frame can be nearer; choose the smaller distance and choose the
+earlier candidate on equality. This is mathematically equivalent to the current
+full-list selector while avoiding storage of every frame. A selected JPEG is
+accepted only after it has been finalized atomically, ffprobe-validated as the
+expected dimensions/MJPEG, and its evidence has been captured.
+
+### 8. Success, failure, timeout, and cancellation semantics
+
+| Condition | Required result |
+| --- | --- |
+| Earlier and at/after candidates available | Select nearest; equal distance selects earlier; deliberately stop the child after the selected JPEG is validated. |
+| Only earlier candidates at natural end | Preserve the existing one-sided warning and select the nearest earlier candidate. |
+| Only at/after candidates at natural end | Preserve the existing one-sided warning and select the nearest later candidate. |
+| No frame or no acceptable timestamp evidence | Existing safe `no_acceptable_frame` or `decode_failure`; no artifact. |
+| Stall after both neighboring candidates and JPEG validation | Success is allowed. The parent intentionally terminates the no-longer-needed stream, so a later lack of `progress=end` is irrelevant. |
+| Stall before the first at/after candidate or before JPEG validation | Safe timeout/decode failure; never promote a partial result. |
+| Malformed, missing, duplicate-without-ordinal, or discontinuous timestamps | Conservative decode failure; do not silently downgrade timing precision. |
+| JPEG persistence/validation failure | `artifact_failure` or `decode_failure` as today; remove invocation-owned partial files. |
+| Explicit timeout or cancellation before success | Terminate, then kill only the owned child if needed; wait for readers; remove candidates and staging. No public cancellation claim is added. |
+| Child exits without success and without `progress=end` | Failure unless the controller had already recorded an intentional successful stop. |
+
+The direct acquirer receives one bounded wall-clock budget derived from the
+existing window duration plus the established startup allowance; it also has a
+small documented shutdown grace before killing its own process. It must drain
+all owned stdout/stderr/metadata pipes concurrently so neither pipe blocks the
+child. Raw output is discarded after fixed safe classification and never enters
+logs, errors, artifacts, API responses, or manifests.
+
+### 9. Artifact, privacy, compatibility, and migration rules
+
+Direct candidate JPEGs live only under the existing invocation staging session.
+After selection, retain one validated `frame.jpg`, serialize the existing
+credential-free manifest, and promote exactly as `ReferenceFrameArtifactStore`
+does today. On any failure, remove only the invocation's candidate images,
+partial JPEG, staging directory, claim, and owned child processes. Do not touch
+completed resources, artifacts from another request, or generic replay clips.
+
+The manifest remains credential-free: no host, username, password, token,
+replay URL, FFmpeg arguments, raw stderr, temporary path, or unbounded
+exception text. The current response schema, error envelope, deterministic
+resource layout, overwrite protection, candidate ordering, and Phase 4B shell
+remain compatible. The only visible material change is a new deterministic
+generation-policy identity for newly created resources; old resources are
+preserved and are not overwritten.
+
+At an exact segment boundary, retain half-open segment selection and clip the
+same requested window to the selected segment. A one-sided direct result must
+keep its existing warning. A gap or a window that cannot be represented remains
+`recording_unavailable`; the direct path never borrows frames from a neighbor.
+
+### 10. Test strategy and real-NVR acceptance
+
+Hermetic tests for the new acquirer must cover:
+
+- target decoded before a simulated later stall succeeds after intentional stop;
+- stall before target, no frames, missing/malformed timestamps, discontinuous
+  PTS, and duplicate PTS without a proven ordinal fail safely;
+- nearest earlier/later selection, deterministic equal-distance tie handling,
+  local PTS evidence, and the current null source-time estimate;
+- segment start/end clipping, only-before/only-after warnings, timeout,
+  cancellation, pipe draining, partial JPEG cleanup, artifact collision, and
+  repeated-request process/file stability;
+- unchanged generic `ReplayExtractor` MP4 timeout/partial-media behavior,
+  existing API contracts, candidate ordering, one-slot serial lifecycle, and
+  Phase 4B UI behavior; and
+- safe logs and manifests with no URL, host, credential, command, stderr, or
+  temporary-path leakage.
+
+Real-NVR acceptance uses channel 1 at KST `2026-07-20 12:34:18` with offsets
+`-10`, `0`, and `+10`. For each candidate, record only the safe request/window,
+selected segment bounds, local PTS, timing status/warnings, JPEG dimensions,
+resource ID, and process-cleanup result. The zero candidate must either produce
+a valid evidenced JPEG without waiting for irrelevant post-selection media or
+return a precise conservative failure. Verify no partial MP4 is accepted, no
+child remains, no staging files remain, and response order is unchanged.
+
+### 11. Rollback, non-goals, and implementation checklist
+
+Rollback is an application composition switch back to the existing
+`ReplayExtractor` plus local-MP4 decoder before release; it does not delete or
+rewrite durable artifacts. Do not add a blind runtime retry, extend the generic
+timeout, accept partial MP4 output, change the requested time or candidate
+ordering, add a public API field, modify the SDK, or redesign recording
+retrieval. This is not a thumbnail, ROI, object-comparison, event-search,
+background-job, or frontend feature.
+
+Separate implementation task checklist:
+
+1. Prove a Windows-compatible, machine-readable PTS-plus-ordinal channel on a
+   local fixture and the target NVR without parsing or retaining raw stderr.
+2. Add the reference-only direct acquirer and injected process seams; reuse
+   credential injection, NVR planner, artifact staging, safe exception mapping,
+   and existing FFmpeg/ffprobe resolution.
+3. Implement bounded concurrent pipe draining, atomic candidate output,
+   intentional post-selection termination, child wait/kill, and cleanup.
+4. Implement the two-candidate selector and conservative timestamp validation;
+   retain `measured_clip_relative` with null absolute-source fields.
+5. Wire it only into new reference-frame resource creation, increment the
+   generation policy, and leave generic replay consumers untouched.
+6. Add the hermetic regression tests above, run project validation gates, then
+   perform the stated three-offset real-NVR validation before enabling it as the
+   default production path.
+
 ## User and system workflow
 
 The implemented internal workflow is:
@@ -109,15 +386,16 @@ The implemented internal workflow is:
    interval semantics.
 4. It creates a short replay window around the point, clipped to that segment,
    then derives or validates a replay plan against the same selected segment.
-5. It reuses the resulting credential-free `ReplayRequest` and
-   `ReplayExtractor` to create a temporary local MP4.
-6. A new local-MP4 decoder probes candidate frames, selects one according to
-   the declared policy, writes one JPEG into invocation-owned staging output,
-   and returns safe timing evidence.
+5. It reuses the resulting credential-free `ReplayRequest` with the
+   reference-frame-only direct acquirer, which decodes from the bounded-window
+   start and retains the two adjacent structured timing candidates.
+6. The acquirer selects, atomically finalizes, and validates one JPEG in
+   invocation-owned staging, then intentionally ends the no-longer-needed
+   decoder process and returns safe clip-relative timing evidence.
 7. A reference-frame artifact writer writes a credential-free manifest and
    promotes the completed JPEG package to its final directory.
-8. The service removes the temporary replay clip in `finally` and returns only
-   durable artifact-relative data and safe metadata.
+8. The service removes a temporary replay clip only on its retained legacy
+   path, and returns only durable artifact-relative data and safe metadata.
 
 No OpenAI request, profile selection, business report, ROI, or event reasoning
 occurs in this flow.

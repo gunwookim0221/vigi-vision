@@ -112,6 +112,107 @@ def test_replay_timeout_removes_partial_file_and_redacts_credentials(
     assert not tuple(tmp_path.glob("*.mp4"))
 
 
+def test_replay_timeout_preserves_only_opted_in_diagnostic_partial(tmp_path: Path) -> None:
+    # Given
+    diagnostic_directory = tmp_path / "timeout-diagnostics"
+
+    def timing_out_runner(
+        arguments: tuple[str, ...], timeout_seconds: float
+    ) -> CompletedProcess[str]:
+        _ = Path(arguments[-1]).write_bytes(b"partial")
+        raise TimeoutExpired(arguments, timeout_seconds)
+
+    extractor = ReplayExtractor(
+        executable=Path("ffmpeg.exe"),
+        username="operator",
+        password=SecretStr("password"),
+        temporary_directory=tmp_path / "temporary",
+        timeout_diagnostic_directory=diagnostic_directory,
+        runner=timing_out_runner,
+    )
+
+    # When / Then
+    with pytest.raises(ReplayTimeoutError):
+        _ = extractor.extract(_request(6))
+
+    preserved = tuple(diagnostic_directory.glob("*.mp4"))
+    assert len(preserved) == 1
+    assert preserved[0].read_bytes() == b"partial"
+    assert preserved[0].name == "channel-1-20260720T030000Z-timeout.mp4"
+    assert "operator" not in preserved[0].name
+    assert "password" not in preserved[0].name
+    assert "nvr.example.test" not in preserved[0].name
+    assert not tuple((tmp_path / "temporary").glob("*.mp4"))
+
+
+def test_replay_timeout_never_overwrites_existing_diagnostic_file(tmp_path: Path) -> None:
+    # Given
+    diagnostic_directory = tmp_path / "timeout-diagnostics"
+    diagnostic_directory.mkdir()
+    existing = diagnostic_directory / "channel-1-20260720T030000Z-timeout.mp4"
+    _ = existing.write_bytes(b"existing")
+
+    def timing_out_runner(
+        arguments: tuple[str, ...], timeout_seconds: float
+    ) -> CompletedProcess[str]:
+        _ = Path(arguments[-1]).write_bytes(b"partial")
+        raise TimeoutExpired(arguments, timeout_seconds)
+
+    extractor = ReplayExtractor(
+        executable=Path("ffmpeg.exe"),
+        username="operator",
+        password=SecretStr("password"),
+        temporary_directory=tmp_path / "temporary",
+        timeout_diagnostic_directory=diagnostic_directory,
+        runner=timing_out_runner,
+    )
+
+    # When / Then
+    with pytest.raises(ReplayTimeoutError):
+        _ = extractor.extract(_request(6))
+
+    assert existing.read_bytes() == b"existing"
+    assert not tuple((tmp_path / "temporary").glob("*.mp4"))
+
+
+def test_replay_timeout_logs_only_safe_window_and_output_facts(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Given
+    def timing_out_runner(
+        arguments: tuple[str, ...], timeout_seconds: float
+    ) -> CompletedProcess[str]:
+        _ = Path(arguments[-1]).write_bytes(b"partial")
+        raise TimeoutExpired(arguments, timeout_seconds)
+
+    extractor = ReplayExtractor(
+        executable=Path("ffmpeg.exe"),
+        username="operator",
+        password=SecretStr("password"),
+        temporary_directory=tmp_path,
+        runner=timing_out_runner,
+    )
+
+    # When
+    with caplog.at_level("WARNING", logger="vigi_vision.replay"), pytest.raises(ReplayTimeoutError):
+        _ = extractor.extract(_request(6))
+
+    # Then
+    assert len(caplog.messages) == 1
+    message = caplog.messages[0]
+    assert "replay.timeout" in message
+    assert "channel_id=1" in message
+    assert "window_start_utc=2026-07-20T03:00:00+00:00" in message
+    assert "window_end_utc=2026-07-20T03:00:06+00:00" in message
+    assert "duration_seconds=6" in message
+    assert "elapsed_ms=" in message
+    assert "partial_output_bytes=7" in message
+    assert "operator" not in message
+    assert "password" not in message
+    assert "nvr.example.test" not in message
+    assert "rtsp://" not in message
+
+
 def test_replay_extraction_removes_partial_file_on_keyboard_interrupt(tmp_path: Path) -> None:
     # Given
     def interrupted_runner(arguments: tuple[str, ...], _: float) -> CompletedProcess[str]:

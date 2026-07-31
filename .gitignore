@@ -48,3 +48,6 @@ Thumbs.db
 
 # Notebook checkpoints
 .ipynb_checkpoints/
+
+# Agent working metadata
+.omo/

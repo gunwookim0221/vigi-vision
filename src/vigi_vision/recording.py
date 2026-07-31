@@ -2,9 +2,8 @@
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone, tzinfo
-from typing import Protocol, final
+from typing import Protocol
 
-from typing_extensions import override
 from vigi import (
     AuthConfig,
     RecordDaysResponse,
@@ -13,12 +12,27 @@ from vigi import (
     VigiClient,
     VigiError,
 )
-from vigi import (
-    RecordSegment as SdkRecordSegment,
-)
 
 from vigi_vision.config import NvrConnection
 from vigi_vision.nvr import diagnose_nvr_error
+from vigi_vision.recording_models import (
+    RecordingDataError,
+    RecordingSegment,
+    RecordingUnavailableError,
+    RecordingWindow,
+    RecordingWindowError,
+    ReplayRequest,
+)
+
+__all__ = (
+    "RecordingDataError",
+    "RecordingPlanner",
+    "RecordingSegment",
+    "RecordingUnavailableError",
+    "RecordingWindow",
+    "RecordingWindowError",
+    "ReplayRequest",
+)
 
 _RECORDING_TIMEZONE = timezone(timedelta(hours=9), "KST")
 _REPLAY_TIME_FORMAT = "%Y%m%dt%H%M%Sz"
@@ -72,113 +86,13 @@ class RecordingClient(Protocol):
         ...
 
 
-@final
-@dataclass(frozen=True, slots=True)
-class RecordingWindowError(ValueError):
-    """Raised when a replay window cannot be represented by the NVR contract."""
+class _RecordingSearchProcess:
+    """Mutable process state held outside the planner's value identity."""
 
-    @override
-    def __str__(self) -> str:
-        return "Recording windows must use whole UTC seconds and have a positive duration."
+    __slots__: tuple[str, ...] = ("process_id",)
 
-
-@final
-@dataclass(frozen=True, slots=True)
-class RecordingDataError(RuntimeError):
-    """Raised when the SDK response cannot be converted into a recording segment."""
-
-    @override
-    def __str__(self) -> str:
-        return "The NVR returned recording metadata that could not be interpreted."
-
-
-@final
-@dataclass(frozen=True, slots=True)
-class RecordingUnavailableError(RuntimeError):
-    """Raised when no NVR recording overlaps the requested UTC window."""
-
-    @override
-    def __str__(self) -> str:
-        return "No recording is available for the requested time window."
-
-
-@dataclass(frozen=True, slots=True)
-class RecordingWindow:
-    """A requested whole-second UTC interval for one NVR channel."""
-
-    channel_id: int
-    start_utc: datetime
-    end_utc: datetime
-
-    def __post_init__(self) -> None:
-        """Reject intervals that cannot be expressed by the whole-second RTSP API."""
-        if (
-            self.channel_id <= 0
-            or self.start_utc.tzinfo is None
-            or self.end_utc.tzinfo is None
-            or self.start_utc.utcoffset() != timedelta(0)
-            or self.end_utc.utcoffset() != timedelta(0)
-            or self.start_utc.microsecond != 0
-            or self.end_utc.microsecond != 0
-            or self.end_utc <= self.start_utc
-        ):
-            raise RecordingWindowError
-
-    @property
-    def duration(self) -> timedelta:
-        """Return the requested UTC interval."""
-        return self.end_utc - self.start_utc
-
-    @property
-    def duration_seconds(self) -> int:
-        """Return the exact client-side ffmpeg duration limit."""
-        return int(self.duration.total_seconds())
-
-
-@dataclass(frozen=True, slots=True)
-class RecordingSegment:
-    """One NVR recording segment with raw epoch seconds and UTC instants."""
-
-    channel_id: int
-    recording_day: date
-    start_epoch_seconds: int
-    end_epoch_seconds: int
-    start_utc: datetime
-    end_utc: datetime
-
-    @property
-    def duration_seconds(self) -> int:
-        """Return the segment duration in whole seconds."""
-        return self.end_epoch_seconds - self.start_epoch_seconds
-
-    @classmethod
-    def from_sdk(
-        cls, channel_id: int, recording_day: date, segment: SdkRecordSegment
-    ) -> "RecordingSegment":
-        """Convert public SDK epoch strings into UTC recording facts."""
-        try:
-            start_epoch_seconds = int(segment.start_time)
-            end_epoch_seconds = int(segment.end_time)
-        except ValueError:
-            raise RecordingDataError from None
-        if end_epoch_seconds <= start_epoch_seconds:
-            raise RecordingDataError
-        return cls(
-            channel_id=channel_id,
-            recording_day=recording_day,
-            start_epoch_seconds=start_epoch_seconds,
-            end_epoch_seconds=end_epoch_seconds,
-            start_utc=datetime.fromtimestamp(start_epoch_seconds, timezone.utc),
-            end_utc=datetime.fromtimestamp(end_epoch_seconds, timezone.utc),
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class ReplayRequest:
-    """A credential-free NVR replay request ready for ffmpeg extraction."""
-
-    window: RecordingWindow
-    replay_url: str = field(repr=False)
+    def __init__(self) -> None:
+        self.process_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +102,12 @@ class RecordingPlanner:
     client: RecordingClient = field(repr=False)
     host: str = field(repr=False)
     recording_timezone: tzinfo = _RECORDING_TIMEZONE
+    _search_process: _RecordingSearchProcess = field(
+        default_factory=_RecordingSearchProcess,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     @classmethod
     def connect(cls, connection: NvrConnection) -> "RecordingPlanner":
@@ -211,7 +131,7 @@ class RecordingPlanner:
         """Build a replay request when an NVR segment overlaps ``window``."""
         try:
             matching_days = self._matching_days(window)
-            process_id = self.client.records.get_free_process().process_id
+            process_id = self._process_id()
             for recording_day in matching_days:
                 for segment in self._segments(window.channel_id, process_id, recording_day):
                     if _overlaps(window, segment):
@@ -232,7 +152,7 @@ class RecordingPlanner:
         """Return the deterministic segment covering one whole UTC second."""
         window = RecordingWindow(channel_id, instant_utc, instant_utc + timedelta(seconds=1))
         try:
-            process_id = self.client.records.get_free_process().process_id
+            process_id = self._process_id()
             candidates = tuple(
                 segment
                 for recording_day in self._matching_days(window)
@@ -263,6 +183,13 @@ class RecordingPlanner:
         except VigiError as error:
             raise diagnose_nvr_error(error) from None
         return ReplayRequest(window, replay_url)
+
+    def _process_id(self) -> int:
+        process_id = self._search_process.process_id
+        if process_id is None:
+            process_id = self.client.records.get_free_process().process_id
+            self._search_process.process_id = process_id
+        return process_id
 
     def _matching_days(self, window: RecordingWindow) -> tuple[date, ...]:
         local_start = window.start_utc.astimezone(self.recording_timezone).date()

@@ -136,6 +136,11 @@ Run the local reference-frame API on loopback only:
 uv run uvicorn vigi_vision.reference_frame_api:create_reference_frame_app_from_environment --factory --host 127.0.0.1 --port 8000
 ```
 
+Then open `http://127.0.0.1:8000/` to use the local candidate-review shell.
+It submits a channel and KST reference time with the default bounded candidate
+offsets, then shows ordered safe result metadata. It does not display JPEG
+thumbnails or support candidate selection; those remain Phase 4C work.
+
 ## Installation
 
 Install the project with `uv sync`, copy `.env.example` to `.env`, and set:
@@ -185,6 +190,12 @@ Creation returns `201` with `created`; a verified compatible completed resource
 returns `200` with `reused`. The decoded PTS is only relative to the replay
 clip. Current responses do not claim an exact source-frame time and leave
 absolute source-time estimates `null`.
+
+The same loopback application serves the browser candidate-review shell at
+`http://127.0.0.1:8000/`. It requires only existing NVR capture settings, not
+an OpenAI key. The form interprets a local date/time value as KST, uses the
+candidate-set endpoint's default offsets, and renders ordered created/reused or
+safe per-candidate failure facts without exposing media paths, URLs, or images.
 
 For a standalone IPC, set `VIGI_SOURCE=ipc`; `inspect` uses the public IPC RTSP builder and does not perform IPC OpenAPI authentication. A live inspection completes only when source validation, one-frame extraction, and OpenAI structured image analysis all succeed.
 
