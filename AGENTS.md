@@ -40,8 +40,9 @@ other durable project knowledge:
 - update every stale document so that documentation matches the implementation;
 - update `PROJECT.md` whenever project status, roadmap, completed phases, or
   repository boundaries change;
-- update existing routed documentation instead of creating new documents unless
-  the implementation introduces durable new knowledge;
+- update existing routed documentation whenever appropriate;
+- create a new document only when the implementation introduces durable
+  knowledge that is not already covered by existing documentation;
 - update `docs/README.md` only when documentation routes change;
 - keep documentation links relative;
 - avoid placeholder documents;
@@ -49,6 +50,18 @@ other durable project knowledge:
   documentation changes were required.
 
 Documentation that no longer matches the implementation is considered a defect.
+
+Use the existing documentation category whenever possible.
+
+If implementation introduces durable architectural knowledge and no appropriate
+document exists, create one under `docs/architecture/`.
+
+If implementation introduces durable user-visible behavior, workflows, or
+feature contracts and no appropriate document exists, create one under
+`docs/design/`.
+
+Do not create documentation for routine implementation details, bug fixes,
+refactoring, or temporary implementation notes.
 
 ## Architecture Decision Records (ADR)
 
