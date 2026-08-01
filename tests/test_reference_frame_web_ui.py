@@ -41,6 +41,11 @@ def test_web_ui_serves_an_accessible_candidate_form() -> None:
     assert 'type="radio"' not in response.text
     assert 'id="selection-status"' in response.text
     assert 'id="selected-preview-image"' in response.text
+    assert 'id="roi-workspace"' in response.text
+    assert 'id="roi-stage"' in response.text
+    assert 'id="roi-instructions"' in response.text
+    assert "touch, or pen" in response.text
+    assert 'id="roi-summary"' in response.text
 
 
 def test_web_ui_serves_its_static_assets() -> None:
@@ -49,8 +54,11 @@ def test_web_ui_serves_its_static_assets() -> None:
     stylesheet = client.get("/static/reference-frame-ui.css")
     candidate_stylesheet = client.get("/static/reference-frame-candidates.css")
     form_stylesheet = client.get("/static/reference-frame-form.css")
+    roi_stylesheet = client.get("/static/reference-frame-roi.css")
     form_script = client.get("/static/reference-frame-form.js")
     selection_script = client.get("/static/reference-frame-selection.js")
+    roi_geometry_script = client.get("/static/reference-frame-roi-geometry.js")
+    roi_script = client.get("/static/reference-frame-roi.js")
     script = client.get("/static/reference-frame-ui.js")
 
     assert stylesheet.status_code == 200
@@ -63,6 +71,10 @@ def test_web_ui_serves_its_static_assets() -> None:
     assert ".loading-spinner" in form_stylesheet.text
     assert "select:focus-visible" in form_stylesheet.text
     assert "prefers-reduced-motion" in form_stylesheet.text
+    assert roi_stylesheet.status_code == 200
+    assert "touch-action: none" in roi_stylesheet.text
+    assert "roi-overlay-committed" in roi_stylesheet.text
+    assert "roi-overlay-draft" in roi_stylesheet.text
     assert form_script.status_code == 200
     assert "source_timezone" in form_script.text
     assert "appliedRequestDirty" in form_script.text
@@ -70,6 +82,14 @@ def test_web_ui_serves_its_static_assets() -> None:
     assert "getSelectedCandidate" in selection_script.text
     assert 'type = "radio"' in selection_script.text
     assert "selected-preview-image" in selection_script.text
+    assert roi_geometry_script.status_code == 200
+    assert "Math.round" in roi_geometry_script.text
+    assert roi_script.status_code == 200
+    assert "pointercancel" in roi_script.text
+    assert "lostpointercapture" in roi_script.text
+    assert "setPointerCapture" in roi_script.text
+    assert "naturalWidth" in roi_script.text
+    assert "sourceRoiToDisplay" in roi_script.text
     assert script.status_code == 200
     assert 'fetch("/api/v1/reference-frame-candidate-sets"' in script.text
     assert "channel_id: Number(channelIdInput.value)" in script.text

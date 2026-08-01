@@ -11,8 +11,11 @@
     <link rel="stylesheet" href="/static/reference-frame-ui.css">
     <link rel="stylesheet" href="/static/reference-frame-candidates.css">
     <link rel="stylesheet" href="/static/reference-frame-form.css">
+    <link rel="stylesheet" href="/static/reference-frame-roi.css">
     <script src="/static/reference-frame-form.js" defer></script>
     <script src="/static/reference-frame-selection.js" defer></script>
+    <script src="/static/reference-frame-roi-geometry.js" defer></script>
+    <script src="/static/reference-frame-roi.js" defer></script>
     <script src="/static/reference-frame-ui.js" defer></script>
   </head>
   <body>
@@ -112,14 +115,45 @@
       <section class="panel selected-preview-panel" aria-labelledby="selected-preview-title">
         <div class="section-heading">
           <h2 id="selected-preview-title">Selected candidate</h2>
-          <p>The selected frame will be the input boundary for a future ROI step.</p>
+          <p>Draw one informational region on the selected frame.</p>
         </div>
         <p id="selection-status" class="selection-status" role="status" aria-live="polite">
           No candidate selected.
         </p>
         <div id="selected-preview-content" class="selected-preview-content" hidden>
           <div class="selected-preview-media">
-            <img id="selected-preview-image" class="selected-preview-image" alt="" hidden>
+            <div
+              id="roi-workspace"
+              class="roi-workspace"
+              role="group"
+              aria-labelledby="roi-workspace-title"
+              aria-describedby="roi-instructions roi-status selection-status"
+            >
+              <h3 id="roi-workspace-title">ROI workspace</h3>
+              <p id="roi-instructions" class="field-hint">
+                Select a candidate first, then drag across its image with a mouse, touch, or pen.
+                The page remains scrollable outside the image.
+              </p>
+              <div id="roi-stage" class="roi-stage" hidden>
+                <img id="selected-preview-image" class="selected-preview-image" alt="" hidden>
+                <div id="roi-committed-overlay" class="roi-overlay roi-overlay-committed" data-label="Committed ROI" hidden aria-hidden="true"></div>
+                <div id="roi-draft-overlay" class="roi-overlay roi-overlay-draft" data-label="Draft ROI" hidden aria-hidden="true"></div>
+              </div>
+              <p id="roi-status" class="roi-status" role="status" aria-live="polite">
+                Select a candidate first.
+              </p>
+              <div id="roi-summary" class="roi-summary" hidden>
+                <p class="roi-summary-title">ROI in original-image pixels</p>
+                <dl class="candidate-facts">
+                  <div class="candidate-fact"><dt>x</dt><dd id="roi-summary-x" class="mono"></dd></div>
+                  <div class="candidate-fact"><dt>y</dt><dd id="roi-summary-y" class="mono"></dd></div>
+                  <div class="candidate-fact"><dt>Width</dt><dd id="roi-summary-width" class="mono"></dd></div>
+                  <div class="candidate-fact"><dt>Height</dt><dd id="roi-summary-height" class="mono"></dd></div>
+                  <div class="candidate-fact"><dt>Source width</dt><dd id="roi-summary-source-width" class="mono"></dd></div>
+                  <div class="candidate-fact"><dt>Source height</dt><dd id="roi-summary-source-height" class="mono"></dd></div>
+                </dl>
+              </div>
+            </div>
           </div>
           <div class="selected-preview-details">
             <dl id="selected-preview-facts" class="candidate-facts"></dl>

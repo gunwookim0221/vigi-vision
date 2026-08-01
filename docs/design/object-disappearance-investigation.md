@@ -2,7 +2,9 @@
 
 ## Status and purpose
 
-**Status: approved Phase 1 design direction; not implemented.**
+**Status: approved Phase 1 design direction; Phase 5-1 now implements the
+transient pointer-based ROI drawing slice only. Persistence, confirmation,
+cropped preview, and disappearance reasoning remain unimplemented.**
 
 This document defines the first bounded use case for VIGI Vision's longer-term
 Event Discovery direction: a user investigates one selected object on one NVR
@@ -92,7 +94,14 @@ object-presence or disappearance classification.
 The repository does **not** currently provide:
 
 - a public reference-frame retrieval service for a selected channel and time;
-- an API or UI for user-selected ROIs, crop previews, or confirmation;
+- an API for persistent ROI selection, crop previews, or confirmation. The
+  Phase 5-1 loopback shell now provides one transient rectangular ROI over a
+  selected reference frame. It uses one Pointer Events path for mouse, touch,
+  and pen, accepts one active pointer, scopes `touch-action: none` to the image,
+  clamps and rounds original-image pixel coordinates, rejects rectangles below
+  4×4 source pixels, and clears state on candidate/result/image/interruption
+  changes. Keyboard editing, movement, resize handles, persistence, and
+  confirmation remain deferred.
 - storage and source-resolution mapping for original and normalized ROI
   coordinates;
 - regional presence classification, temporal comparison, or disappearance

@@ -5,7 +5,7 @@
 - Embedded references: shortlisted `linear.app`, `notion`, and `sentry` for a
   local operations surface; selected the restrained density, clear status
   hierarchy, and cool neutral palette informed by `linear.app`.
-- Lazyweb: skipped for this local Phase 4C-3 shell; external product
+- Lazyweb: skipped for this local Phase 5-1 ROI slice; external product
   screenshots would not improve the bounded candidate-review workflow and are
   not copied into the product.
 - Imagen drafts: skipped because the existing design tokens and evidence-led
@@ -107,7 +107,22 @@ trustworthy incremental progress contract.
   requested time, offset, dimensions, timing precision, and warnings.
 - **States:** no selection, selected, and selected image unavailable.
 - **Persistence:** frontend memory only; a new request clears the selection.
-  ROI drawing and manifest persistence remain deferred.
+
+### ROI workspace
+
+- **Structure:** one selected-image pointer surface with a source-pixel summary.
+- **States:** inactive until selection, image loading, draft ROI, committed ROI,
+  rejected tiny drag, and interrupted drag.
+- **Interaction:** mouse, touch, and pen use one Pointer Events path; only one
+  pointer is active, and additional pointers are ignored.
+- **Mobile:** `touch-action: none` is scoped to the image surface so document
+  scrolling remains available outside it.
+- **Geometry:** coordinates use loaded `naturalWidth`/`naturalHeight`, with
+  endpoint `Math.round()` conversion, source-bound clamping, and a 4×4 source
+  pixel minimum. The overlay is recalculated from canonical source pixels after
+  image load and responsive resize.
+- **Persistence:** the one ROI is transient frontend state. Persistence and
+  confirmation remain deferred to Phase 6.
 
 ## 6. Motion & Interaction
 
@@ -128,5 +143,8 @@ or glass effects are used.
 - The form requires explicit application of a local whole-second datetime and
   selected source timezone; the applied summary makes the 24-hour value
   authoritative for the UI.
+- ROI pointer drawing is intentionally limited to pointer input in Phase 5-1;
+  keyboard creation, movement, resize handles, and full keyboard accessibility
+  are deferred to Phase 5-2.
 - Accepted debt: no real-browser/NVR validation has occurred yet. The exit is a
   user-run loopback browser check against a known recorded KST time.
