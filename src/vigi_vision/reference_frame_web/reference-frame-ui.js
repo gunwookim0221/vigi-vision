@@ -13,12 +13,14 @@ function setRequestState(state, message) {
 }
 
 function clearResults() {
+  referenceFrameSelection.reset();
   requestError.hidden = true;
   requestError.textContent = "";
   candidateResults.replaceChildren();
 }
 
 function renderRequestError(message = "The request could not be completed. Check the channel and recorded time, then try again.") {
+  referenceFrameSelection.reset();
   requestError.hidden = false;
   requestError.textContent = message;
   setRequestState("error", "Candidate request was not completed.");
@@ -71,7 +73,7 @@ function appendCandidateImage(card, candidate) {
     unavailable.setAttribute("role", "status");
     frame.append(unavailable);
     card.append(frame);
-    return;
+    return { image: null, placeholder: unavailable };
   }
 
   const image = document.createElement("img");
@@ -96,6 +98,7 @@ function appendCandidateImage(card, candidate) {
   }, { once: true });
   frame.append(image, unavailable);
   card.append(frame);
+  return { image, placeholder: unavailable };
 }
 
 function renderCandidate(candidate) {
@@ -103,13 +106,14 @@ function renderCandidate(candidate) {
   card.className = "candidate-row";
   card.dataset.status = candidate.status;
 
-  appendCandidateImage(card, candidate);
+  const media = appendCandidateImage(card, candidate);
   const details = document.createElement("div");
   details.className = "candidate-details";
   const heading = document.createElement("h3");
   heading.className = "candidate-heading";
   heading.textContent = formatOffset(candidate.offset_seconds);
   details.append(heading);
+  referenceFrameSelection.attachCandidate(candidate, card, details, media.image, media.placeholder);
   const facts = document.createElement("dl");
   facts.className = "candidate-facts";
   appendFact(facts, "Requested position", `${candidate.offset_seconds}s`, true);

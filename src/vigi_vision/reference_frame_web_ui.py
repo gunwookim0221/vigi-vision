@@ -1,4 +1,4 @@
-"""Install the static Phase 4B reference-frame browser shell."""
+"""Install the static Phase 4C-2 reference-frame browser shell."""
 
 from pathlib import Path
 from typing import Final

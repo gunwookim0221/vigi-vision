@@ -10,6 +10,7 @@
     <title>VIGI Vision | Reference frame candidates</title>
     <link rel="stylesheet" href="/static/reference-frame-ui.css">
     <link rel="stylesheet" href="/static/reference-frame-candidates.css">
+    <script src="/static/reference-frame-selection.js" defer></script>
     <script src="/static/reference-frame-ui.js" defer></script>
   </head>
   <body>
@@ -66,7 +67,32 @@
           Ready to generate candidates.
         </p>
         <p id="request-error" class="request-error" role="alert" hidden></p>
-        <ol id="candidate-results" class="candidate-results" aria-live="polite" aria-relevant="all"></ol>
+        <fieldset class="candidate-selection-group" aria-describedby="selection-help">
+          <legend>Choose one successful candidate</legend>
+          <p id="selection-help" class="field-hint">
+            Candidate selection is temporary and remains in this browser tab only.
+          </p>
+          <ol id="candidate-results" class="candidate-results" aria-live="polite" aria-relevant="all"></ol>
+        </fieldset>
+      </section>
+
+      <section class="panel selected-preview-panel" aria-labelledby="selected-preview-title">
+        <div class="section-heading">
+          <h2 id="selected-preview-title">Selected candidate</h2>
+          <p>The selected frame will be the input boundary for a future ROI step.</p>
+        </div>
+        <p id="selection-status" class="selection-status" role="status" aria-live="polite">
+          No candidate selected.
+        </p>
+        <div id="selected-preview-content" class="selected-preview-content" hidden>
+          <div class="selected-preview-media">
+            <img id="selected-preview-image" class="selected-preview-image" alt="" hidden>
+          </div>
+          <div class="selected-preview-details">
+            <dl id="selected-preview-facts" class="candidate-facts"></dl>
+            <div id="selected-preview-warnings" class="selected-preview-warnings"></div>
+          </div>
+        </div>
       </section>
     </main>
   </body>

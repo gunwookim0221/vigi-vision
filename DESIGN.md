@@ -80,15 +80,25 @@ messages.
 ### Candidate result row
 
 - **Structure:** ordered media area, offset heading, requested offset/time,
-  textual succeeded/failed status, then created/reused outcome or fixed safe
-  failure facts.
-- **States:** succeeded with thumbnail, image unavailable, failed, partial-set
-  context, all-failed context, and empty response.
+  native single-selection control for usable successes, textual succeeded/failed
+  status, then created/reused outcome or fixed safe failure facts.
+- **States:** succeeded with thumbnail, selected, image unavailable, failed,
+  partial-set context, all-failed context, and empty response.
 - **Accessibility:** semantic list item; status words supplement color;
-  meaningful image alternative text, controlled image failure status, and
+  native radio keyboard interaction, meaningful image alternative text,
+  controlled image failure status, visible focus distinct from selection, and
   messages inserted as text, never HTML.
 - **Layout:** responsive two-column media/details grid on wide screens and
-  vertical stack on narrow screens. Server response order is authoritative.
+  vertical stack on narrow screens. Server response order is authoritative; the
+  selected preview preserves the full image aspect ratio.
+
+### Selected candidate preview
+
+- **Structure:** one larger safe JPEG preview with backend-provided resource ID,
+  requested time, offset, dimensions, timing precision, and warnings.
+- **States:** no selection, selected, and selected image unavailable.
+- **Persistence:** frontend memory only; a new request clears the selection.
+  ROI drawing and manifest persistence remain deferred.
 
 ## 6. Motion & Interaction
 

@@ -6,6 +6,18 @@
   list-style: none;
 }
 
+.candidate-selection-group {
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.candidate-selection-group legend {
+  margin-block-end: var(--space-2);
+  font-weight: 600;
+}
+
 .candidate-row {
   display: grid;
   grid-template-columns: minmax(14rem, 1fr) minmax(12rem, 1.5fr);
@@ -84,6 +96,77 @@
   border-inline-start: 0.3rem solid var(--status-error);
 }
 
+.candidate-row[data-selected="true"] {
+  outline: 0.2rem solid var(--accent-primary);
+  outline-offset: -0.2rem;
+}
+
+.candidate-select {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: fit-content;
+  color: var(--text-primary);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.candidate-select input {
+  inline-size: 1.1rem;
+  block-size: 1.1rem;
+  margin: 0;
+  accent-color: var(--accent-primary);
+}
+
+.candidate-select input:focus-visible {
+  outline: 0.2rem solid var(--accent-primary);
+  outline-offset: 0.15rem;
+}
+
+.candidate-selection-status {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.candidate-row[data-selected="true"] .candidate-selection-status {
+  color: var(--accent-primary);
+  font-weight: 600;
+}
+
+.selected-preview-content {
+  display: grid;
+  grid-template-columns: minmax(16rem, 1.2fr) minmax(14rem, 1fr);
+  gap: var(--space-6);
+  align-items: start;
+}
+
+.selected-preview-media,
+.selected-preview-details {
+  min-width: 0;
+}
+
+.selected-preview-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 48rem;
+  border: 1px solid var(--border-default);
+  border-radius: 0.5rem;
+  background: var(--surface-muted);
+  object-fit: contain;
+}
+
+.selected-preview-details {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.selected-preview-warnings {
+  display: grid;
+  gap: var(--space-2);
+}
+
 .candidate-fact {
   display: grid;
   gap: var(--space-1);
@@ -106,7 +189,8 @@
 
 @media (max-width: 40rem) {
   .candidate-row,
-  .candidate-facts {
+  .candidate-facts,
+  .selected-preview-content {
     grid-template-columns: 1fr;
   }
 }

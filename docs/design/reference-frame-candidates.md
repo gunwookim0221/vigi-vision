@@ -2,7 +2,8 @@
 
 ## Status and purpose
 
-**Status: implemented Phase 4A API and Phase 4B loopback shell; real-browser
+**Status: implemented Phase 4A API, Phase 4B loopback shell, and Phase 4C-1/4C-2
+thumbnail display plus transient exactly-one frontend selection; real-browser
 and NVR validation of the shell remains pending user-supplied observations.**
 
 This design adds a bounded synchronous API for several reviewable reference-frame
@@ -17,7 +18,8 @@ existing `measured_clip_relative` evidence and null absolute source-time estimat
 unless a future evidence-backed policy changes that contract.
 
 Phase 4A is a server-side candidate-generation boundary only. Phase 4B adds a
-basic frontend shell; Phase 4C displays thumbnails and lets a user select one.
+basic frontend shell; Phase 4C-1 displays thumbnails and Phase 4C-2 lets a user
+select exactly one successful loaded candidate without persistence.
 
 ## Goals and exclusions
 
@@ -38,7 +40,8 @@ basic frontend shell; Phase 4C displays thumbnails and lets a user select one.
 - No change to `POST /api/v1/reference-frames`, including its explicit timezone
   requirement for naïve timestamps.
 - No continuous timeline browsing, jobs, queues, cancellation infrastructure,
-  frontend, ROI, object matching, SDK work, set-level artifacts, or set manifest.
+  backend selection, ROI, object matching, SDK work, set-level artifacts, or set
+  manifest. Frontend selection is transient and local to the page.
 - No exact decoded-frame or real-world source-time claim.
 
 ## Existing boundaries reused unchanged
@@ -243,15 +246,18 @@ cancellation claim or background worker.
 The loopback root route serves a native HTML/CSS/JavaScript shell that submits
 `channel_id` and a naïve local `reference_time`, relying on the candidate API's
 existing KST default. It omits `offsets_seconds`, exposes loading and top-level
-safe error states, and shows ordered text-only candidate results. It renders
-the returned offset, requested UTC time, succeeded/failed status, created or
-reused outcome, and fixed safe failure code/message. It never renders a JPEG,
-constructs an image URL, or turns an offset into a known event-time distance.
+safe error states, and shows ordered candidate results with JPEG thumbnails. It
+renders the returned offset, requested UTC time, succeeded/failed status,
+created or reused outcome, and fixed safe failure code/message. Loaded
+successful candidates use native radio controls for exactly one transient
+selection and a larger uncropped preview; failed or unavailable candidates
+remain unselectable. It never turns an offset into a known event-time distance.
 
 The shell is served from the existing FastAPI application at `/`, with fixed
 static assets under `/static`. It introduces no frontend framework, build
 system, extra dependency, API route, CORS policy, or candidate-set persistence.
-Phase 4C alone may add thumbnail display and a selection workflow.
+Phase 5 may consume the selected frontend candidate for ROI definition; this
+phase does not add ROI drawing or persistence.
 
 ## Security and compatibility
 

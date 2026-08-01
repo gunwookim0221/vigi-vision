@@ -33,6 +33,9 @@ def test_web_ui_serves_an_accessible_candidate_form() -> None:
     assert 'id="reference-time"' in response.text
     assert 'aria-live="polite"' in response.text
     assert 'type="submit"' in response.text
+    assert 'type="radio"' not in response.text
+    assert 'id="selection-status"' in response.text
+    assert 'id="selected-preview-image"' in response.text
 
 
 def test_web_ui_serves_its_static_assets() -> None:
@@ -40,6 +43,7 @@ def test_web_ui_serves_its_static_assets() -> None:
 
     stylesheet = client.get("/static/reference-frame-ui.css")
     candidate_stylesheet = client.get("/static/reference-frame-candidates.css")
+    selection_script = client.get("/static/reference-frame-selection.js")
     script = client.get("/static/reference-frame-ui.js")
 
     assert stylesheet.status_code == 200
@@ -48,6 +52,10 @@ def test_web_ui_serves_its_static_assets() -> None:
     assert candidate_stylesheet.status_code == 200
     assert ".candidate-thumbnail" in candidate_stylesheet.text
     assert "object-fit: contain" in candidate_stylesheet.text
+    assert selection_script.status_code == 200
+    assert "getSelectedCandidate" in selection_script.text
+    assert 'type = "radio"' in selection_script.text
+    assert "selected-preview-image" in selection_script.text
     assert script.status_code == 200
     assert 'fetch("/api/v1/reference-frame-candidate-sets"' in script.text
     assert "channel_id: Number(channelIdInput.value)" in script.text
