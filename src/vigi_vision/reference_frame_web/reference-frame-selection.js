@@ -9,6 +9,13 @@ let selectedView = null;
 let candidateViews = new WeakMap();
 let previewSequence = 0;
 
+function resetRoi(message) {
+  const roi = window.vigiVisionReferenceFrameRoi;
+  if (roi) {
+    roi.reset(message);
+  }
+}
+
 function isSelectableCandidate(candidate) {
   const frame = candidate.reference_frame;
   return candidate.status === "succeeded"
@@ -61,6 +68,7 @@ function clearSelection(message = "No candidate selected.") {
   selectedCandidate = null;
   selectedView = null;
   clearPreview(message);
+  resetRoi(message);
 }
 
 function renderPreview(candidate) {
@@ -109,6 +117,10 @@ function selectCandidate(candidate, view) {
   selectedView.status.textContent = "Selected candidate.";
   selectedView.control.checked = true;
   renderPreview(candidate);
+  const roi = window.vigiVisionReferenceFrameRoi;
+  if (roi) {
+    roi.setSelectedCandidate(candidate, selectedPreviewImage);
+  }
 }
 
 function markUnavailable(candidate) {

@@ -5,8 +5,9 @@
 **Status: implemented Phase 4A API, Phase 4B loopback shell, and Phase 4C-1/4C-2
 thumbnail display plus transient exactly-one frontend selection. Phase 4C-3
 adds explicit applied date/time, timezone clarity, and accessible indeterminate
-generation feedback; real-browser and NVR validation of the shell remains
-pending user-supplied observations.**
+generation feedback. Phase 5-1/5-2 adds the transient one-rectangle ROI
+workspace with pointer and keyboard editing; fixture browser validation is
+complete while physical-device and NVR validation remain pending.**
 
 This design adds a bounded synchronous API for several reviewable reference-frame
 candidates around one user-entered reference time. It builds on the implemented
@@ -266,10 +267,20 @@ an offset into a known event-time distance.
 The shell is served from the existing FastAPI application at `/`, with fixed
 static assets under `/static`. It introduces no frontend framework, build
 system, extra dependency, API route, CORS policy, or candidate-set persistence.
-Phase 5 may consume the selected frontend candidate for ROI definition; this
-phase does not add ROI drawing or persistence. Editing an applied input marks it
-dirty and prevents generation until the user applies it again; editing does not
-clear already rendered candidates.
+Phase 5-1/5-2 consumes the selected frontend candidate through a separate
+transient ROI workspace. One rectangle is drawn, moved, and resized with
+unified mouse/touch/pen Pointer Events; keyboard arrows also move and resize
+the canonical source-space ROI. Eight handles clamp at image bounds and the
+4×4 minimum without crossover flipping. Only one active pointer is accepted,
+the interaction surface alone has `touch-action: none`, and source-pixel
+coordinates are recalculated for responsive display sizes. Candidate changes,
+result replacement, and image failure clear draft and committed ROI state.
+Pointer interruption clears the draft and active pointer while preserving a
+prior committed ROI. Reset ROI preserves candidate selection and permits
+recreation. `getPhase6Snapshot()` is an immutable transient handoff only;
+persistence, confirmation, and manifest storage remain deferred. Editing an
+applied input marks it dirty and prevents generation until the user applies it
+again; editing does not clear already rendered candidates.
 
 ## Security and compatibility
 

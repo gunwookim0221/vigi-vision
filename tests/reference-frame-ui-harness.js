@@ -4,6 +4,9 @@ const vm = require("node:vm");
 
 const formScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-form.js"), "utf8");
 const selectionScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-selection.js"), "utf8");
+const roiGeometryScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-roi-geometry.js"), "utf8");
+const roiScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-roi.js"), "utf8");
+const roiInteractionScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-roi-interaction.js"), "utf8");
 const script = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-ui.js"), "utf8");
 
 class FakeElement {
@@ -12,16 +15,61 @@ class FakeElement {
     this.children = [];
     this.dataset = {};
     this.listeners = {};
+    this.handlers = {};
     this.attributes = {};
+    this.style = {};
+    this.rect = { left: 0, top: 0, width: 640, height: 360 };
+    this.capturedPointers = new Set();
+    this.naturalWidth = 0;
+    this.naturalHeight = 0;
+    this.complete = false;
     this.hidden = false;
     this.textContent = "";
     this.className = "";
     this.value = "";
     this.disabled = false;
+    this.focused = false;
   }
 
-  addEventListener(name, handler) {
-    this.listeners[name] = handler;
+  addEventListener(name, handler, options = {}) {
+    if (!this.handlers[name]) {
+      this.handlers[name] = [];
+      this.listeners[name] = (...args) => {
+        let result;
+        this.handlers[name].slice().forEach((entry) => {
+          result = entry.handler(...args);
+          if (entry.once) {
+            this.removeEventListener(name, entry.handler);
+          }
+        });
+        return result;
+      };
+    }
+    this.handlers[name].push({ handler, once: options.once === true });
+  }
+
+  removeEventListener(name, handler) {
+    this.handlers[name] = (this.handlers[name] ?? []).filter((entry) => entry.handler !== handler);
+  }
+
+  setPointerCapture(pointerId) {
+    this.capturedPointers.add(pointerId);
+  }
+
+  releasePointerCapture(pointerId) {
+    this.capturedPointers.delete(pointerId);
+  }
+
+  hasPointerCapture(pointerId) {
+    return this.capturedPointers.has(pointerId);
+  }
+
+  focus() {
+    this.focused = true;
+  }
+
+  getBoundingClientRect() {
+    return this.rect;
   }
 
   append(...children) {
@@ -111,6 +159,23 @@ function createHarness(fetchImplementation) {
     ["#selected-preview-image", new FakeElement("img")],
     ["#selected-preview-facts", new FakeElement("dl")],
     ["#selected-preview-warnings", new FakeElement("div")],
+    ["#roi-workspace", new FakeElement("div")],
+    ["#roi-stage", new FakeElement("div")],
+    ["#roi-committed-overlay", new FakeElement("div")],
+    ["#roi-draft-overlay", new FakeElement("div")],
+    ["#roi-reset", new FakeElement("button")],
+    ...["nw", "n", "ne", "e", "se", "s", "sw", "w"].map((handle) => [
+      `#roi-handle-${handle}`,
+      new FakeElement("button"),
+    ]),
+    ["#roi-status", new FakeElement("p")],
+    ["#roi-summary", new FakeElement("div")],
+    ["#roi-summary-x", new FakeElement("dd")],
+    ["#roi-summary-y", new FakeElement("dd")],
+    ["#roi-summary-width", new FakeElement("dd")],
+    ["#roi-summary-height", new FakeElement("dd")],
+    ["#roi-summary-source-width", new FakeElement("dd")],
+    ["#roi-summary-source-height", new FakeElement("dd")],
   ]);
   elements.get("#channel-id").value = "1";
   elements.get("#source-timezone").value = "Asia/Seoul";
@@ -119,16 +184,29 @@ function createHarness(fetchImplementation) {
   elements.get("#applied-reference-time").hidden = true;
   elements.get("#generation-progress").hidden = true;
   elements.get("#generation-spinner").hidden = true;
+  elements.get("#roi-stage").hidden = true;
+  elements.get("#roi-summary").hidden = true;
+  elements.get("#roi-status").textContent = "Select a candidate first.";
+  elements.get("#selected-preview-image").naturalWidth = 2560;
+  elements.get("#selected-preview-image").naturalHeight = 1440;
+  const windowListeners = {};
   const context = vm.createContext({
     document: {
       createElement: (tagName) => new FakeElement(tagName),
       querySelector: (selector) => elements.get(selector),
     },
-    window: {},
+    window: {
+      addEventListener(name, handler) {
+        windowListeners[name] = handler;
+      },
+    },
     fetch: fetchImplementation,
   });
   vm.runInContext(formScript, context);
   vm.runInContext(selectionScript, context);
+  vm.runInContext(roiGeometryScript, context);
+  vm.runInContext(roiScript, context);
+  vm.runInContext(roiInteractionScript, context);
   vm.runInContext(script, context);
   return {
     form,
@@ -152,6 +230,24 @@ function createHarness(fetchImplementation) {
     previewImage: elements.get("#selected-preview-image"),
     previewFacts: elements.get("#selected-preview-facts"),
     previewWarnings: elements.get("#selected-preview-warnings"),
+    roiWorkspace: elements.get("#roi-workspace"),
+    roiStage: elements.get("#roi-stage"),
+    committedOverlay: elements.get("#roi-committed-overlay"),
+    draftOverlay: elements.get("#roi-draft-overlay"),
+    resetButton: elements.get("#roi-reset"),
+    handles: Object.fromEntries(["nw", "n", "ne", "e", "se", "s", "sw", "w"].map((handle) => [
+      handle,
+      elements.get(`#roi-handle-${handle}`),
+    ])),
+    roiStatus: elements.get("#roi-status"),
+    roiSummary: elements.get("#roi-summary"),
+    roiSummaryX: elements.get("#roi-summary-x"),
+    roiSummaryY: elements.get("#roi-summary-y"),
+    roiSummaryWidth: elements.get("#roi-summary-width"),
+    roiSummaryHeight: elements.get("#roi-summary-height"),
+    roiSummarySourceWidth: elements.get("#roi-summary-source-width"),
+    roiSummarySourceHeight: elements.get("#roi-summary-source-height"),
+    windowListeners,
     window: context.window,
   };
 }

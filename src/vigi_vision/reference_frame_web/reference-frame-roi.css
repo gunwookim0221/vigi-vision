@@ -1,0 +1,166 @@
+.roi-workspace {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+  --roi-handle-hit-size: var(--space-6);
+  --roi-handle-mark-size: var(--space-2);
+  --roi-handle-mark-border: 0.15rem;
+  --roi-handle-mark-radius: 0.1rem;
+  --roi-handle-focus-outline: 0.2rem;
+  --roi-handle-focus-offset: 0.1rem;
+}
+
+.roi-workspace h3,
+.roi-status,
+.roi-summary-title {
+  margin: 0;
+}
+
+.roi-workspace h3 {
+  font-size: 1rem;
+  line-height: 1.4;
+}
+
+.roi-stage {
+  position: relative;
+  width: 100%;
+  max-width: 48rem;
+  min-width: 0;
+  touch-action: none;
+  user-select: none;
+}
+
+.roi-stage .selected-preview-image {
+  width: 100%;
+  max-width: 48rem;
+  margin: 0;
+  user-select: none;
+}
+
+.roi-stage:focus-visible {
+  outline: 0.2rem solid var(--accent-primary);
+  outline-offset: 0.2rem;
+}
+
+.roi-overlay {
+  position: absolute;
+  z-index: 1;
+  min-width: 0.25rem;
+  min-height: 0.25rem;
+  pointer-events: none;
+}
+
+.roi-overlay::before {
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline-start: 0;
+  padding: var(--space-1) var(--space-2);
+  background: var(--surface-secondary);
+  color: var(--text-primary);
+  content: attr(data-label);
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.roi-overlay-committed {
+  border: 0.2rem solid var(--accent-primary);
+}
+
+.roi-overlay-committed::before {
+  border-block-end: 0.15rem solid var(--accent-primary);
+}
+
+.roi-overlay-draft {
+  border: 0.2rem dashed var(--status-warning);
+}
+
+.roi-overlay-draft::before {
+  border-block-end: 0.15rem dashed var(--status-warning);
+}
+
+.roi-handle,
+.roi-handle:hover:not(:disabled),
+.roi-handle:active:not(:disabled) {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--roi-handle-hit-size);
+  min-height: 0;
+  height: var(--roi-handle-hit-size);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  cursor: pointer;
+  font-size: 0;
+  line-height: 0;
+  touch-action: none;
+  transform: translate(-50%, -50%);
+  transition: none;
+}
+
+.roi-handle::after {
+  display: block;
+  width: var(--roi-handle-mark-size);
+  height: var(--roi-handle-mark-size);
+  border: var(--roi-handle-mark-border) solid var(--surface-secondary);
+  border-radius: var(--roi-handle-mark-radius);
+  background: var(--accent-primary);
+  content: "";
+}
+
+.roi-handle:focus-visible {
+  outline: var(--roi-handle-focus-outline) solid var(--accent-primary);
+  outline-offset: var(--roi-handle-focus-offset);
+}
+
+.roi-handle-nw,
+.roi-handle-se {
+  cursor: nwse-resize;
+}
+
+.roi-handle-ne,
+.roi-handle-sw {
+  cursor: nesw-resize;
+}
+
+.roi-handle-n,
+.roi-handle-s {
+  cursor: ns-resize;
+}
+
+.roi-handle-e,
+.roi-handle-w {
+  cursor: ew-resize;
+}
+
+.roi-status {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.roi-summary {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-inline-start: 0.3rem solid var(--accent-primary);
+  background: var(--surface-muted);
+}
+
+.roi-summary-title {
+  font-weight: 600;
+}
+
+.roi-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+@media (max-width: 40rem) {
+  .roi-stage {
+    width: 100%;
+  }
+}

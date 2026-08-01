@@ -126,15 +126,21 @@ the default candidate request for a KST local time and renders ordered safe
 result facts plus successful candidate thumbnails. Phase 4C-2 adds transient
 exactly-one selection without durable persistence. Phase 4C-3 makes date/time
 application explicit, shows whole-second timezone-aware summaries, and adds
-accessible indeterminate generation feedback. Real-browser/NVR validation
-of that shell remains pending. The reference-frame path now also
+accessible indeterminate generation feedback. Phase 5-1 adds one transient
+source-pixel ROI drawn over the selected candidate through unified Pointer
+Events, including scoped mobile touch behavior and interruption-safe reset.
+Phase 5-2 adds transient move, eight-handle resize, reset/recreate, keyboard
+editing, and a narrow Phase 6 handoff snapshot without persistence. Fixture
+browser validation is complete; physical-device and real-NVR validation remain
+pending. The reference-frame path now also
 has a direct decoder for new resources. It retains structured clip-relative
 timing evidence, stops after a validated selected JPEG, and uses generation
 policy `gpv-2` without changing generic replay-clip behavior. Real-NVR release
 validation for this path is still pending. Absolute source-time calibration,
-ROI, and object comparison remain deferred; Phase 4C-2 provides transient
-frontend-only selection of one successful candidate; Phase 4C-3's UI polish
-does not alter the API or evidence semantics.
+ROI persistence/confirmation, and object comparison remain deferred; Phase
+4C-2 provides transient frontend-only selection of one successful candidate,
+and Phase 5-1/5-2 provide the transient source-space editing surface without
+altering the API or evidence semantics.
 Generic Event Discovery remains a longer-term direction rather than a current
 capability.
 
@@ -147,11 +153,12 @@ capability.
 4. Preserve the public investigation CLI and Investigation Service with their
    Plan, Collection, and Artifact boundaries while the next increment decides
    how completed investigation artifacts enter existing analysis.
-5. Preserve the implemented bounded Phase 4A candidate API and Phase 4C-3
-   loopback review shell with explicit applied time, accessible indeterminate
-   generation feedback, ordered thumbnails, and transient exactly-one
-   selection while Phase 5 adds ROI without changing recording or artifact
-   ownership.
+5. Preserve the implemented bounded Phase 4A candidate API and Phase 5 ROI
+   loopback review shell with explicit applied time, accessible generation
+   feedback, ordered thumbnails, transient exactly-one selection, and one
+   source-pixel ROI that can be moved, resized, reset, recreated, and edited
+   with keyboard input while later phases add confirmation without changing
+   recording or artifact ownership.
 
 ## High-level roadmap
 
