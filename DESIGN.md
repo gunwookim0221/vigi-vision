@@ -132,6 +132,20 @@ trustworthy incremental progress contract.
 - **Persistence:** the one ROI remains transient frontend state. Persistence
   and confirmation remain deferred to Phase 6.
 
+#### Planned assisted-selection extension
+
+Phase 5-3A defines, but does not implement, an optional **Tap to suggest ROI**
+mode. Phase 5-3B-1 now provides a disposable offline validation harness for
+real reference-frame artifacts; it does not change this product contract. One
+explicit source-pixel tap may request one EfficientSAM-Ti suggestion
+for the selected server-controlled resource. The previous committed ROI remains
+visible until a current, candidate-bound, dimension-matched response succeeds;
+then the returned rectangle enters the existing committed ROI state and remains
+manually editable. Abort plus sequence/resource checks reject stale work.
+Unavailable models and failed suggestions preserve the manual editor. See
+[the routed Phase 5-3A design](docs/design/assisted-roi-selection.md) for the
+acceptance gate, API, model lifecycle, accessibility, and security contract.
+
 ## 6. Motion & Interaction
 
 Only button hover/active, opacity, and the busy spinner communicate affordance
@@ -154,5 +168,10 @@ or glass effects are used.
 - ROI keyboard movement/resizing and reset are implemented in Phase 5-2; full
   confirmation, persistence, and object-comparison accessibility semantics
   remain later-phase work.
-- Accepted debt: the shell has fixture-backed desktop/mobile browser evidence,
-  but no physical touch-device or real-NVR validation has occurred.
+- Tap-assisted selection remains acceptance-gated after Phase 5-3A; the
+  Phase 5-3B-1 harness is offline-only and no model, endpoint, or control is
+  part of the implemented UI.
+- Accepted debt: the shell has fixture-backed desktop/mobile browser evidence;
+  the disposable Phase 5-3B-1 harness has favorable initial real-CCTV evidence,
+  but no production assisted-ROI API/frontend integration or physical
+  touch-device validation has occurred.
