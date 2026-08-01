@@ -39,15 +39,21 @@ def test_web_ui_serves_its_static_assets() -> None:
     client = _client()
 
     stylesheet = client.get("/static/reference-frame-ui.css")
+    candidate_stylesheet = client.get("/static/reference-frame-candidates.css")
     script = client.get("/static/reference-frame-ui.js")
 
     assert stylesheet.status_code == 200
     assert "focus-visible" in stylesheet.text
     assert "prefers-reduced-motion" in stylesheet.text
+    assert candidate_stylesheet.status_code == 200
+    assert ".candidate-thumbnail" in candidate_stylesheet.text
+    assert "object-fit: contain" in candidate_stylesheet.text
     assert script.status_code == 200
     assert 'fetch("/api/v1/reference-frame-candidate-sets"' in script.text
     assert "channel_id: Number(channelIdInput.value)" in script.text
     assert "reference_time: referenceTimeInput.value" in script.text
+    assert "candidate.reference_frame.image_url" in script.text
+    assert "candidate-thumbnail-placeholder" in script.text
 
 
 def test_web_ui_script_handles_all_required_safe_result_states() -> None:
@@ -61,6 +67,8 @@ def test_web_ui_script_handles_all_required_safe_result_states() -> None:
     assert "reused" in script.text
     assert "failure.code" in script.text
     assert "failure.message" in script.text
+    assert "No candidate positions were returned." in script.text
+    assert "requestSequence" in script.text
 
 
 def test_web_ui_script_renders_server_values_as_text_not_html() -> None:
@@ -69,7 +77,8 @@ def test_web_ui_script_renders_server_values_as_text_not_html() -> None:
     assert script.status_code == 200
     assert "textContent" in script.text
     assert "innerHTML" not in script.text
-    assert "image_url" not in script.text
+    assert "candidate.reference_frame.image_url" in script.text
+    assert 'startsWith("/api/v1/reference-frames/")' in script.text
 
 
 def _client() -> TestClient:

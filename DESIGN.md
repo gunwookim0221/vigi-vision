@@ -5,11 +5,12 @@
 - Embedded references: shortlisted `linear.app`, `notion`, and `sentry` for a
   local operations surface; selected the restrained density, clear status
   hierarchy, and cool neutral palette informed by `linear.app`.
-- Lazyweb: skipped for this local, text-only Phase 4B shell; external product
+- Lazyweb: skipped for this local Phase 4C-1 shell; external product
   screenshots would not improve the bounded candidate-review workflow and are
   not copied into the product.
-- Imagen drafts: skipped because Phase 4B explicitly excludes candidate
-  thumbnails and other media display; visual media belongs to Phase 4C.
+- Imagen drafts: skipped because the existing design tokens and evidence-led
+  card layout are sufficient for this bounded thumbnail display; visual media
+  is sourced from the existing safe API route.
 
 ## 1. Atmosphere & Identity
 
@@ -45,6 +46,7 @@ always paired with text so color is never the only state indicator.
 | --- | --- | --- | --- | --- |
 | H1 | 32px | 600 | 1.2 | Page title |
 | H2 | 20px | 600 | 1.3 | Section headings |
+| Candidate heading | 18px | 600 | 1.3 | Candidate offset label |
 | Body | 16px | 400 | 1.5 | Default content |
 | Body small | 14px | 400 | 1.5 | Helper text and rows |
 | Label | 14px | 600 | 1.4 | Form labels and status |
@@ -77,13 +79,16 @@ messages.
 
 ### Candidate result row
 
-- **Structure:** requested offset/time, textual succeeded/failed status, then
-  created/reused outcome or fixed safe failure facts.
-- **States:** succeeded, failed, partial-set context, all-failed context.
+- **Structure:** ordered media area, offset heading, requested offset/time,
+  textual succeeded/failed status, then created/reused outcome or fixed safe
+  failure facts.
+- **States:** succeeded with thumbnail, image unavailable, failed, partial-set
+  context, all-failed context, and empty response.
 - **Accessibility:** semantic list item; status words supplement color;
-  messages are inserted as text, never HTML.
-- **Layout:** responsive grid on wide screens and vertical stack on narrow
-  screens.
+  meaningful image alternative text, controlled image failure status, and
+  messages inserted as text, never HTML.
+- **Layout:** responsive two-column media/details grid on wide screens and
+  vertical stack on narrow screens. Server response order is authoritative.
 
 ## 6. Motion & Interaction
 
