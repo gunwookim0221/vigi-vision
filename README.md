@@ -137,11 +137,13 @@ uv run uvicorn vigi_vision.reference_frame_api:create_reference_frame_app_from_e
 ```
 
 Then open `http://127.0.0.1:8000/` to use the local candidate-review shell.
-It submits a channel and KST reference time with the default bounded candidate
-offsets, then shows ordered safe result metadata and the successful candidates'
-JPEG thumbnails in server-provided order. Select exactly one loaded successful
-candidate for a transient larger preview; selection is cleared when a new
-request starts and is not persisted.
+Apply the entered date/time and selected source timezone before generating
+candidates. The shell shows the applied value as `YYYY-MM-DD HH:mm:ss`
+with its IANA timezone, then shows ordered safe result metadata and successful JPEG
+thumbnails in server-provided order. Candidate generation uses accessible
+indeterminate busy feedback; it does not show a numeric progress estimate.
+Select exactly one loaded successful candidate for a transient larger preview;
+selection is cleared when a new request starts and is not persisted.
 
 ## Installation
 
@@ -195,14 +197,18 @@ absolute source-time estimates `null`.
 
 The same loopback application serves the browser candidate-review shell at
 `http://127.0.0.1:8000/`. It requires only existing NVR capture settings, not
-an OpenAI key. The form interprets a local date/time value as KST, uses the
-candidate-set endpoint's default offsets, and renders ordered created/reused or
-safe per-candidate failure facts with successful JPEG thumbnails. Image loading
-failures and failed candidates use safe placeholders without exposing media
-paths, URLs, or credentials. A loaded successful candidate can be selected with
-the native radio control; the selected frame is retained in frontend memory as
-the future ROI input boundary. ROI drawing and manifest persistence are not
-implemented.
+an OpenAI key. The form requires explicit application of a whole-second local
+date/time and a selected source timezone (`Asia/Seoul` or `UTC`), then submits
+that applied value to the unchanged candidate-set API. The applied summary is
+24-hour and timezone-explicit. Generation shows indeterminate busy feedback
+without a fake percentage or backend-progress claim. Ordered created/reused or
+safe per-candidate failure facts remain visible with successful JPEG thumbnails.
+The known source-time warning is presented as “Exact source timestamp is not yet
+verified. The displayed time is the requested position.” Image loading failures
+and failed candidates use safe placeholders without exposing media paths, URLs,
+or credentials. A loaded successful candidate can be selected with the native
+radio control; the selected frame is retained in frontend memory as the future
+ROI input boundary. ROI drawing and manifest persistence are not implemented.
 
 For a standalone IPC, set `VIGI_SOURCE=ipc`; `inspect` uses the public IPC RTSP builder and does not perform IPC OpenAPI authentication. A live inspection completes only when source validation, one-frame extraction, and OpenAI structured image analysis all succeed.
 

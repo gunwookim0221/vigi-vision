@@ -1,0 +1,116 @@
+[hidden] {
+  display: none !important;
+}
+
+select {
+  min-width: 0;
+  min-height: 2.75rem;
+  padding-inline: var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: 0.5rem;
+  background: var(--surface-muted);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+select:focus-visible {
+  outline: 0.2rem solid var(--accent-primary);
+  outline-offset: 0.15rem;
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  grid-column: 1 / -1;
+  gap: var(--space-3);
+}
+
+.form-actions button {
+  flex: 1 1 14rem;
+}
+
+.reference-time-state,
+.applied-reference-time,
+.generation-progress {
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+.reference-time-state {
+  color: var(--text-secondary);
+}
+
+.applied-reference-time {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  border-inline-start: 0.3rem solid var(--status-success);
+  background: var(--surface-muted);
+}
+
+.applied-reference-time-label {
+  margin: 0;
+  font-weight: 600;
+}
+
+.applied-reference-time p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.generation-progress {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.generation-progress-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.generation-progress-status p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.generation-progress progress {
+  display: block;
+  width: 100%;
+  min-height: 0.5rem;
+  accent-color: var(--accent-primary);
+}
+
+.loading-spinner {
+  inline-size: 1rem;
+  block-size: 1rem;
+  flex: 0 0 auto;
+  border: 0.15rem solid var(--border-default);
+  border-block-start-color: var(--accent-primary);
+  border-radius: 50%;
+  animation: reference-frame-spin 900ms linear infinite;
+}
+
+@keyframes reference-frame-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 40rem) {
+  .form-actions {
+    grid-column: auto;
+    flex-direction: column;
+  }
+
+  .form-actions button {
+    flex-basis: auto;
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-spinner {
+    animation: none;
+  }
+}

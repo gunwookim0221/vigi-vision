@@ -5,7 +5,14 @@ const generateButton = document.querySelector("#generate-button");
 const requestStatus = document.querySelector("#request-status");
 const requestError = document.querySelector("#request-error");
 const candidateResults = document.querySelector("#candidate-results");
+const generationProgress = document.querySelector("#generation-progress");
+const generationSpinner = document.querySelector("#generation-spinner");
 let requestSequence = 0;
+
+const SOURCE_TIMESTAMP_WARNING =
+  "Source timestamp mapping is unavailable pending real-NVR replay validation.";
+const USER_SOURCE_TIMESTAMP_LIMITATION =
+  "Exact source timestamp is not yet verified. The displayed time is the requested position.";
 
 function setRequestState(state, message) {
   requestStatus.dataset.state = state;
@@ -47,9 +54,19 @@ function appendWarnings(container, warnings) {
   warnings.filter((warning) => typeof warning === "string").forEach((warning) => {
     const text = document.createElement("p");
     text.className = "candidate-warning";
-    text.textContent = warning;
+    text.textContent = warning === SOURCE_TIMESTAMP_WARNING
+      ? USER_SOURCE_TIMESTAMP_LIMITATION
+      : warning;
     container.append(text);
   });
+}
+
+function setGenerationBusy(active) {
+  referenceFrameForm.setGenerationActive(active);
+  generateButton.textContent = active ? "Generating candidates…" : "Generate candidates";
+  generationProgress.hidden = !active;
+  generationSpinner.hidden = !active;
+  candidateForm.setAttribute("aria-busy", String(active));
 }
 
 function formatOffset(offsetSeconds) {
@@ -185,17 +202,20 @@ function renderCandidateSet(candidateSet) {
 
 async function submitCandidateRequest(event) {
   event.preventDefault();
-  const sequence = ++requestSequence;
-  clearResults();
 
   if (!candidateForm.reportValidity()) {
-    setRequestState("error", "Enter a positive channel ID and a reference time.");
+    setRequestState("error", "Enter a positive channel ID and a valid applied time.");
+    return;
+  }
+  if (!referenceFrameForm.isReady()) {
+    setRequestState("error", "Apply date and time before generating candidates.");
     return;
   }
 
-  generateButton.disabled = true;
-  candidateForm.setAttribute("aria-busy", "true");
-  setRequestState("loading", "Generating candidate requests.");
+  const sequence = ++requestSequence;
+  clearResults();
+  setGenerationBusy(true);
+  setRequestState("loading", "Generating candidate requests. This may take a few minutes.");
 
   try {
     const response = await fetch("/api/v1/reference-frame-candidate-sets", {
@@ -203,7 +223,7 @@ async function submitCandidateRequest(event) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         channel_id: Number(channelIdInput.value),
-        reference_time: referenceTimeInput.value,
+        ...referenceFrameForm.getRequestPayload(),
       }),
     });
     if (!response.ok) {
@@ -222,8 +242,7 @@ async function submitCandidateRequest(event) {
     }
   } finally {
     if (sequence === requestSequence) {
-      generateButton.disabled = false;
-      candidateForm.removeAttribute("aria-busy");
+      setGenerationBusy(false);
     }
   }
 }

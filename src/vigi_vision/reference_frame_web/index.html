@@ -10,6 +10,8 @@
     <title>VIGI Vision | Reference frame candidates</title>
     <link rel="stylesheet" href="/static/reference-frame-ui.css">
     <link rel="stylesheet" href="/static/reference-frame-candidates.css">
+    <link rel="stylesheet" href="/static/reference-frame-form.css">
+    <script src="/static/reference-frame-form.js" defer></script>
     <script src="/static/reference-frame-selection.js" defer></script>
     <script src="/static/reference-frame-ui.js" defer></script>
   </head>
@@ -35,7 +37,7 @@
           <h2 id="candidate-form-title">Request details</h2>
           <p>Default offsets are used for this first review step.</p>
         </div>
-        <form id="candidate-form" class="candidate-form" novalidate>
+        <form id="candidate-form" class="candidate-form" novalidate aria-busy="false">
           <div class="field">
             <label for="channel-id">Channel ID</label>
             <input id="channel-id" name="channel-id" type="number" min="1" step="1" required>
@@ -51,11 +53,42 @@
               aria-describedby="reference-time-hint"
             >
             <p id="reference-time-hint" class="field-hint">
-              Interpreted as Asia/Seoul time (KST).
+              Seconds are retained. The native picker follows the browser locale;
+              the applied summary uses 24-hour time.
             </p>
           </div>
-          <button id="generate-button" type="submit">Generate candidates</button>
+          <div class="field">
+            <label for="source-timezone">Source timezone</label>
+            <select id="source-timezone" name="source-timezone" required aria-describedby="source-timezone-hint">
+              <option value="Asia/Seoul" selected>Asia/Seoul (KST, UTC+09:00)</option>
+              <option value="UTC">UTC (UTC+00:00)</option>
+            </select>
+            <p id="source-timezone-hint" class="field-hint">
+              Choose the IANA timezone for the entered wall-clock time.
+            </p>
+          </div>
+          <div class="form-actions">
+            <button id="apply-reference-time" type="button" disabled>Apply date and time</button>
+            <button id="generate-button" type="submit" disabled>Generate candidates</button>
+          </div>
         </form>
+        <p id="reference-time-state" class="reference-time-state" role="status" aria-live="polite">
+          Apply date and time before generating candidates.
+        </p>
+        <div id="applied-reference-time" class="applied-reference-time" hidden>
+          <p class="applied-reference-time-label">Applied reference time</p>
+          <p id="applied-reference-time-value" class="mono"></p>
+          <p id="applied-reference-time-zone" class="mono"></p>
+        </div>
+        <div id="generation-progress" class="generation-progress" hidden>
+          <div class="generation-progress-status">
+            <span id="generation-spinner" class="loading-spinner" aria-hidden="true"></span>
+            <p id="generation-progress-message" role="status" aria-live="polite">
+              Generating candidates. This may take a few minutes.
+            </p>
+          </div>
+          <progress id="generation-indicator" aria-label="Candidate generation in progress"></progress>
+        </div>
       </section>
 
       <section class="panel results-panel" aria-labelledby="candidate-results-title">

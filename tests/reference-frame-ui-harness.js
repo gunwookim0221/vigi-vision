@@ -2,6 +2,7 @@ const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 const vm = require("node:vm");
 
+const formScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-form.js"), "utf8");
 const selectionScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-selection.js"), "utf8");
 const script = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-ui.js"), "utf8");
 
@@ -61,7 +62,7 @@ function candidate(offsetSeconds, status = "succeeded") {
       image_url: `/api/v1/reference-frames/frame-${offsetSeconds}/image`,
       image: { width: 2560, height: 1440 },
       timing: { precision_status: "measured_clip_relative" },
-      warnings: ["Absolute source time is not established."],
+      warnings: ["Source timestamp mapping is unavailable pending real-NVR replay validation."],
     },
   };
 }
@@ -92,7 +93,16 @@ function createHarness(fetchImplementation) {
     ["#candidate-form", form],
     ["#channel-id", new FakeElement("input")],
     ["#reference-time", new FakeElement("input")],
+    ["#source-timezone", new FakeElement("select")],
+    ["#apply-reference-time", new FakeElement("button")],
     ["#generate-button", new FakeElement("button")],
+    ["#reference-time-state", new FakeElement("p")],
+    ["#applied-reference-time", new FakeElement("div")],
+    ["#applied-reference-time-value", new FakeElement("p")],
+    ["#applied-reference-time-zone", new FakeElement("p")],
+    ["#generation-progress", new FakeElement("div")],
+    ["#generation-spinner", new FakeElement("span")],
+    ["#generation-indicator", new FakeElement("progress")],
     ["#request-status", new FakeElement("p")],
     ["#request-error", new FakeElement("p")],
     ["#candidate-results", new FakeElement("ol")],
@@ -103,7 +113,12 @@ function createHarness(fetchImplementation) {
     ["#selected-preview-warnings", new FakeElement("div")],
   ]);
   elements.get("#channel-id").value = "1";
-  elements.get("#reference-time").value = "2026-07-20T12:34:18";
+  elements.get("#source-timezone").value = "Asia/Seoul";
+  elements.get("#apply-reference-time").disabled = true;
+  elements.get("#generate-button").disabled = true;
+  elements.get("#applied-reference-time").hidden = true;
+  elements.get("#generation-progress").hidden = true;
+  elements.get("#generation-spinner").hidden = true;
   const context = vm.createContext({
     document: {
       createElement: (tagName) => new FakeElement(tagName),
@@ -112,11 +127,23 @@ function createHarness(fetchImplementation) {
     window: {},
     fetch: fetchImplementation,
   });
+  vm.runInContext(formScript, context);
   vm.runInContext(selectionScript, context);
   vm.runInContext(script, context);
   return {
     form,
+    channel: elements.get("#channel-id"),
+    referenceTime: elements.get("#reference-time"),
+    timezone: elements.get("#source-timezone"),
+    applyButton: elements.get("#apply-reference-time"),
     button: elements.get("#generate-button"),
+    referenceState: elements.get("#reference-time-state"),
+    appliedSummary: elements.get("#applied-reference-time"),
+    appliedValue: elements.get("#applied-reference-time-value"),
+    appliedTimezone: elements.get("#applied-reference-time-zone"),
+    generationProgress: elements.get("#generation-progress"),
+    generationSpinner: elements.get("#generation-spinner"),
+    generationIndicator: elements.get("#generation-indicator"),
     status: elements.get("#request-status"),
     error: elements.get("#request-error"),
     results: elements.get("#candidate-results"),
@@ -131,6 +158,14 @@ function createHarness(fetchImplementation) {
 
 function submit(harness) {
   return harness.form.listeners.submit({ preventDefault() {} });
+}
+
+function applyReferenceTime(harness, value = "2026-07-20T12:34:18", timezone = "Asia/Seoul") {
+  harness.referenceTime.value = value;
+  harness.timezone.value = timezone;
+  harness.referenceTime.listeners.input();
+  harness.timezone.listeners.change();
+  harness.applyButton.listeners.click();
 }
 
 function headingTexts(results) {
@@ -154,4 +189,14 @@ function findElement(root, tagName) {
   return undefined;
 }
 
-module.exports = { candidate, candidateSet, createHarness, deferred, findElement, headingTexts, submit, textOf };
+module.exports = {
+  applyReferenceTime,
+  candidate,
+  candidateSet,
+  createHarness,
+  deferred,
+  findElement,
+  headingTexts,
+  submit,
+  textOf,
+};

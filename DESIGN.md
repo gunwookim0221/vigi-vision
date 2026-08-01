@@ -5,7 +5,7 @@
 - Embedded references: shortlisted `linear.app`, `notion`, and `sentry` for a
   local operations surface; selected the restrained density, clear status
   hierarchy, and cool neutral palette informed by `linear.app`.
-- Lazyweb: skipped for this local Phase 4C-1 shell; external product
+- Lazyweb: skipped for this local Phase 4C-3 shell; external product
   screenshots would not improve the bounded candidate-review workflow and are
   not copied into the product.
 - Imagen drafts: skipped because the existing design tokens and evidence-led
@@ -70,12 +70,21 @@ messages.
 
 ### Candidate form
 
-- **Structure:** labeled channel input, labeled local datetime input, KST hint,
-  and native submit button.
-- **States:** default, focus, disabled/loading, top-level error.
-- **Accessibility:** native labels, required controls, keyboard submission,
-  visible focus, and a live status region.
+- **Structure:** labeled channel input, local datetime input with seconds,
+  explicit IANA timezone select, Apply date and time action, applied-value
+  summary, and Generate candidates action.
+- **States:** unapplied, ready to apply, applied, dirty/reapply-required,
+  disabled/loading, top-level error, and safe warning.
+- **Accessibility:** native labels, required controls, keyboard actions, visible
+  focus, live status regions, an indeterminate progress element without numeric
+  values, and reduced-motion-safe busy feedback.
 - **Layout:** intrinsic grid; document scroll is the sole scroll owner.
+
+The applied summary is application-owned and always uses
+`YYYY-MM-DD HH:mm:ss` plus the selected IANA timezone. The browser-native picker
+may use its own locale presentation; it is not overridden. Candidate generation
+uses an indeterminate spinner/progress indicator because the backend exposes no
+trustworthy incremental progress contract.
 
 ### Candidate result row
 
@@ -102,9 +111,9 @@ messages.
 
 ## 6. Motion & Interaction
 
-Only button hover/active and opacity transitions communicate affordance and
-request-state change. They use 150ms ease-out and disable under
-`prefers-reduced-motion`.
+Only button hover/active, opacity, and the busy spinner communicate affordance
+and request-state change. They use 150ms ease-out; the spinner stops under
+`prefers-reduced-motion` while its visible status text remains.
 
 ## 7. Depth & Surface
 
@@ -116,7 +125,8 @@ or glass effects are used.
 
 - Target WCAG 2.2 AA: visible keyboard focus, labeled controls, semantic
   landmarks, live status/error announcements, and 4.5:1 body-text contrast.
-- The form uses a local datetime value interpreted as KST by the Phase 4A API;
-  the static helper text makes this explicit.
+- The form requires explicit application of a local whole-second datetime and
+  selected source timezone; the applied summary makes the 24-hour value
+  authoritative for the UI.
 - Accepted debt: no real-browser/NVR validation has occurred yet. The exit is a
   user-run loopback browser check against a known recorded KST time.

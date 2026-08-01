@@ -1,10 +1,11 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { candidate, candidateSet, createHarness, deferred, findElement, submit, textOf } = require("./reference-frame-ui-harness.js");
+const { applyReferenceTime, candidate, candidateSet, createHarness, deferred, findElement, submit, textOf } = require("./reference-frame-ui-harness.js");
 
 test("selects exactly one loaded candidate and updates the larger preview", async () => {
   const data = candidateSet([-10, 0, 10].map((offset) => candidate(offset)));
   const harness = createHarness(async () => ({ ok: true, json: async () => data }));
+  applyReferenceTime(harness);
 
   await submit(harness);
   const firstCard = harness.results.children[0];
@@ -44,6 +45,7 @@ test("selects exactly one loaded candidate and updates the larger preview", asyn
 
 test("thumbnail or detail-preview failure disables and clears a selected candidate", async () => {
   const harness = createHarness(async () => ({ ok: true, json: async () => candidateSet([candidate(-10)]) }));
+  applyReferenceTime(harness);
 
   await submit(harness);
   const card = harness.results.children[0];
@@ -66,6 +68,7 @@ test("a succeeded candidate without backend identity stays unavailable", async (
   const unavailable = candidate(-10);
   unavailable.reference_frame.resource_id = "";
   const harness = createHarness(async () => ({ ok: true, json: async () => candidateSet([unavailable]) }));
+  applyReferenceTime(harness);
 
   await submit(harness);
   const card = harness.results.children[0];
@@ -84,6 +87,7 @@ test("a new request clears the current selection before the response arrives", a
     }
     return nextRequest.promise;
   });
+  applyReferenceTime(harness);
 
   await submit(harness);
   const card = harness.results.children[0];

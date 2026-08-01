@@ -6,6 +6,7 @@
 3C hardening/real-NVR validation, and Phase 4A candidate-set processing are
 complete. Phase 4B provides the loopback shell and Phase 4C-1/4C-2 now displays
 ordered candidate thumbnails with transient exactly-one frontend selection;
+Phase 4C-3 polishes explicit applied time and indeterminate busy feedback;
 ROI and object comparison remain deferred.**
 
 The implemented internal slice validates source time into UTC, resolves a
