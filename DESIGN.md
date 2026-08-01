@@ -5,7 +5,7 @@
 - Embedded references: shortlisted `linear.app`, `notion`, and `sentry` for a
   local operations surface; selected the restrained density, clear status
   hierarchy, and cool neutral palette informed by `linear.app`.
-- Lazyweb: skipped for this local Phase 5-1 ROI slice; external product
+- Lazyweb: skipped for this local Phase 5 ROI slice; external product
   screenshots would not improve the bounded candidate-review workflow and are
   not copied into the product.
 - Imagen drafts: skipped because the existing design tokens and evidence-led
@@ -112,17 +112,25 @@ trustworthy incremental progress contract.
 
 - **Structure:** one selected-image pointer surface with a source-pixel summary.
 - **States:** inactive until selection, image loading, draft ROI, committed ROI,
-  rejected tiny drag, and interrupted drag.
+  moving, resizing, reset, rejected tiny drag, and interrupted edit.
 - **Interaction:** mouse, touch, and pen use one Pointer Events path; only one
-  pointer is active, and additional pointers are ignored.
+  pointer is active, and additional pointers are ignored. Interior dragging
+  moves the box; eight handles resize it with deterministic minimum-size
+  clamping. Escape restores the committed ROI.
+- **Keyboard:** focus the ROI surface; Arrow keys move by one source pixel,
+  Shift+Arrow keys by ten, and Alt+Arrow keys resize the east or south edge by
+  one pixel (Alt+Shift by ten). Delete/Backspace resets the transient ROI.
 - **Mobile:** `touch-action: none` is scoped to the image surface so document
   scrolling remains available outside it.
 - **Geometry:** coordinates use loaded `naturalWidth`/`naturalHeight`, with
   endpoint `Math.round()` conversion, source-bound clamping, and a 4×4 source
   pixel minimum. The overlay is recalculated from canonical source pixels after
   image load and responsive resize.
-- **Persistence:** the one ROI is transient frontend state. Persistence and
-  confirmation remain deferred to Phase 6.
+- **Handoff:** `getPhase6Snapshot()` returns an immutable candidate-bound
+  source-space snapshot only while a valid ROI is selected; it is not stored or
+  sent to an API.
+- **Persistence:** the one ROI remains transient frontend state. Persistence
+  and confirmation remain deferred to Phase 6.
 
 ## 6. Motion & Interaction
 
@@ -143,8 +151,8 @@ or glass effects are used.
 - The form requires explicit application of a local whole-second datetime and
   selected source timezone; the applied summary makes the 24-hour value
   authoritative for the UI.
-- ROI pointer drawing is intentionally limited to pointer input in Phase 5-1;
-  keyboard creation, movement, resize handles, and full keyboard accessibility
-  are deferred to Phase 5-2.
-- Accepted debt: no real-browser/NVR validation has occurred yet. The exit is a
-  user-run loopback browser check against a known recorded KST time.
+- ROI keyboard movement/resizing and reset are implemented in Phase 5-2; full
+  confirmation, persistence, and object-comparison accessibility semantics
+  remain later-phase work.
+- Accepted debt: the shell has fixture-backed desktop/mobile browser evidence,
+  but no physical touch-device or real-NVR validation has occurred.

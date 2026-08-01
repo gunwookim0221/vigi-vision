@@ -6,6 +6,7 @@ const formScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "ref
 const selectionScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-selection.js"), "utf8");
 const roiGeometryScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-roi-geometry.js"), "utf8");
 const roiScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-roi.js"), "utf8");
+const roiInteractionScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-roi-interaction.js"), "utf8");
 const script = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-ui.js"), "utf8");
 
 class FakeElement {
@@ -27,6 +28,7 @@ class FakeElement {
     this.className = "";
     this.value = "";
     this.disabled = false;
+    this.focused = false;
   }
 
   addEventListener(name, handler, options = {}) {
@@ -60,6 +62,10 @@ class FakeElement {
 
   hasPointerCapture(pointerId) {
     return this.capturedPointers.has(pointerId);
+  }
+
+  focus() {
+    this.focused = true;
   }
 
   getBoundingClientRect() {
@@ -157,6 +163,11 @@ function createHarness(fetchImplementation) {
     ["#roi-stage", new FakeElement("div")],
     ["#roi-committed-overlay", new FakeElement("div")],
     ["#roi-draft-overlay", new FakeElement("div")],
+    ["#roi-reset", new FakeElement("button")],
+    ...["nw", "n", "ne", "e", "se", "s", "sw", "w"].map((handle) => [
+      `#roi-handle-${handle}`,
+      new FakeElement("button"),
+    ]),
     ["#roi-status", new FakeElement("p")],
     ["#roi-summary", new FakeElement("div")],
     ["#roi-summary-x", new FakeElement("dd")],
@@ -195,6 +206,7 @@ function createHarness(fetchImplementation) {
   vm.runInContext(selectionScript, context);
   vm.runInContext(roiGeometryScript, context);
   vm.runInContext(roiScript, context);
+  vm.runInContext(roiInteractionScript, context);
   vm.runInContext(script, context);
   return {
     form,
@@ -222,6 +234,11 @@ function createHarness(fetchImplementation) {
     roiStage: elements.get("#roi-stage"),
     committedOverlay: elements.get("#roi-committed-overlay"),
     draftOverlay: elements.get("#roi-draft-overlay"),
+    resetButton: elements.get("#roi-reset"),
+    handles: Object.fromEntries(["nw", "n", "ne", "e", "se", "s", "sw", "w"].map((handle) => [
+      handle,
+      elements.get(`#roi-handle-${handle}`),
+    ])),
     roiStatus: elements.get("#roi-status"),
     roiSummary: elements.get("#roi-summary"),
     roiSummaryX: elements.get("#roi-summary-x"),

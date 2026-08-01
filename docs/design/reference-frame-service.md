@@ -7,9 +7,10 @@
 complete. Phase 4B provides the loopback shell and Phase 4C-1/4C-2 now displays
 ordered candidate thumbnails with transient exactly-one frontend selection;
 Phase 4C-3 polishes explicit applied time and indeterminate busy feedback;
-Phase 5-1 adds a transient frontend-only one-rectangle ROI workspace over the
-selected image. ROI persistence, confirmation, and object comparison remain
-deferred.**
+Phase 5-1/5-2 adds a transient frontend-only one-rectangle ROI workspace over
+the selected image, including bounded move/resize, reset/recreate, keyboard
+editing, and an immutable Phase 6 handoff snapshot. ROI persistence,
+confirmation, and object comparison remain deferred.**
 
 The implemented internal slice validates source time into UTC, resolves a
 deterministic covering segment through `RecordingPlanner`, constrains its replay

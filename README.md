@@ -211,11 +211,15 @@ radio control; the selected frame opens a transient ROI workspace. Dragging
 with a mouse, touch, or pen draws one rectangle using original-image pixel
 coordinates; a 4×4 source-pixel minimum rejects taps and tiny drags. Pointer
 capture and scoped `touch-action: none` keep the image interaction stable on
-mobile while the page remains scrollable outside the image. Candidate changes,
-new results, and image replacement clear draft and committed ROI state. Pointer
-interruption clears the draft and active pointer while preserving a prior
-committed ROI. ROI persistence, confirmation, movement, resize handles,
-keyboard editing, and manifest storage are deferred.
+mobile while the page remains scrollable outside the image. Drag the committed
+box to move it, use its eight handles to resize it, or use the focused keyboard
+surface: Arrow moves by one source pixel, Shift+Arrow by ten, and Alt+Arrow
+resizes by one (Alt+Shift by ten). Reset ROI clears only the transient ROI and
+leaves the selected candidate intact. Candidate changes, new results, and image
+replacement clear draft and committed ROI state. Pointer interruption clears
+the draft and active pointer while preserving a prior committed ROI. The
+frontend-only `getPhase6Snapshot()` handoff is immutable and transient; ROI
+persistence, confirmation, and manifest storage remain deferred.
 
 For a standalone IPC, set `VIGI_SOURCE=ipc`; `inspect` uses the public IPC RTSP builder and does not perform IPC OpenAPI authentication. A live inspection completes only when source validation, one-frame extraction, and OpenAI structured image analysis all succeed.
 

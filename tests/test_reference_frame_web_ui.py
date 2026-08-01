@@ -44,6 +44,13 @@ def test_web_ui_serves_an_accessible_candidate_form() -> None:
     assert 'id="roi-workspace"' in response.text
     assert 'id="roi-stage"' in response.text
     assert 'id="roi-instructions"' in response.text
+    assert 'id="roi-edit-instructions"' in response.text
+    assert 'id="roi-reset"' in response.text
+    assert 'data-handle="nw"' in response.text
+    assert 'data-handle="se"' in response.text
+    assert "Shift+Arrow" in response.text
+    assert "Backspace resets" in response.text
+    assert "Escape cancels" in response.text
     assert "touch, or pen" in response.text
     assert 'id="roi-summary"' in response.text
 
@@ -55,11 +62,6 @@ def test_web_ui_serves_its_static_assets() -> None:
     candidate_stylesheet = client.get("/static/reference-frame-candidates.css")
     form_stylesheet = client.get("/static/reference-frame-form.css")
     roi_stylesheet = client.get("/static/reference-frame-roi.css")
-    form_script = client.get("/static/reference-frame-form.js")
-    selection_script = client.get("/static/reference-frame-selection.js")
-    roi_geometry_script = client.get("/static/reference-frame-roi-geometry.js")
-    roi_script = client.get("/static/reference-frame-roi.js")
-    script = client.get("/static/reference-frame-ui.js")
 
     assert stylesheet.status_code == 200
     assert "focus-visible" in stylesheet.text
@@ -75,6 +77,25 @@ def test_web_ui_serves_its_static_assets() -> None:
     assert "touch-action: none" in roi_stylesheet.text
     assert "roi-overlay-committed" in roi_stylesheet.text
     assert "roi-overlay-draft" in roi_stylesheet.text
+    assert ".roi-handle" in roi_stylesheet.text
+    assert "--roi-handle-hit-size" in roi_stylesheet.text
+    assert ".roi-handle:hover:not(:disabled)" in roi_stylesheet.text
+    assert "align-items: center" in roi_stylesheet.text
+    assert "justify-content: center" in roi_stylesheet.text
+    assert "transform: translate(-50%, -50%)" in roi_stylesheet.text
+    assert ".roi-stage:focus-visible" in roi_stylesheet.text
+
+
+def test_web_ui_serves_its_static_scripts() -> None:
+    client = _client()
+
+    form_script = client.get("/static/reference-frame-form.js")
+    selection_script = client.get("/static/reference-frame-selection.js")
+    roi_geometry_script = client.get("/static/reference-frame-roi-geometry.js")
+    roi_script = client.get("/static/reference-frame-roi.js")
+    roi_interaction_script = client.get("/static/reference-frame-roi-interaction.js")
+    script = client.get("/static/reference-frame-ui.js")
+
     assert form_script.status_code == 200
     assert "source_timezone" in form_script.text
     assert "appliedRequestDirty" in form_script.text
@@ -85,11 +106,15 @@ def test_web_ui_serves_its_static_assets() -> None:
     assert roi_geometry_script.status_code == 200
     assert "Math.round" in roi_geometry_script.text
     assert roi_script.status_code == 200
-    assert "pointercancel" in roi_script.text
-    assert "lostpointercapture" in roi_script.text
-    assert "setPointerCapture" in roi_script.text
     assert "naturalWidth" in roi_script.text
     assert "sourceRoiToDisplay" in roi_script.text
+    assert "getPhase6Snapshot" in roi_script.text
+    assert roi_interaction_script.status_code == 200
+    assert "pointercancel" in roi_interaction_script.text
+    assert "lostpointercapture" in roi_interaction_script.text
+    assert "setPointerCapture" in roi_interaction_script.text
+    assert "ArrowRight" in roi_interaction_script.text
+    assert "altKey" in roi_interaction_script.text
     assert script.status_code == 200
     assert 'fetch("/api/v1/reference-frame-candidate-sets"' in script.text
     assert "channel_id: Number(channelIdInput.value)" in script.text
