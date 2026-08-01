@@ -225,56 +225,8 @@ button:disabled {
   font-weight: 600;
 }
 
-.candidate-results {
-  display: grid;
-  gap: var(--space-3);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.candidate-row {
-  display: grid;
-  grid-template-columns: minmax(9rem, 1fr) minmax(10rem, 1.2fr) minmax(12rem, 2fr);
-  gap: var(--space-3);
-  padding: var(--space-4);
-  border: 1px solid var(--border-default);
-  border-radius: 0.5rem;
-  background: var(--surface-muted);
-  overflow-wrap: anywhere;
-}
-
-.candidate-row[data-status="succeeded"] {
-  border-inline-start: 0.3rem solid var(--status-success);
-}
-
-.candidate-row[data-status="failed"] {
-  border-inline-start: 0.3rem solid var(--status-error);
-}
-
-.candidate-fact {
-  display: grid;
-  gap: var(--space-1);
-}
-
-.candidate-fact dt {
-  color: var(--text-secondary);
-  font-size: 0.75rem;
-  font-weight: 600;
-}
-
-.candidate-fact dd {
-  margin: 0;
-  font-size: 0.875rem;
-}
-
-.candidate-fact dd.mono {
-  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
-}
-
 @media (max-width: 40rem) {
-  .candidate-form,
-  .candidate-row {
+  .candidate-form {
     grid-template-columns: 1fr;
   }
 

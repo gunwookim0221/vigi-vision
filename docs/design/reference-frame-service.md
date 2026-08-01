@@ -2,11 +2,12 @@
 
 ## Status
 
-**Status: Phase 2B internal service, Phase 3B synchronous HTTP transport, and
-Phase 3C hardening/real-NVR validation are complete. The implemented Phase 4A
-candidate-set contract is in
-[reference-frame-candidates.md](reference-frame-candidates.md); frontend, ROI,
-and object-comparison work remain deferred.**
+**Status: Phase 2B internal service, Phase 3B synchronous HTTP transport, Phase
+3C hardening/real-NVR validation, and Phase 4A candidate-set processing are
+complete. Phase 4B provides the loopback shell and Phase 4C-1/4C-2 now displays
+ordered candidate thumbnails with transient exactly-one frontend selection;
+Phase 4C-3 polishes explicit applied time and indeterminate busy feedback;
+ROI and object comparison remain deferred.**
 
 The implemented internal slice validates source time into UTC, resolves a
 deterministic covering segment through `RecordingPlanner`, constrains its replay
@@ -24,8 +25,8 @@ This document specifies the implemented internal boundary used by the approved
 [object-disappearance investigation](object-disappearance-investigation.md):
 retrieve one reviewable recorded frame for a requested NVR channel and time.
 The public HTTP transport is documented separately; this service still does not
-implement frontend, ROI selection, presence classification, temporal search, or
-review-clip generation.
+implement frontend candidate selection, ROI selection, presence classification,
+temporal search, or review-clip generation.
 
 ## Purpose
 
