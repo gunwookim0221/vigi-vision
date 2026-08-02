@@ -21,6 +21,7 @@
     <script src="/static/reference-frame-roi-assisted-pointer.js" defer></script>
     <script src="/static/reference-frame-roi-interaction.js" defer></script>
     <script src="/static/reference-frame-ui.js" defer></script>
+    <script src="/static/reference-frame-confirmation.js" defer></script>
   </head>
   <body>
     <header class="site-header">
@@ -217,6 +218,27 @@
             <dl id="selected-preview-facts" class="candidate-facts"></dl>
             <div id="selected-preview-warnings" class="selected-preview-warnings"></div>
           </div>
+        </div>
+      </section>
+
+      <section id="confirmation-panel" class="panel confirmation-panel" aria-labelledby="confirmation-title" hidden>
+        <div class="section-heading">
+          <h2 id="confirmation-title">조사 확인</h2>
+          <p>선택한 기준 프레임과 ROI를 검토한 뒤 서버에 한 번만 확인합니다.</p>
+        </div>
+        <p id="confirmation-status" class="request-status" role="status" aria-live="polite" aria-busy="false" tabindex="-1">
+          후보와 ROI를 선택하세요.
+        </p>
+        <p id="confirmation-error" class="request-error" role="alert" tabindex="-1" hidden></p>
+        <p id="confirmation-review" class="confirmation-review" aria-live="polite"></p>
+        <button id="confirmation-action" type="button" disabled>조사 조건 확정</button>
+        <div id="confirmation-result" class="confirmation-result" tabindex="-1" hidden>
+          <h3>확인된 조사</h3>
+          <dl class="candidate-facts">
+            <div class="candidate-fact"><dt>조사 ID</dt><dd id="confirmation-id" class="mono"></dd></div>
+            <div class="candidate-fact"><dt>확인 시각 (KST)</dt><dd id="confirmation-confirmed-at" class="mono"></dd></div>
+            <div class="candidate-fact"><dt>아티팩트 디렉터리</dt><dd id="confirmation-artifact" class="mono"></dd></div>
+          </dl>
         </div>
       </section>
     </main>

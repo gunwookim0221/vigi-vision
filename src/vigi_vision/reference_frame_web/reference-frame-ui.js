@@ -11,6 +11,7 @@ const generationSpinner = document.querySelector("#generation-spinner");
 let requestSequence = 0;
 let channelRequestSequence = 0;
 let channelSelectionExplicit = false;
+let candidateGenerationActive = false;
 
 const SOURCE_TIMESTAMP_WARNING =
   "Source timestamp mapping is unavailable pending real-NVR replay validation.";
@@ -113,7 +114,19 @@ function channelLabel(channel) {
   return [`채널 ${channel.channel_id}`, ...metadata].join(" - ");
 }
 
+function confirmationLocked() {
+  return window.vigiVisionReferenceFrameConfirmation?.getState?.().locked === true;
+}
+
 function replaceChannelOptions(channels, selectedId) {
+  if (confirmationLocked()) {
+    return;
+  }
+  const currentId = Number(channelIdInput.value);
+  const channelChanged = selectedId !== currentId;
+  if (channelChanged) {
+    transitionChannel("채널 목록이 변경되어 후보를 다시 생성해야 합니다.");
+  }
   channelIdInput.replaceChildren();
   channels.forEach((channel) => {
     const option = document.createElement("option");
@@ -122,7 +135,7 @@ function replaceChannelOptions(channels, selectedId) {
     channelIdInput.append(option);
   });
   channelIdInput.value = selectedId === null ? "" : String(selectedId);
-  channelIdInput.disabled = channels.length === 0;
+  channelIdInput.disabled = channels.length === 0 || confirmationLocked();
   referenceFrameForm.refresh();
 }
 
@@ -205,6 +218,9 @@ async function loadChannels() {
     if (sequence !== channelRequestSequence) {
       return;
     }
+    if (confirmationLocked()) {
+      return;
+    }
     if (!hadKnownOptions) {
       replaceChannelOptions([], null);
     } else {
@@ -257,6 +273,46 @@ function clearResults() {
   candidateResults.replaceChildren();
 }
 
+function invalidateCandidateRequest(message = "") {
+  requestSequence += 1;
+  clearResults();
+  if (candidateGenerationActive) {
+    setGenerationBusy(false);
+  }
+  if (message.length > 0) {
+    setRequestState("ready", message);
+  }
+}
+
+function transitionChannel(message = "") {
+  if (confirmationLocked()) {
+    return;
+  }
+  invalidateCandidateRequest(message);
+  window.vigiVisionReferenceFrameConfirmation?.refresh?.();
+}
+
+function currentCandidateRequestContext() {
+  const payload = referenceFrameForm.getRequestPayload();
+  return payload === null
+    ? null
+    : {
+      channelId: Number(channelIdInput.value),
+      referenceTime: payload.reference_time,
+      sourceTimezone: payload.source_timezone,
+    };
+}
+
+function isCurrentCandidateRequest(sequence, context) {
+  const current = currentCandidateRequestContext();
+  return sequence === requestSequence
+    && current !== null
+    && referenceFrameForm.isReady()
+    && current.channelId === context.channelId
+    && current.referenceTime === context.referenceTime
+    && current.sourceTimezone === context.sourceTimezone;
+}
+
 function renderRequestError(message = "요청을 완료하지 못했습니다. 채널과 녹화 시각을 확인한 후 다시 시도하세요.") {
   referenceFrameSelection.reset();
   requestError.hidden = false;
@@ -291,6 +347,7 @@ function appendWarnings(container, warnings) {
 }
 
 function setGenerationBusy(active) {
+  candidateGenerationActive = active;
   referenceFrameForm.setGenerationActive(active);
   generateButton.textContent = active ? "후보를 생성하는 중…" : "후보 생성";
   generationProgress.hidden = !active;
@@ -442,6 +499,10 @@ async function submitCandidateRequest(event) {
   }
 
   const sequence = ++requestSequence;
+  const context = currentCandidateRequestContext();
+  if (context === null) {
+    return;
+  }
   clearResults();
   setGenerationBusy(true);
   setRequestState("loading", "후보 요청을 생성하는 중입니다. 몇 분 정도 걸릴 수 있습니다.");
@@ -456,21 +517,21 @@ async function submitCandidateRequest(event) {
       }),
     });
     if (!response.ok) {
-      if (sequence === requestSequence) {
+      if (isCurrentCandidateRequest(sequence, context)) {
         renderRequestError();
       }
       return;
     }
     const candidateSet = await response.json();
-    if (sequence === requestSequence) {
+    if (isCurrentCandidateRequest(sequence, context)) {
       renderCandidateSet(candidateSet);
     }
   } catch {
-    if (sequence === requestSequence) {
+    if (isCurrentCandidateRequest(sequence, context)) {
       renderRequestError();
     }
   } finally {
-    if (sequence === requestSequence) {
+    if (isCurrentCandidateRequest(sequence, context)) {
       setGenerationBusy(false);
     }
   }
@@ -480,6 +541,8 @@ candidateForm.addEventListener("submit", submitCandidateRequest);
 channelIdInput.addEventListener("change", () => {
   channelSelectionExplicit = /^\d+$/.test(channelIdInput.value)
     && Number(channelIdInput.value) > 0;
+  transitionChannel("채널이 변경되어 후보를 다시 생성해야 합니다.");
 });
+window.vigiVisionReferenceFrameCandidates = Object.freeze({ invalidate: invalidateCandidateRequest });
 window.vigiVisionReferenceFrameChannels = Object.freeze({ refresh: loadChannels });
 void loadChannels();

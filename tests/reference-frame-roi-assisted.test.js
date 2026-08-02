@@ -198,6 +198,8 @@ test("a current response enters the canonical ROI and remains manually editable"
     candidateId: "resource-0",
     sourceWidth: 2560,
     sourceHeight: 1440,
+    coordinateSpace: "source_pixels",
+    provenance: "assisted",
     roi: { x: 1200, y: 600, width: 240, height: 180 },
   });
   assert.match(harness.roiStatus.textContent, /ROI 자동 제안을 받았습니다\. 확인하고 수동 조정/);

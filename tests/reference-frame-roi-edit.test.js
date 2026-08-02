@@ -141,6 +141,8 @@ test("Phase 6 snapshot is source-space, candidate-bound, and immutable", async (
     candidateId: "resource-0",
     sourceWidth: 2560,
     sourceHeight: 1440,
+    coordinateSpace: "source_pixels",
+    provenance: "manual",
     roi: { x: 256, y: 180, width: 1536, height: 720 },
   });
   snapshot.roi.x = 0;

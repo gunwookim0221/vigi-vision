@@ -2,17 +2,24 @@
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import BinaryIO, ClassVar, Final, Literal, final
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from vigi_vision.durable_io import (
+    DurableJsonError,
+    is_safe_contained_path,
+    load_durable_json_object,
+    parse_canonical_utc,
+)
 from vigi_vision.recording import RecordingSegment, RecordingWindow, RecordingWindowError
 from vigi_vision.reference_frame_artifacts import reference_frame_resource_id
 from vigi_vision.reference_frame_models import (
     MANIFEST_SCHEMA_VERSION,
     FrameSelectionPolicy,
+    ReferenceFrameInputError,
     ReferenceFrameRequest,
     ReferenceFrameResourceCorruptError,
     ReferenceFrameResourceIncompatibleError,
@@ -37,7 +44,7 @@ _JPEG_SOF_MARKERS: Final = frozenset(
 class _ManifestDocument(BaseModel):
     """The strict persisted manifest shape accepted for completed-resource reuse."""
 
-    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True)
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_version: int
     generation_policy_version: int
@@ -73,6 +80,24 @@ class ReferenceFrameImageResource:
     height: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ReferenceFrameResourceMetadata:
+    """Trusted completed-resource facts used by downstream confirmation boundaries."""
+
+    resource_id: str
+    request: ReferenceFrameRequest
+    manifest_schema_version: int
+    jpeg_path: Path = field(repr=False)
+    manifest_path: Path = field(repr=False)
+    width: int
+    height: int
+    decoded_local_pts_seconds: float | None
+    estimated_source_time_utc: datetime | None
+    offset_from_requested_seconds: float | None
+    timing_precision_status: TimingPrecisionStatus
+    warnings: tuple[str, ...]
+
+
 @final
 @dataclass(frozen=True, slots=True)
 class ReferenceFrameResourceStore:
@@ -96,16 +121,62 @@ class ReferenceFrameResourceStore:
         _, image = self._open(resource_id)
         return image
 
+    def resolve_resource(self, resource_id: str) -> ReferenceFrameResourceMetadata:
+        """Return trusted manifest facts and the validated JPEG for one resource."""
+        document, image = self._open(resource_id)
+        if document.schema_version != MANIFEST_SCHEMA_VERSION:
+            raise ReferenceFrameResourceIncompatibleError
+        try:
+            policy = FrameSelectionPolicy(document.frame_selection_policy)
+            request = ReferenceFrameRequest(
+                channel_id=document.channel_id,
+                requested_time_text=document.requested_time,
+                source_timezone=document.source_timezone,
+                requested_time_utc=_parse_utc(document.requested_time_utc),
+                frame_selection_policy=policy,
+                generation_policy_version=document.generation_policy_version,
+            )
+            timing_status = TimingPrecisionStatus(document.timing_precision_status)
+            estimated_time = (
+                _parse_utc(document.estimated_source_time_utc)
+                if document.estimated_source_time_utc is not None
+                else None
+            )
+        except (ReferenceFrameInputError, ValueError):
+            raise ReferenceFrameResourceCorruptError from None
+        if document.generation_policy_version <= 0 or document.width <= 0 or document.height <= 0:
+            raise ReferenceFrameResourceCorruptError
+        return ReferenceFrameResourceMetadata(
+            resource_id=resource_id,
+            request=request,
+            manifest_schema_version=document.schema_version,
+            jpeg_path=image.jpeg_path,
+            manifest_path=self._resource_path(resource_id) / _MANIFEST_FILENAME,
+            width=document.width,
+            height=document.height,
+            decoded_local_pts_seconds=document.decoded_local_pts_seconds,
+            estimated_source_time_utc=estimated_time,
+            offset_from_requested_seconds=document.offset_from_requested_seconds,
+            timing_precision_status=timing_status,
+            warnings=document.warnings,
+        )
+
     def _open(self, resource_id: str) -> tuple[_ManifestDocument, ReferenceFrameImageResource]:
         path = self._resource_path(resource_id)
         try:
-            if not path.exists():
+            if not path.exists() and not path.is_symlink():
                 raise ReferenceFrameResourceNotFoundError
+            if not is_safe_contained_path(self.output_root, path, require_target=True):
+                raise ReferenceFrameResourceCorruptError
             if path.is_symlink() or not path.is_dir():
                 raise ReferenceFrameResourceCorruptError
             manifest_path = _direct_child(path, _MANIFEST_FILENAME)
+            if not is_safe_contained_path(path, manifest_path, require_target=True):
+                raise ReferenceFrameResourceCorruptError
             document = _read_manifest(manifest_path)
             image_path = _direct_child(path, _FRAME_FILENAME)
+            if not is_safe_contained_path(path, image_path, require_target=True):
+                raise ReferenceFrameResourceCorruptError
             _validate_jpeg(image_path)
             dimensions = _jpeg_dimensions(image_path)
             if dimensions is not None and dimensions != (document.width, document.height):
@@ -158,8 +229,10 @@ class ReferenceFrameResourceStore:
 
 def _read_manifest(path: Path) -> _ManifestDocument:
     try:
-        return _ManifestDocument.model_validate_json(path.read_text(encoding="utf-8"))
-    except (OSError, ValidationError, ValueError):
+        raw = path.read_text(encoding="utf-8")
+        _ = load_durable_json_object(raw)
+        return _ManifestDocument.model_validate_json(raw, strict=True)
+    except (DurableJsonError, OSError, ValidationError, ValueError):
         raise ReferenceFrameResourceCorruptError from None
 
 
@@ -278,10 +351,7 @@ def _result_from_document(
 
 
 def _parse_utc(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
-    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
-        raise ValueError
-    return parsed
+    return parse_canonical_utc(value)
 
 
 def _direct_child(root: Path, name: str) -> Path:

@@ -165,13 +165,17 @@ acceptance for assisted ROI remain pending. Phase 5-4A moves all general ROI
 status feedback into the single external live region below the image, keeps the
 image dedicated to source/mask/rectangle/tap evidence, adds explicit state
 semantics, and preserves reset/stale-response cleanup plus manual fallback;
-localization remains deferred to Phase 5-4C. Phase 6-1 now approves the
-documentation-only confirmation contract: one reviewed candidate and canonical
+localization remains deferred to Phase 5-4C. Phase 6-1 approved the
+confirmation contract: one reviewed candidate and canonical
 source-pixel ROI will publish an immutable schema 2 package under the existing
 investigation artifact root, reference the immutable frame resource, preserve
 truthful nullable absolute timing, and expose one strict Phase 7 loader
-boundary. The API, persistence service, and inline Korean confirmation UI are
-not yet implemented. Absolute source-time calibration and object comparison
+boundary. Phase 6-2A now implements the typed backend persistence foundation,
+and Phase 6-2B exposes it through the existing safe FastAPI boundary. Phase
+6-2C now connects the existing reference-frame/ROI page to that boundary with
+inline Korean review, strict POST/GET confirmation, reopen restoration, and
+immutable read-only success state. Absolute
+source-time calibration and object comparison
 remain deferred; Phase 4C-2 provides transient frontend-only selection of one
 successful candidate, and Phase 5-1/5-2 provide the transient source-space
 editing surface without altering the API or evidence semantics.
@@ -194,9 +198,9 @@ capability.
    with keyboard input. Preserve the Phase 5-3B-2 backend, the Phase 5-3B-3
    assisted-ROI request path, the Phase 5-3C silhouette preview, and the Phase
    5-4A external status boundary, then run operator smoke and physical
-   desktop/mobile acceptance. Implement the approved Phase 6-1 contract in
-   bounded backend persistence, inline web confirmation, and real-NVR
-   validation slices without changing recording or reference-frame ownership.
+   desktop/mobile acceptance. Continue with Phase 6-4 real-NVR validation
+   without changing recording or reference-frame
+   ownership.
 
 ## High-level roadmap
 

@@ -19,10 +19,16 @@ let activeEdit = null;
 let interactionOriginRoi = null;
 let interactionOriginPoint = null;
 let assistedPreviewActive = false;
+let provenance = null;
+let roiReadOnly = false;
 let boundImage = null;
 let boundImageHandlers = null;
+let previewGeneration = 0;
 const STATUS_STATES = new Set(["disabled", "ready", "active", "loading", "success", "warning", "error", "unavailable"]);
 let statusState = "disabled";
+function notifyConfirmation() {
+  window.vigiVisionReferenceFrameConfirmation?.refresh?.();
+}
 function setStatus(message, state = "ready") {
   roiStatus.textContent = message;
   statusState = STATUS_STATES.has(state) ? state : "ready";
@@ -48,6 +54,9 @@ function clearInteractionState() {
 }
 function copyRoi(roi) { return roi === null ? null : { ...roi }; }
 function copyPoint(point) { return point === null ? null : { ...point }; }
+function userAdjustedProvenance(current) {
+  return current === "assisted" ? "assisted_then_adjusted" : current ?? "manual";
+}
 function readSourceSize(image) {
   const width = image?.naturalWidth;
   const height = image?.naturalHeight;
@@ -63,7 +72,7 @@ function renderOverlay(overlay, roi, displayRect) {
   Object.assign(overlay.style, { left: `${displayRoi.left}px`, top: `${displayRoi.top}px`, width: `${displayRoi.width}px`, height: `${displayRoi.height}px` });
 }
 function renderSummary() {
-  resetButton.disabled = committedRoi === null;
+  resetButton.disabled = committedRoi === null || roiReadOnly;
   if (committedRoi === null) {
     roiSummary.hidden = true;
     return;
@@ -107,8 +116,8 @@ function detachImage() {
   }
   boundImage = boundImageHandlers = null;
 }
-function activateImage(image) {
-  if (image !== selectedImage) {
+function activateImage(image, generation = previewGeneration) {
+  if (image !== selectedImage || generation !== previewGeneration || roiReadOnly) {
     return;
   }
   sourceSize = readSourceSize(image);
@@ -125,13 +134,14 @@ function activateImage(image) {
 }
 function setSelectedCandidate(candidate, image) {
   reset("선택한 후보 이미지를 불러오는 중입니다.", "loading");
+  const generation = previewGeneration;
   roiSelectedCandidate = candidate;
   selectedImage = image;
   boundImage = image;
   boundImageHandlers = {
-    load: () => activateImage(image),
+    load: () => activateImage(image, generation),
     error: () => {
-      if (image === selectedImage) {
+      if (image === selectedImage && generation === previewGeneration && !roiReadOnly) {
         reset("선택한 후보 이미지를 사용할 수 없습니다.", "unavailable");
       }
     },
@@ -139,26 +149,37 @@ function setSelectedCandidate(candidate, image) {
   image.addEventListener("load", boundImageHandlers.load);
   image.addEventListener("error", boundImageHandlers.error);
   if (image.complete) {
-    activateImage(image);
+    activateImage(image, generation);
   }
   render();
 }
 function reset(message = "먼저 후보를 선택하세요.", state = "disabled") {
+  previewGeneration += 1;
   clearInteractionState();
   detachImage();
   roiSelectedCandidate = selectedImage = sourceSize = committedRoi = null;
+  provenance = null;
   assistedPreviewActive = false;
   render();
   setStatus(message, state);
+  notifyConfirmation();
 }
 function clearRoi(message = "ROI를 초기화했습니다. 준비되면 새 영역을 그리세요.", state = "ready") {
+  if (roiReadOnly) {
+    return;
+  }
   clearInteractionState();
   committedRoi = null;
+  provenance = null;
   assistedPreviewActive = false;
   render();
   setStatus(message, state);
+  notifyConfirmation();
 }
 function beginInteraction(pointerId, mode, handle, originPoint) {
+  if (roiReadOnly) {
+    return;
+  }
   activePointerId = pointerId;
   activeEdit = { mode, handle };
   interactionOriginRoi = copyRoi(committedRoi);
@@ -171,11 +192,17 @@ function setDraftRoi(nextRoi) {
   render();
 }
 function commitInteraction(message, state = "success") {
+  if (roiReadOnly) {
+    return;
+  }
   const nextRoi = copyRoi(draftRoi);
+  const editMode = activeEdit?.mode;
   clearInteractionState();
   if (nextRoi !== null && nextRoi.width >= MINIMUM_ROI_WIDTH && nextRoi.height >= MINIMUM_ROI_HEIGHT) {
     committedRoi = nextRoi;
+    provenance = editMode === "drawing" ? "manual" : userAdjustedProvenance(provenance);
     setStatus(message, state);
+    notifyConfirmation();
   }
   render();
 }
@@ -184,10 +211,27 @@ function cancelInteraction(message, state = "warning") {
   setStatus(message, state);
   render();
 }
-function replaceCommittedRoi(nextRoi, message, state = "success") {
+function replaceCommittedRoi(nextRoi, message, state = "success", provenanceValue = null) {
   clearInteractionState();
   committedRoi = copyRoi(nextRoi);
+  provenance = ["manual", "assisted", "assisted_then_adjusted"].includes(provenanceValue)
+    ? provenanceValue
+    : provenance ?? "manual";
   setStatus(message, state);
+  render();
+  notifyConfirmation();
+}
+
+function replaceAdjustedRoi(nextRoi, message, state = "success") {
+  replaceCommittedRoi(nextRoi, message, state, userAdjustedProvenance(provenance));
+}
+
+function setReadOnly(value) {
+  roiReadOnly = value === true;
+  previewGeneration += 1;
+  if (roiReadOnly) {
+    clearInteractionState();
+  }
   render();
 }
 function setAssistedPreviewActive(active) {
@@ -207,7 +251,10 @@ function getPhase6Snapshot() {
   if (typeof candidateId !== "string" || candidateId.length === 0 || committedRoi === null || sourceSize === null) {
     return null;
   }
-  return deepFreeze({ candidateId, sourceWidth: sourceSize.width, sourceHeight: sourceSize.height, roi: { x: committedRoi.x, y: committedRoi.y, width: committedRoi.width, height: committedRoi.height } });
+  if (!["manual", "assisted", "assisted_then_adjusted"].includes(provenance)) {
+    return null;
+  }
+  return deepFreeze({ candidateId, sourceWidth: sourceSize.width, sourceHeight: sourceSize.height, coordinateSpace: "source_pixels", provenance, roi: { x: committedRoi.x, y: committedRoi.y, width: committedRoi.width, height: committedRoi.height } });
 }
 
 if (typeof window.addEventListener === "function") {
@@ -220,11 +267,11 @@ if (typeof window.ResizeObserver === "function") {
 
 const referenceFrameRoi = Object.freeze({
   getState() {
-    return { activePointerId, activeEdit: activeEdit === null ? null : { ...activeEdit }, assistedPreviewActive, committedRoi: copyRoi(committedRoi), draftRoi: copyRoi(draftRoi), interactionOriginPoint: copyPoint(interactionOriginPoint), interactionOriginRoi: copyRoi(interactionOriginRoi), selectedCandidate: roiSelectedCandidate, sourceSize: sourceSize === null ? null : { ...sourceSize }, statusState };
+    return { activePointerId, activeEdit: activeEdit === null ? null : { ...activeEdit }, assistedPreviewActive, committedRoi: copyRoi(committedRoi), draftRoi: copyRoi(draftRoi), interactionOriginPoint: copyPoint(interactionOriginPoint), interactionOriginRoi: copyRoi(interactionOriginRoi), provenance, readOnly: roiReadOnly, selectedCandidate: roiSelectedCandidate, sourceSize: sourceSize === null ? null : { ...sourceSize }, statusState };
   },
   moveRoi: roiGeometry.moveRoi, normalizeRoi: roiGeometry.normalizeRoi, pointToSource: roiGeometry.pointToSource,
   pointInRoi: roiGeometry.pointInRoi, beginInteraction, cancelInteraction, clearRoi, commitInteraction, getPhase6Snapshot,
-  reset, replaceCommittedRoi, setAssistedPreviewActive, setDraftRoi, setStatus, setSelectedCandidate, resizeHandleAt: roiGeometry.resizeHandleAt,
+  reset, replaceAdjustedRoi, replaceCommittedRoi, setAssistedPreviewActive, setDraftRoi, setReadOnly, setStatus, setSelectedCandidate, resizeHandleAt: roiGeometry.resizeHandleAt,
   resizeRoi: roiGeometry.resizeRoi, sourceRoiToDisplay: roiGeometry.sourceRoiToDisplay,
 });
 

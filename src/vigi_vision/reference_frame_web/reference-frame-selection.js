@@ -7,7 +7,13 @@ const selectedPreviewWarnings = document.querySelector("#selected-preview-warnin
 let selectedCandidate = null;
 let selectedView = null;
 let candidateViews = new WeakMap();
+const candidateViewList = new Set();
 let previewSequence = 0;
+let selectionReadOnly = false;
+
+function notifyConfirmation() {
+  window.vigiVisionReferenceFrameConfirmation?.refresh?.();
+}
 
 function resetRoi(message) {
   const roi = window.vigiVisionReferenceFrameRoi;
@@ -109,7 +115,7 @@ function renderPreview(candidate) {
 }
 
 function selectCandidate(candidate, view) {
-  if (!view.control || view.control.disabled || view.unavailable) {
+  if (selectionReadOnly || !candidateViewList.has(view) || !view.control || view.control.disabled || view.unavailable) {
     return;
   }
   if (selectedView && selectedView !== view) {
@@ -133,9 +139,13 @@ function selectCandidate(candidate, view) {
   if (assistedRoi) {
     assistedRoi.setSelectedCandidate(candidate, selectedPreviewImage);
   }
+  notifyConfirmation();
 }
 
 function markUnavailable(candidate) {
+  if (selectionReadOnly) {
+    return;
+  }
   const view = candidateViews.get(candidate);
   if (!view || view.unavailable) {
     return;
@@ -168,6 +178,7 @@ function attachCandidate(candidate, card, details, image, placeholder) {
     unavailable: false,
   };
   candidateViews.set(candidate, view);
+  candidateViewList.add(view);
   if (isSelectableCandidate(candidate)) {
     const label = document.createElement("label");
     label.className = "candidate-select";
@@ -198,17 +209,40 @@ function attachCandidate(candidate, card, details, image, placeholder) {
     view.status = status;
   }
   image.addEventListener("load", () => {
-    if (view.control && !view.unavailable) {
-      view.control.disabled = false;
-      view.status.textContent = "선택할 수 있습니다.";
+    if (candidateViewList.has(view) && view.control && !view.unavailable) {
+      view.control.disabled = selectionReadOnly;
+      view.status.textContent = selectionReadOnly ? "확인된 상태에서는 변경할 수 없습니다." : "선택할 수 있습니다.";
     }
   }, { once: true });
-  image.addEventListener("error", () => markUnavailable(candidate), { once: true });
+  image.addEventListener("error", () => {
+    if (candidateViewList.has(view)) {
+      markUnavailable(candidate);
+    }
+  }, { once: true });
 }
 
 function resetSelection(message = "선택한 후보가 없습니다.") {
   clearSelection(message);
+  candidateViewList.forEach((view) => {
+    view.card.dataset.selected = "false";
+    view.card.dataset.selectable = "false";
+    if (view.control) {
+      view.control.checked = false;
+      view.control.disabled = true;
+    }
+  });
   candidateViews = new WeakMap();
+  candidateViewList.clear();
+  notifyConfirmation();
+}
+
+function setReadOnly(value) {
+  selectionReadOnly = value === true;
+  candidateViewList.forEach((view) => {
+    if (view.control) {
+      view.control.disabled = selectionReadOnly || view.unavailable;
+    }
+  });
 }
 
 function getSelectedCandidate() {
@@ -219,6 +253,7 @@ const referenceFrameSelection = Object.freeze({
   attachCandidate,
   getSelectedCandidate,
   reset: resetSelection,
+  setReadOnly,
 });
 
-window.vigiVisionReferenceFrameSelection = Object.freeze({ getSelectedCandidate });
+window.vigiVisionReferenceFrameSelection = Object.freeze({ getSelectedCandidate, reset: resetSelection, setReadOnly });
