@@ -2,10 +2,10 @@
 
 ## Status and purpose
 
-**Status: approved Phase 1 design direction; Phase 5-1/5-2 now implement the
-transient source-space ROI draw, move, resize, reset, keyboard, and Phase 6
-handoff slice only. Persistence, confirmation, cropped preview, and
-disappearance reasoning remain unimplemented.**
+**Status: approved Phase 1 design direction; Phase 5 implements the transient
+source-space ROI workflow and Phase 6-1 now approves the confirmation and
+durable persistence contract. The Phase 6 backend/web implementation, cropped
+preview, and disappearance reasoning remain unimplemented.**
 
 This document defines the first bounded use case for VIGI Vision's longer-term
 Event Discovery direction: a user investigates one selected object on one NVR
@@ -94,8 +94,8 @@ object-presence or disappearance classification.
 
 The repository does **not** currently provide:
 
-- a public reference-frame retrieval service for a selected channel and time;
-- an API for persistent ROI selection, crop previews, or confirmation. The
+- an implemented API for persistent ROI selection, crop previews, or
+  confirmation. The
   Phase 5-1/5-2 loopback shell now provides one transient rectangular ROI over
   a selected reference frame. It uses one Pointer Events path for mouse,
   touch, and pen, accepts one active pointer, scopes `touch-action: none` to
@@ -103,14 +103,14 @@ The repository does **not** currently provide:
   bounded movement, eight-handle resize, reset/recreate, keyboard edits, and
   an immutable Phase 6 handoff snapshot. It rejects rectangles below 4×4
   source pixels and clears state on candidate/result/image lifecycle changes.
-  Persistence and confirmation remain deferred.
-- storage and source-resolution mapping for original and normalized ROI
-  coordinates;
+  The [Phase 6-1 confirmation contract](investigation-confirmation.md) now fixes
+  the future API, immutable package, integer source-pixel ROI, provenance, and
+  Phase 7 loader boundary; implementation remains deferred.
+- implemented storage for the canonical source-pixel ROI;
 - regional presence classification, temporal comparison, or disappearance
   reasoning;
 - coarse-to-fine search, confirmed change intervals, or review clips;
-- a result schema/API for this use case;
-- FastAPI, a browser frontend, or a canvas interaction library.
+- a result schema/API for disappearance outcomes.
 
 ## Initial MVP scope
 
@@ -119,10 +119,11 @@ channel. The user supplies the channel, reference time, and search end time;
 the search proceeds only forward from the reference time. The ROI is a
 rectangle on the reference frame.
 
-The eventual ROI contract must retain original pixel coordinates and normalized
-coordinates, and show a cropped-object preview for user confirmation. The
-exact storage representation and API are unresolved until the reference-frame
-boundary is designed.
+The confirmation contract retains one canonical integer rectangle in original
+source pixels with exact source dimensions. Normalized coordinates are derived
+rather than persisted because a second rounded representation could disagree.
+The inline review shows the selected image and ROI; it need not persist a
+separate crop solely for confirmation.
 
 The MVP detects only whether the selected object is no longer present at its
 original location. It reports a bounded change interval rather than a falsely
@@ -271,8 +272,8 @@ claim is selected by this document.
    experimental success criteria.
 2. **Phase 2:** detailed reference-frame extraction service and minimal HTTP
    boundary.
-3. **Phase 3:** reference-frame display, manual ROI selection, normalized
-   coordinate mapping, crop preview, and confirmation.
+3. **Phase 3:** reference-frame display, manual ROI selection, source-pixel
+   coordinate mapping, review, and confirmation.
 4. **Phase 4:** presence-classification experiment using representative
    fixed-camera footage.
 5. **Phase 5:** coarse and refined temporal search with conservative state
@@ -282,7 +283,10 @@ claim is selected by this document.
    generic Event Discovery, and optional VLM interpretation.
 
 These phases describe intended dependency order, not a public delivery
-commitment.
+commitment. In the current repository delivery sequence, Phase 6-1 is the
+approved confirmation/persistence design, Phase 6-2 is backend publication,
+Phase 6-3 is the inline web flow, Phase 6-4 is real-NVR validation, and Phase 7
+consumes only the resulting confirmed typed input.
 
 ## Success criteria
 

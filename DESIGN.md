@@ -129,10 +129,12 @@ trustworthy incremental progress contract.
   pixel minimum. The overlay is recalculated from canonical source pixels after
   image load and responsive resize.
 - **Handoff:** `getPhase6Snapshot()` returns an immutable candidate-bound
-  source-space snapshot only while a valid ROI is selected; it is not stored or
-  sent to an API.
+  source-space snapshot only while a valid ROI is selected; it is not currently
+  stored or sent to an API. The approved, not-yet-implemented Phase 6 contract
+  validates and publishes that reviewed state as an immutable investigation
+  package; see [Investigation Confirmation and Durable Persistence](docs/design/investigation-confirmation.md).
 - **Persistence:** the one ROI remains transient frontend state. Persistence
-  and confirmation remain deferred to Phase 6.
+  and confirmation implementation remain deferred to Phase 6-2/6-3.
 
 #### Assisted-selection integration
 
@@ -177,9 +179,9 @@ or glass effects are used.
 - The form requires explicit application of a local whole-second datetime and
   selected source timezone; the applied summary makes the 24-hour value
   authoritative for the UI.
-- ROI keyboard movement/resizing and reset are implemented in Phase 5-2; full
-  confirmation, persistence, and object-comparison accessibility semantics
-  remain later-phase work.
+- ROI keyboard movement/resizing and reset are implemented in Phase 5-2; the
+  confirmation/persistence accessibility contract is approved in Phase 6-1 but
+  its UI and object-comparison semantics remain later-phase work.
 - Tap-assisted selection and the Phase 5-3C transient silhouette preview are
   implemented but remain acceptance-gated for physical desktop/mobile use; the
   disposable harness, production backend, canvas preview, and explicit
