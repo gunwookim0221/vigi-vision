@@ -26,8 +26,9 @@ async function activeRoiHarness(offset = 0) {
   return harness;
 }
 
-function pointerEvent(pointerId, pointerType, clientX, clientY, button = 0) {
+function pointerEvent(pointerId, pointerType, clientX, clientY, button = 0, isPrimary = true) {
   return {
+    isPrimary,
     pointerId,
     pointerType,
     button,

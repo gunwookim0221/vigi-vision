@@ -143,13 +143,29 @@ credential-free Markdown/session evidence; it does not add a suggestion API,
 model dependency, UI control, or persistence to the product. An initial real-CCTV
 run evaluated 16 of 55 discovered frames, with 15 useful successes and one
 partial dense-shoe-rack merge (93.75% success among evaluated frames); the
-harness remains evidence-volume limited at its 20-frame policy threshold. The
-reference-frame path now also
+harness remains evidence-volume limited at its 20-frame policy threshold. Phase
+5-3B-2 adds the optional production assisted-ROI backend: a strict
+resource-bound point suggestion route, lazy EfficientSAM-Ti lifecycle, verified
+operator checkpoint configuration, dedicated inference limiter, bounded
+timeouts, and safe unavailable/error categories. Phase 5-3B-3 now connects the
+explicit frontend Tap-to-suggest interaction to that endpoint, validates
+candidate-bound source-space responses, preserves the prior ROI while pending,
+and keeps manual correction authoritative. Phase 5-3C now returns a bounded
+exact source-row mask preview, paints the silhouette over the responsive image,
+de-emphasizes assisted resize handles, and clears mask state on reset, failure,
+or manual correction. The mask remains transient preview evidence and the
+rectangle remains the canonical ROI. Neither increment adds ROI persistence or
+Phase 6 behavior. The reference-frame path now
+also
 has a direct decoder for new resources. It retains structured clip-relative
 timing evidence, stops after a validated selected JPEG, and uses generation
 policy `gpv-2` without changing generic replay-clip behavior. Initial real-CCTV
-validation is favorable; production packaging and release validation for this
-path remain pending. Absolute source-time calibration,
+validation is favorable; operator smoke validation and physical desktop/mobile
+acceptance for assisted ROI remain pending. Phase 5-4A moves all general ROI
+status feedback into the single external live region below the image, keeps the
+image dedicated to source/mask/rectangle/tap evidence, adds explicit state
+semantics, and preserves reset/stale-response cleanup plus manual fallback;
+localization remains deferred to Phase 5-4C. Absolute source-time calibration,
 ROI persistence/confirmation, and object comparison remain deferred; Phase
 4C-2 provides transient frontend-only selection of one successful candidate,
 and Phase 5-1/5-2 provide the transient source-space editing surface without
@@ -170,10 +186,11 @@ capability.
    loopback review shell with explicit applied time, accessible generation
    feedback, ordered thumbnails, transient exactly-one selection, and one
    source-pixel ROI that can be moved, resized, reset, recreated, and edited
-   with keyboard input. Run the Phase 5-3B-1 camera-representative harness and
-   gate any optional EfficientSAM-Ti assisted mode on its quality and packaging
-   evidence while later phases add confirmation without changing recording or
-   artifact ownership.
+   with keyboard input. Preserve the Phase 5-3B-2 backend, the Phase 5-3B-3
+   assisted-ROI request path, the Phase 5-3C silhouette preview, and the Phase
+   5-4A external status boundary, then run operator smoke and physical
+   desktop/mobile acceptance before Phase 6; later phases add confirmation
+   without changing recording or artifact ownership.
 
 ## High-level roadmap
 

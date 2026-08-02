@@ -72,7 +72,11 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["ARG", "D", "PLR2004", "S101", "SLF001"]
+"tests/**/*.py" = ["ARG", "D", "PLR2004", "S101", "SLF001", "TC001", "TC003"]
+"src/vigi_vision/assisted_roi_*.py" = ["D"]
+"src/vigi_vision/assisted_roi_predictor.py" = ["D", "TC003"]
+"src/vigi_vision/assisted_roi_service.py" = ["D", "PLC0415", "TC003"]
+"src/vigi_vision/config.py" = ["D101", "D103"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

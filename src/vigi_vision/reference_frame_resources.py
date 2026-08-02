@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import ClassVar, Final, Literal, final
+from typing import BinaryIO, ClassVar, Final, Literal, final
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -26,7 +26,12 @@ from vigi_vision.reference_frame_models import (
 _FRAME_FILENAME: Final = "frame.jpg"
 _MANIFEST_FILENAME: Final = "manifest.json"
 _MIN_JPEG_SIZE: Final = 4
+_JPEG_LENGTH_BYTES: Final = 2
+_JPEG_SOF_PAYLOAD_BYTES: Final = 5
 _RESOURCE_ID_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,191}$")
+_JPEG_SOF_MARKERS: Final = frozenset(
+    {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
+)
 
 
 class _ManifestDocument(BaseModel):
@@ -64,6 +69,8 @@ class ReferenceFrameImageResource:
 
     resource_id: str
     jpeg_path: Path = field(repr=False)
+    width: int | None = None
+    height: int | None = None
 
 
 @final
@@ -100,11 +107,19 @@ class ReferenceFrameResourceStore:
             document = _read_manifest(manifest_path)
             image_path = _direct_child(path, _FRAME_FILENAME)
             _validate_jpeg(image_path)
+            dimensions = _jpeg_dimensions(image_path)
+            if dimensions is not None and dimensions != (document.width, document.height):
+                raise ReferenceFrameResourceCorruptError
         except OSError:
             raise ReferenceFrameResourceCorruptError from None
         if document.resource_id != resource_id:
             raise ReferenceFrameResourceCorruptError
-        return document, ReferenceFrameImageResource(resource_id, image_path)
+        return document, ReferenceFrameImageResource(
+            resource_id,
+            image_path,
+            document.width,
+            document.height,
+        )
 
     def _resource_path(self, resource_id: str) -> Path:
         if _RESOURCE_ID_PATTERN.fullmatch(resource_id) is None:
@@ -160,6 +175,59 @@ def _validate_jpeg(path: Path) -> None:
                 raise ReferenceFrameResourceCorruptError
     except OSError:
         raise ReferenceFrameResourceCorruptError from None
+
+
+def _jpeg_dimensions(path: Path) -> tuple[int, int] | None:
+    try:
+        with path.open("rb") as image:
+            _ = image.read(2)
+            while True:
+                marker = _next_jpeg_marker(image)
+                if marker is None:
+                    return None
+                if marker in (b"\xd8", b"\xd9"):
+                    continue
+                length = _jpeg_segment_length(image)
+                if length is None:
+                    return None
+                dimensions = _sof_dimensions(marker, image, length)
+                if dimensions is not None:
+                    return dimensions
+                _ = image.seek(length - _JPEG_LENGTH_BYTES, 1)
+    except OSError:
+        raise ReferenceFrameResourceCorruptError from None
+
+
+def _next_jpeg_marker(image: BinaryIO) -> bytes | None:
+    while True:
+        marker_prefix = image.read(1)
+        if marker_prefix == b"":
+            return None
+        if marker_prefix != b"\xff":
+            continue
+        marker = image.read(1)
+        while marker == b"\xff":
+            marker = image.read(1)
+        return marker or None
+
+
+def _jpeg_segment_length(image: BinaryIO) -> int | None:
+    length_bytes = image.read(_JPEG_LENGTH_BYTES)
+    if len(length_bytes) != _JPEG_LENGTH_BYTES:
+        return None
+    length = int.from_bytes(length_bytes, "big")
+    return length if length >= _JPEG_LENGTH_BYTES else None
+
+
+def _sof_dimensions(image_marker: bytes, image: BinaryIO, length: int) -> tuple[int, int] | None:
+    if image_marker[0] not in _JPEG_SOF_MARKERS:
+        return None
+    payload = image.read(length - _JPEG_LENGTH_BYTES)
+    if len(payload) < _JPEG_SOF_PAYLOAD_BYTES:
+        return None
+    height = int.from_bytes(payload[1:3], "big")
+    width = int.from_bytes(payload[3:5], "big")
+    return (width, height) if width > 0 and height > 0 else None
 
 
 def _result_from_document(

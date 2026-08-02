@@ -12,7 +12,26 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHttpException
 from typing_extensions import override
 
-from vigi_vision.config import CaptureSettings, NvrConnection, load_capture_settings
+from vigi_vision.assisted_roi_api_models import (
+    RoiSuggestionBody,
+    RoiSuggestionResponse,
+    roi_suggestion_response,
+)
+from vigi_vision.assisted_roi_composition import build_assisted_roi_service
+from vigi_vision.assisted_roi_geometry import Point
+from vigi_vision.assisted_roi_service import (
+    AssistedRoiSuggestionService,
+    RoiSuggestionExecutionBoundary,
+    RoiSuggestionUnavailableError,
+)
+from vigi_vision.channel_selection import select_channel, usable_channels
+from vigi_vision.config import (
+    AssistedRoiSettings,
+    CaptureSettings,
+    NvrConnection,
+    load_assisted_roi_settings,
+    load_capture_settings,
+)
 from vigi_vision.ffmpeg import resolve_ffmpeg
 from vigi_vision.nvr import SdkNvrGateway
 from vigi_vision.recording import RecordingPlanner
@@ -21,6 +40,8 @@ from vigi_vision.reference_frame_api_errors import (
     safe_error_response,
 )
 from vigi_vision.reference_frame_api_models import (
+    ReferenceFrameChannelListResponse,
+    ReferenceFrameChannelResponse,
     ReferenceFrameCreateBody,
     ReferenceFrameCreateResponse,
     ReferenceFrameErrorResponse,
@@ -46,6 +67,7 @@ from vigi_vision.reference_frame_resources import (
     ReferenceFrameResourceStore,
 )
 from vigi_vision.reference_frame_service import (
+    ChannelInventoryBoundary,
     ReferenceFrameExecutionBoundary,
     ReferenceFrameService,
 )
@@ -80,6 +102,8 @@ class ReferenceFrameApiDependencies:
     service: ReferenceFrameExecutionBoundary = field(repr=False)
     resources: ReferenceFrameImageBoundary = field(repr=False)
     limiter: anyio.CapacityLimiter = field(repr=False)
+    suggestion_service: RoiSuggestionExecutionBoundary | None = field(default=None, repr=False)
+    channel_inventory: ChannelInventoryBoundary | None = field(default=None, repr=False)
 
 
 @final
@@ -101,12 +125,16 @@ def create_reference_frame_app(
     service: ReferenceFrameExecutionBoundary,
     resources: ReferenceFrameImageBoundary,
     limiter: anyio.CapacityLimiter | None = None,
+    suggestion_service: RoiSuggestionExecutionBoundary | None = None,
+    channel_inventory: ChannelInventoryBoundary | None = None,
 ) -> FastAPI:
     """Create an injectable local API application without reading configuration in handlers."""
     dependencies = ReferenceFrameApiDependencies(
         service=service,
         resources=resources,
         limiter=anyio.CapacityLimiter(1) if limiter is None else limiter,
+        suggestion_service=suggestion_service,
+        channel_inventory=channel_inventory,
     )
     app = FastAPI(
         title="VIGI Vision Reference Frame API",
@@ -194,8 +222,99 @@ def create_reference_frame_app(
         summary="Retrieve a durable reference-frame JPEG",
     )
     app.include_router(router)
+    _add_channel_route(app, dependencies)
     _add_candidate_route(app, dependencies)
+    _add_roi_suggestion_route(app, dependencies)
+    if isinstance(suggestion_service, AssistedRoiSuggestionService):
+        app.router.add_event_handler("shutdown", suggestion_service.close)
     return app
+
+
+def _add_channel_route(app: FastAPI, dependencies: ReferenceFrameApiDependencies) -> None:
+    router = APIRouter(prefix="/api/v1/reference-frames", tags=["reference-frames"])
+
+    async def get_channels() -> ReferenceFrameChannelListResponse | JSONResponse:
+        inventory = dependencies.channel_inventory
+        if inventory is None:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "error": {
+                        "code": "channel_discovery_unavailable",
+                        "message": "Channel discovery is unavailable.",
+                        "details": None,
+                    }
+                },
+            )
+        try:
+            channels = usable_channels(
+                await run_sync(inventory.channels, limiter=dependencies.limiter)
+            )
+            default_channel = select_channel(channels, None) if channels else None
+        except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK - HTTP redaction boundary.
+            return domain_error(error).response()
+        return ReferenceFrameChannelListResponse(
+            channels=tuple(
+                ReferenceFrameChannelResponse(
+                    channel_id=channel.channel_id,
+                    name=channel.name,
+                    alias=channel.alias,
+                    online=True,
+                )
+                for channel in channels
+            ),
+            default_channel_id=None if default_channel is None else default_channel.channel_id,
+        )
+
+    router.add_api_route(
+        "/channels",
+        get_channels,
+        methods=["GET"],
+        response_model=ReferenceFrameChannelListResponse,
+        status_code=status.HTTP_200_OK,
+        responses={
+            status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ReferenceFrameErrorResponse},
+            status.HTTP_500_INTERNAL_SERVER_ERROR: {"model": ReferenceFrameErrorResponse},
+        },
+        summary="List usable NVR channels",
+    )
+    app.include_router(router)
+
+
+def _add_roi_suggestion_route(app: FastAPI, dependencies: ReferenceFrameApiDependencies) -> None:
+    router = APIRouter(prefix="/api/v1/reference-frames", tags=["reference-frames"])
+
+    async def create_roi_suggestion(
+        resource_id: str, body: RoiSuggestionBody
+    ) -> RoiSuggestionResponse | JSONResponse:
+        suggestion_service = dependencies.suggestion_service
+        if suggestion_service is None:
+            return domain_error(RoiSuggestionUnavailableError()).response()
+        try:
+            result = await suggestion_service.suggest(
+                resource_id,
+                Point(body.point.x, body.point.y),
+            )
+        except Exception as error:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK - HTTP redaction boundary.
+            return domain_error(error).response()
+        return roi_suggestion_response(result)
+
+    router.add_api_route(
+        "/{resource_id}/roi-suggestions",
+        create_roi_suggestion,
+        methods=["POST"],
+        response_model=RoiSuggestionResponse,
+        status_code=status.HTTP_200_OK,
+        responses={
+            status.HTTP_404_NOT_FOUND: {"model": ReferenceFrameErrorResponse},
+            status.HTTP_422_UNPROCESSABLE_CONTENT: {"model": ReferenceFrameErrorResponse},
+            status.HTTP_500_INTERNAL_SERVER_ERROR: {"model": ReferenceFrameErrorResponse},
+            status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ReferenceFrameErrorResponse},
+            status.HTTP_504_GATEWAY_TIMEOUT: {"model": ReferenceFrameErrorResponse},
+        },
+        summary="Suggest a bounded source-pixel ROI from one point",
+    )
+    app.include_router(router)
 
 
 def _add_candidate_route(app: FastAPI, dependencies: ReferenceFrameApiDependencies) -> None:
@@ -243,6 +362,10 @@ def create_reference_frame_app_from_environment() -> FastAPI:
     """Compose the local NVR-only application once at ASGI startup."""
     try:
         settings = load_capture_settings(Path.cwd() / ".env")
+        try:
+            assisted_settings = load_assisted_roi_settings(Path.cwd() / ".env")
+        except ValueError:
+            assisted_settings = AssistedRoiSettings()
         connection = _nvr_connection(settings)
         ffmpeg = resolve_ffmpeg(settings.ffmpeg_path)
         _ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -252,6 +375,7 @@ def create_reference_frame_app_from_environment() -> FastAPI:
         ffprobe = resolve_ffprobe(ffmpeg)
         artifacts = ReferenceFrameArtifactStore(_ARTIFACT_ROOT)
         resources = ReferenceFrameResourceStore(_ARTIFACT_ROOT)
+        channel_inventory = SdkNvrGateway(connection)
         service = ReferenceFrameService(
             planner=planner,
             replay_extractor=ReplayExtractor(
@@ -269,10 +393,16 @@ def create_reference_frame_app_from_environment() -> FastAPI:
                 username=connection.username.get_secret_value(),
                 password=connection.password,
             ),
-            channel_inventory=SdkNvrGateway(connection),
+            channel_inventory=channel_inventory,
             completed_resources=resources,
         )
-        return create_reference_frame_app(service, resources)
+        suggestion_service = build_assisted_roi_service(assisted_settings, resources)
+        return create_reference_frame_app(
+            service,
+            resources,
+            suggestion_service=suggestion_service,
+            channel_inventory=channel_inventory,
+        )
     except ReferenceFrameApiStartupError:
         raise
     except Exception:  # noqa: BLE001  # noqa: BROAD_EXCEPT_OK - safe startup redaction boundary.

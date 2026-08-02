@@ -6,60 +6,44 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Sequence
 
+from vigi_vision.assisted_roi_geometry import (
+    BoundingBox,
+    ImageSize,
+    Mask,
+    MaskCandidate,
+    MaskRejection,
+    MaskRejectionReason,
+    Point,
+    ValidatedMaskCandidate,
+    binarize_logits,
+    mask_matches_size,
+    mask_to_bounding_box,
+    select_valid_mask_candidate,
+    sort_prediction_candidates,
+)
+
 Classification = Literal["success", "partial", "failure", "skip"]
-Mask = tuple[tuple[bool, ...], ...]
-MaskRejectionReason = Literal[
-    "empty-mask",
-    "background-dominant",
-    "point-not-in-mask",
-    "invalid-mask-shape",
-]
+PredictionCandidate = MaskCandidate
 
-
-@dataclass(frozen=True, slots=True)
-class ImageSize:
-    width: int
-    height: int
-
-
-@dataclass(frozen=True, slots=True)
-class Point:
-    x: int
-    y: int
-
-
-@dataclass(frozen=True, slots=True)
-class BoundingBox:
-    x: int
-    y: int
-    width: int
-    height: int
-
-
-@dataclass(frozen=True, slots=True)
-class PredictionCandidate:
-    mask: Mask
-    score: float
-
-
-@dataclass(frozen=True, slots=True)
-class ValidatedMaskCandidate:
-    mask: Mask
-    score: float
-    candidate_index: int
-    bbox: BoundingBox
-    mask_pixel_count: int
-    coverage_percent: float
-
-
-@dataclass(frozen=True, slots=True)
-class MaskRejection:
-    reason: MaskRejectionReason
-    score: float
-    candidate_index: int
-    mask_pixel_count: int
-    coverage_percent: float
-    bbox: BoundingBox | None
+__all__ = (
+    "BoundingBox",
+    "FrameOrder",
+    "FrameRecord",
+    "ImageSize",
+    "MaskRejection",
+    "Point",
+    "PredictionCandidate",
+    "ValidatedMaskCandidate",
+    "binarize_logits",
+    "discover_frames",
+    "expand_minimum_box",
+    "mask_matches_size",
+    "mask_to_bounding_box",
+    "order_frames",
+    "select_mask_candidate",
+    "select_valid_mask_candidate",
+    "sort_prediction_candidates",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,117 +152,6 @@ def select_mask_candidate(
     if not eligible:
         return None
     return max(eligible, key=lambda item: (item[0], item[1]))[2]
-
-
-def binarize_logits(logits: Sequence[Sequence[float]]) -> Mask:
-    return tuple(tuple(value >= 0.0 for value in row) for row in logits)
-
-
-def sort_prediction_candidates(
-    candidates: Sequence[PredictionCandidate],
-) -> tuple[tuple[int, PredictionCandidate], ...]:
-    return tuple(
-        sorted(
-            enumerate(candidates),
-            key=lambda pair: (-pair[1].score, pair[0]),
-        )
-    )
-
-
-def select_valid_mask_candidate(
-    candidates: Sequence[PredictionCandidate],
-    point: Point,
-    size: ImageSize,
-    max_coverage_percent: float = 95.0,
-) -> ValidatedMaskCandidate | MaskRejection:
-    rejections: list[MaskRejection] = []
-    total_pixels = size.width * size.height
-    for candidate_index, candidate in sort_prediction_candidates(candidates):
-        if not mask_matches_size(candidate.mask, size):
-            rejections.append(
-                MaskRejection(
-                    reason="invalid-mask-shape",
-                    score=candidate.score,
-                    candidate_index=candidate_index,
-                    mask_pixel_count=0,
-                    coverage_percent=0.0,
-                    bbox=None,
-                )
-            )
-            continue
-        pixel_count = sum(sum(row) for row in candidate.mask)
-        coverage_percent = 0.0 if total_pixels == 0 else pixel_count / total_pixels * 100.0
-        box = mask_to_bounding_box(candidate.mask, size)
-        if pixel_count == 0:
-            reason: MaskRejectionReason = "empty-mask"
-        elif coverage_percent >= max_coverage_percent:
-            reason = "background-dominant"
-        elif not _contains_point(candidate.mask, point):
-            reason = "point-not-in-mask"
-        else:
-            if box is None:
-                reason = "empty-mask"
-            else:
-                return ValidatedMaskCandidate(
-                    mask=candidate.mask,
-                    score=candidate.score,
-                    candidate_index=candidate_index,
-                    bbox=box,
-                    mask_pixel_count=pixel_count,
-                    coverage_percent=coverage_percent,
-                )
-        rejections.append(
-            MaskRejection(
-                reason=reason,
-                score=candidate.score,
-                candidate_index=candidate_index,
-                mask_pixel_count=pixel_count,
-                coverage_percent=coverage_percent,
-                bbox=box if reason != "background-dominant" else None,
-            )
-        )
-    if rejections:
-        priority = {
-            "background-dominant": 0,
-            "point-not-in-mask": 1,
-            "empty-mask": 2,
-            "invalid-mask-shape": 3,
-        }
-        return min(
-            rejections,
-            key=lambda rejection: (priority[rejection.reason], rejection.candidate_index),
-        )
-    return MaskRejection(
-        reason="invalid-mask-shape",
-        score=0.0,
-        candidate_index=-1,
-        mask_pixel_count=0,
-        coverage_percent=0.0,
-        bbox=None,
-    )
-
-
-def mask_to_bounding_box(mask: Mask, size: ImageSize) -> BoundingBox | None:
-    points = (
-        (x, y)
-        for y, row in enumerate(mask)
-        for x, value in enumerate(row)
-        if value and x < size.width and y < size.height
-    )
-    coordinates = list(points)
-    if not coordinates:
-        return None
-    xs, ys = zip(*coordinates)
-    return BoundingBox(
-        x=min(xs),
-        y=min(ys),
-        width=max(xs) - min(xs) + 1,
-        height=max(ys) - min(ys) + 1,
-    )
-
-
-def mask_matches_size(mask: Mask, size: ImageSize) -> bool:
-    return len(mask) == size.height and all(len(row) == size.width for row in mask)
 
 
 def expand_minimum_box(box: BoundingBox, size: ImageSize, minimum: int = 4) -> BoundingBox:

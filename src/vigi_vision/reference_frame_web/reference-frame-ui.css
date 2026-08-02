@@ -10,6 +10,8 @@
   --status-success: #176b45;
   --status-warning: #9a5d00;
   --status-error: #a92d3b;
+  --roi-mask-fill: rgb(49 91 182 / 38%);
+  --roi-mask-outline: #f0bc68;
   --space-1: 0.25rem;
   --space-2: 0.5rem;
   --space-3: 0.75rem;
@@ -35,6 +37,8 @@
     --status-success: #72d1a6;
     --status-warning: #f0bc68;
     --status-error: #ff9fab;
+    --roi-mask-fill: rgb(141 169 255 / 42%);
+    --roi-mask-outline: #f0bc68;
   }
 }
 

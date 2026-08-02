@@ -48,19 +48,34 @@ class ChannelSelectionError(ValueError):
 
 
 def select_channel(channels: tuple[Channel, ...], configured_channel_id: int | None) -> Channel:
-    """Return the configured or sole online channel without arbitrary selection."""
+    """Return the configured channel or a deterministic usable default."""
     if configured_channel_id is not None:
         for channel in channels:
-            if channel.channel_id == configured_channel_id and channel.online:
+            if (
+                channel.channel_id == configured_channel_id
+                and channel.channel_id > 0
+                and channel.online
+            ):
                 return channel
         raise ChannelSelectionError(ChannelSelectionReason.CONFIGURED, channels)
 
-    online_channels = tuple(channel for channel in channels if channel.online)
+    online_channels = usable_channels(channels)
     if not online_channels:
         raise ChannelSelectionError(ChannelSelectionReason.NONE, channels)
-    if len(online_channels) == 1:
-        return online_channels[0]
-    raise ChannelSelectionError(ChannelSelectionReason.AMBIGUOUS, channels)
+    preferred = next(
+        (channel for channel in online_channels if channel.channel_id == 1),
+        None,
+    )
+    return (
+        preferred
+        if preferred is not None
+        else min(online_channels, key=lambda channel: channel.channel_id)
+    )
+
+
+def usable_channels(channels: tuple[Channel, ...]) -> tuple[Channel, ...]:
+    """Return only positively identified online channels in source order."""
+    return tuple(channel for channel in channels if channel.channel_id > 0 and channel.online)
 
 
 def format_channels(channels: tuple[Channel, ...]) -> str:

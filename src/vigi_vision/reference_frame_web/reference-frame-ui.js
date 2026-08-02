@@ -1,5 +1,6 @@
 const candidateForm = document.querySelector("#candidate-form");
 const channelIdInput = document.querySelector("#channel-id");
+const channelStatus = document.querySelector("#channel-status");
 const referenceTimeInput = document.querySelector("#reference-time");
 const generateButton = document.querySelector("#generate-button");
 const requestStatus = document.querySelector("#request-status");
@@ -8,11 +9,130 @@ const candidateResults = document.querySelector("#candidate-results");
 const generationProgress = document.querySelector("#generation-progress");
 const generationSpinner = document.querySelector("#generation-spinner");
 let requestSequence = 0;
+let channelRequestSequence = 0;
+let channelSelectionExplicit = false;
 
 const SOURCE_TIMESTAMP_WARNING =
   "Source timestamp mapping is unavailable pending real-NVR replay validation.";
 const USER_SOURCE_TIMESTAMP_LIMITATION =
   "Exact source timestamp is not yet verified. The displayed time is the requested position.";
+const CHANNEL_DISCOVERY_FAILURE = "Channel list could not be loaded. Try again later.";
+
+function isUsableChannel(channel) {
+  return channel
+    && typeof channel === "object"
+    && Number.isInteger(channel.channel_id)
+    && channel.channel_id > 0
+    && channel.online === true;
+}
+
+function normalizeChannelList(payload) {
+  if (!payload || typeof payload !== "object" || !Array.isArray(payload.channels)) {
+    return null;
+  }
+  const seen = new Set();
+  return payload.channels.filter((channel) => {
+    if (!isUsableChannel(channel) || seen.has(channel.channel_id)) {
+      return false;
+    }
+    seen.add(channel.channel_id);
+    return true;
+  });
+}
+
+function defaultChannelId(channels, payload) {
+  const responseDefault = Number(payload.default_channel_id);
+  if (Number.isInteger(responseDefault) && channels.some((channel) => channel.channel_id === responseDefault)) {
+    return responseDefault;
+  }
+  const preferred = channels.find((channel) => channel.channel_id === 1);
+  if (preferred) {
+    return preferred.channel_id;
+  }
+  return channels.reduce((smallest, channel) =>
+    smallest === null || channel.channel_id < smallest ? channel.channel_id : smallest, null);
+}
+
+function decodeChannelMetadata(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  const normalized = value.trim();
+  if (normalized.length === 0) {
+    return "";
+  }
+  try {
+    return decodeURIComponent(normalized).trim();
+  } catch {
+    return normalized;
+  }
+}
+
+function channelLabel(channel) {
+  const metadata = [channel.name, channel.alias]
+    .map(decodeChannelMetadata)
+    .filter((value, index, values) => value.length > 0 && values.indexOf(value) === index);
+  return [`채널 ${channel.channel_id}`, ...metadata].join(" - ");
+}
+
+function replaceChannelOptions(channels, selectedId) {
+  channelIdInput.replaceChildren();
+  channels.forEach((channel) => {
+    const option = document.createElement("option");
+    option.value = String(channel.channel_id);
+    option.textContent = channelLabel(channel);
+    channelIdInput.append(option);
+  });
+  channelIdInput.value = selectedId === null ? "" : String(selectedId);
+  channelIdInput.disabled = channels.length === 0;
+  referenceFrameForm.refresh();
+}
+
+async function loadChannels() {
+  const sequence = ++channelRequestSequence;
+  const currentValue = channelIdInput.value;
+  const hadKnownOptions = Array.from(channelIdInput.children).some((option) =>
+    /^\d+$/.test(option.value) && Number(option.value) > 0);
+  channelStatus.textContent = "Loading channels…";
+  if (!hadKnownOptions) {
+    channelIdInput.disabled = true;
+  }
+  try {
+    const response = await fetch("/api/v1/reference-frames/channels");
+    if (!response.ok) {
+      throw new Error("channel discovery failed");
+    }
+    const payload = await response.json();
+    const channels = normalizeChannelList(payload);
+    if (channels === null) {
+      throw new Error("channel discovery response was invalid");
+    }
+    if (sequence !== channelRequestSequence) {
+      return;
+    }
+    const latestValue = channelIdInput.value;
+    const currentId = Number(latestValue);
+    const retained = Number.isInteger(currentId)
+      && channels.some((channel) => channel.channel_id === currentId);
+    const selectedId = retained ? currentId : defaultChannelId(channels, payload);
+    channelSelectionExplicit = retained && channelSelectionExplicit;
+    replaceChannelOptions(channels, selectedId);
+    channelStatus.textContent = channels.length > 0
+      ? `${channels.length} online channel${channels.length === 1 ? "" : "s"} available.`
+      : "No online channels are available.";
+  } catch {
+    if (sequence !== channelRequestSequence) {
+      return;
+    }
+    if (!hadKnownOptions) {
+      replaceChannelOptions([], null);
+    } else {
+      channelIdInput.disabled = channelIdInput.value.length === 0;
+      referenceFrameForm.refresh();
+    }
+    channelStatus.textContent = CHANNEL_DISCOVERY_FAILURE;
+  }
+}
 
 function setRequestState(state, message) {
   requestStatus.dataset.state = state;
@@ -248,3 +368,9 @@ async function submitCandidateRequest(event) {
 }
 
 candidateForm.addEventListener("submit", submitCandidateRequest);
+channelIdInput.addEventListener("change", () => {
+  channelSelectionExplicit = /^\d+$/.test(channelIdInput.value)
+    && Number(channelIdInput.value) > 0;
+});
+window.vigiVisionReferenceFrameChannels = Object.freeze({ refresh: loadChannels });
+void loadChannels();

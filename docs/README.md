@@ -37,8 +37,9 @@ documentation route is added, removed, or relocated.
   for the implemented Phase 4A bounded candidate-set contract that reuses those
   single-frame resources without making absolute timing claims. Read
   [design/assisted-roi-selection.md](design/assisted-roi-selection.md) for the
-  completed Phase 5-3A tap-assisted ROI feasibility decision, proposed optional
-  API/model lifecycle, and Phase 5-3B acceptance boundary.
+  completed Phase 5-3A tap-assisted ROI feasibility decision, implemented
+  Phase 5-3B-2 optional backend API/model lifecycle, and remaining frontend
+  acceptance boundary.
 - **Integrations — `integrations/`:** contracts and operating notes for external
   systems. Use `integrations/sdk-change-requests/` only for specific,
   evidence-backed changes requested of the separate VIGI SDK.

@@ -2,13 +2,14 @@
 
 ## Status and decision
 
-**Status: Phase 5-3A design and feasibility spike plus Phase 5-3B-1 disposable
-validation harness complete. The operator has run EfficientSAM-Ti against real
-CCTV reference frames with favorable initial results; no production API,
-frontend control, model dependency, or persistence is implemented.**
+**Status: Phase 5-3A design, Phase 5-3B-1 disposable validation harness,
+Phase 5-3B-2 production assisted-ROI backend, Phase 5-3B-3 frontend
+integration, and Phase 5-3C silhouette preview complete. ROI persistence and
+Phase 6 behavior remain intentionally unimplemented.**
 
-Recommendation: **Proceed to production assisted-ROI packaging and integration
-review, retaining the disposable harness as the acceptance tool.**
+Recommendation: **Proceed to manual desktop/mobile acceptance and a controlled
+loopback backend smoke check before Phase 6, retaining the disposable harness as
+the acceptance tool.**
 EfficientSAM-Ti produced useful initial shoe selections on the deployed CCTV
 inputs, but dense adjacent shoes can merge into one suggested ROI. Keep the
 existing manual ROI editor as the authoritative correction and recovery path.
@@ -43,7 +44,7 @@ representation.
 | Candidate identity | A successful candidate’s opaque `reference_frame.resource_id`. | Send only that resource ID as the route parameter; never send an image path or URL. |
 | Image identity | `ReferenceFrameResourceStore.resolve_image()` resolves the fixed JPEG from a completed server-controlled resource. | Run inference only on that resolved JPEG and reject manifest/generation versions unsupported by the suggestion adapter. |
 | Source dimensions | Loaded image `naturalWidth` and `naturalHeight`; the API also supplies positive dimensions. | Require the stored image and response dimensions to agree with the currently selected image. |
-| ROI shape | `{source_width, source_height, x, y, width, height}` with integer source pixels. | Convert the chosen mask to this exact rectangle before committing it. Do not retain a mask as frontend state. |
+| ROI shape | `{source_width, source_height, x, y, width, height}` with integer source pixels. | Convert the chosen mask to this exact rectangle before committing it; retain only the bounded transient preview for visual review. |
 | Bounds | Edges may reach `source_width` or `source_height`; width and height are at least 4. | Require `x >= 0`, `y >= 0`, `x + width <= source_width`, `y + height <= source_height`, and the existing 4×4 minimum. |
 | Transient state | Draft edits are separate from the one committed ROI. | Preserve the committed ROI while a suggestion is pending; replace it only after a complete valid response. |
 | Candidate lifecycle | Candidate/result/image replacement clears the ROI and active pointer state. | It also aborts the browser request, invalidates its sequence, and clears the tap marker. |
@@ -145,7 +146,7 @@ When the optional capability is unavailable, the UI must say that automatic
 suggestion is unavailable and leave the complete manual editor enabled. It must
 not silently create a fixed-size box and present it as model output.
 
-## Proposed HTTP boundary
+## Implemented HTTP boundary
 
 Add one sibling resource operation; do not modify either existing
 reference-frame response schema.
@@ -172,14 +173,17 @@ Response:
   "resource_id": "opaque-existing-resource-id",
   "source_width": 2560,
   "source_height": 1440,
-  "roi": {
+  "bbox": {
     "x": 1100,
     "y": 640,
     "width": 310,
     "height": 190
   },
-  "method": "efficient_sam_ti_point_prompt_v1",
-  "status": "suggested"
+  "mask_preview": {
+    "width": 2560,
+    "height": 1440,
+    "rows": [[], "... bounded source-row runs ..."]
+  }
 }
 ```
 
@@ -193,37 +197,47 @@ Boundary rules:
   replay URL, or remote URL.
 - Read the fixed completed JPEG and its intrinsic dimensions server-side.
 - Require the model output to be a finite two-dimensional mask with exactly
-  the source image dimensions. This is the “oversized mask” safety check; do
-  not reject a legitimately large object using an arbitrary area threshold.
+  the source image dimensions. This is the “oversized mask” safety check. The
+  existing `95%` coverage guard rejects pathological background-dominant
+  candidates; it is a bounded safety rule, not a general object-size heuristic.
 - From model candidates, choose the highest-score non-empty mask that contains
   the positive prompt; retain upstream order as the deterministic tie-breaker.
-- Convert true mask pixels to the minimal inclusive integer rectangle. Expand
-  a one-to-three-pixel dimension deterministically within image bounds to meet
-  the existing 4×4 minimum; otherwise return `no_suggestion`.
-- Validate the final rectangle against the canonical ROI bounds before
-  serialization. Return one rectangle and discard the mask.
+- Convert true mask pixels to the minimal source-space integer rectangle and
+  validate it against source bounds before serialization. Return the rectangle
+  plus a bounded exact row-run mask preview; do not write the mask to disk.
+- Reject a preview with more than `50,000` source-row runs or with runs whose
+  derived bounds do not exactly match the rectangle.
 - Do not update the reference-frame manifest, JPEG, candidate set, or any Phase
   6 state.
 
-Suggested fixed public errors are `invalid_point` (422), existing
-`resource_not_found`/`resource_corrupt` categories, `no_suggestion` (422),
-`suggestion_unavailable` (503), `suggestion_timeout` (504), and the existing
-safe internal fallback. Responses must never contain checkpoint paths, artifact
-paths, exception text, commands, URLs, credentials, stderr, or model internals.
+The implemented route is `POST /api/v1/reference-frames/{resource_id}/roi-suggestions`.
+Its strict body is `{ "point": { "x": integer, "y": integer } }`; dimensions
+come only from the completed server resource. The response contains only
+`resource_id`, source dimensions, the bounded `bbox`, and an exact transient
+`mask_preview` whose `rows[y]` entries are non-overlapping `[start, end)` source
+pixel runs.
+
+Fixed public errors are `invalid_point` (422), existing
+`resource_not_found`/`resource_corrupt` categories, `no_valid_suggestion` (422),
+`suggestion_unavailable` (503), `suggestion_timeout` (504),
+`suggestion_failure` (500), and the existing safe internal fallback. Responses
+never contain checkpoint paths, artifact paths, exception text, commands, URLs,
+credentials, stderr, scores, filesystem paths, or model internals. The mask
+preview is returned only to the requesting local browser and is not persisted.
 
 ## Server composition and model lifecycle
 
-- Define one narrow synchronous suggestion protocol and inject it into the app
-  factory. `None` means the optional capability is unavailable; reference-frame
-  generation, candidate selection, image serving, and manual ROI remain active.
+- Define one narrow predictor protocol and inject the suggestion service into
+  the existing app factory. `None` means the optional capability is unavailable;
+  reference-frame generation, candidate selection, image serving, and manual
+  ROI remain active.
 - Keep the route present and return fixed `suggestion_unavailable` when the
-  provider is absent. After that response, disable the suggestion button for
-  the current page while leaving manual editing enabled; do not add a separate
-  capability endpoint for this first slice.
+  provider is absent. No capability endpoint or frontend control is added in
+  this phase.
 - Resolve the artifact before invoking the model. The model service owns no NVR,
   recording, replay, decoder, artifact publication, or manifest behavior.
-- Load the model lazily on the first suggestion so a missing optional runtime
-  cannot prevent API startup. Reuse one loaded model for later requests.
+- Load the model lazily on the first valid suggestion so a missing optional
+  runtime cannot prevent API startup. Reuse one loaded model for later requests.
 - Protect first load with the same inference serialization primitive and run
   synchronous work off the event loop. Use a dedicated
   `anyio.CapacityLimiter(1)` for inference rather than borrowing the existing
@@ -238,27 +252,45 @@ paths, exception text, commands, URLs, credentials, stderr, or model internals.
 - Provision the checkpoint out of band, verify its exact SHA-256 before use,
   and keep it outside Git and artifact roots. Never download it during app
   startup or an HTTP request.
-- On application shutdown, drop predictor/model references; release any
-  device-specific cache through the adapter. No background worker, queue, or
-  persistence layer is needed.
+- On application shutdown, drop predictor/model references. No background
+  worker, queue, or persistence layer is needed.
+
+Operator configuration is process-local and never client-controlled:
+
+```text
+VIGI_ASSISTED_ROI_ENABLED=true
+VIGI_ASSISTED_ROI_CHECKPOINT=C:\models\efficient_sam_vitt.pt
+VIGI_ASSISTED_ROI_CHECKPOINT_SHA256=dff858b19600a46461cbb7de98f796b23a7a888d9f5e34c0b033f7d6eb9e4e6a
+VIGI_ASSISTED_ROI_DEVICE=cpu
+VIGI_ASSISTED_ROI_TIMEOUT_SECONDS=30
+```
+
+The checkpoint must be provisioned outside Git and the reference-frame artifact
+root. The exact hash is checked immediately before model construction. Missing
+or invalid optional configuration leaves the route safely unavailable rather
+than preventing the reference-frame API from starting. EfficientSAM, PyTorch,
+torchvision, Pillow, and NumPy are lazy optional imports; they are not core
+dependencies and no download occurs.
 
 ## Frontend state and accessibility
 
 The control belongs beside the existing ROI actions, outside the pointer
-surface. It is disabled until a successful candidate image is loaded.
+surface. It is disabled until a successful candidate image is loaded and a
+verified source size/resource ID are available.
 
 1. **Tap to suggest ROI** enters assisted mode and announces “Tap the object to
    request an automatic suggestion.”
-2. The next primary mouse, pen, touch, Enter, or Space activation on a focused
-   image point records one source-pixel point, exits point-collection mode, and
-   shows a visible marker plus a polite pending status.
-3. While pending, additional taps do not create parallel requests. Activating
-   the button again cancels the prior browser request and re-enters point mode;
-   a later sequence supersedes the earlier one.
+2. The next primary mouse, pen, or touch tap inside the displayed image converts
+   the image-relative CSS position through the intrinsic image rectangle into
+   one bounded integer source-pixel point, then shows a visible marker and a
+   polite pending status.
+3. While pending, a new assisted tap aborts the prior browser request before
+   starting the next generation; the latest request wins. The button remains a
+   keyboard-operable cancellation control.
 4. Keep the previous committed ROI visible while pending. On a valid current
-   response, pass the validated source rectangle through the existing committed
-   ROI state, announce “Suggested ROI ready. Verify and adjust,” and clear the
-   marker.
+   response, render the exact transient mask silhouette, pass the validated
+   source rectangle through the existing committed ROI state, announce
+   “Suggested ROI ready. Verify and adjust,” and clear the marker.
 5. On safe failure, timeout, cancellation, stale response, or invalid response,
    preserve the previous committed ROI, clear the marker, announce a concise
    retry message, and leave manual editing available.
@@ -266,13 +298,19 @@ surface. It is disabled until a successful candidate image is loaded.
    reset invalidate the assisted sequence. Reset ROI keeps its existing meaning
    and must not initiate inference.
 
-The marker needs a high-contrast shape in addition to color and remains aligned
-from source pixels across viewport resize or orientation change. Pending and
+The marker is a high-contrast shape positioned relative to the displayed image
+and is cleared on resolution, failure, cancellation, or staleness. Pending and
 error text uses the existing live status region; focus is not moved on success.
-The mode button exposes pressed state, Escape exits point-collection mode, and
-keyboard users can place a point by moving a visible crosshair in source-pixel
-steps before Enter/Space submission. Touch suppression remains scoped to the
-image only while assisted point collection is active; scrolling outside the
+The mode button exposes an accessible name and pressed state, and keyboard users
+retain the existing focused ROI Arrow/Shift/Alt editing after a suggestion.
+The mask is painted to a source-sized canvas and scaled with the loaded image;
+the mask fill and contrasting outline remain visible over bright or dark CCTV
+frames. Assisted selections hide the small resize handles; Reset ROI clears the
+mask, rectangle, marker, and status so a new tap or manual drag can start
+immediately. Manual rectangle editing clears the assisted preview and remains
+authoritative.
+Pointer cancellation produces no request. Touch suppression remains scoped to
+the image only while assisted point collection is active; scrolling outside the
 image remains normal. Zoom/pan and a persistent magnifier are out of scope until
 physical-device evidence shows they are needed.
 
@@ -283,33 +321,36 @@ physical-device evidence shows they are needed.
   browse arbitrary local files or retrieve remote content.
 - The model operates offline after operator-controlled dependency and checkpoint
   acquisition. No image, point, mask, or ROI is sent to a third party.
-- The mask and tap marker are transient and are not returned beyond the
-  rectangle, logged, persisted, or added to a manifest.
+- The mask and tap marker are transient, returned only as a bounded row-run
+  preview to the local browser, and are never logged, persisted, or added to a
+  manifest.
 - Existing loopback-only trust and fixed safe error behavior remain unchanged.
 - The dedicated concurrency limit bounds CPU/GPU pressure and prevents repeated
   taps from creating uncontrolled inference work.
 
 ## Phase 5-3B acceptance and tests
 
-Before production wiring, run EfficientSAM-Ti on a small non-sensitive set that
+For acceptance, run EfficientSAM-Ti on a small non-sensitive set that
 represents the deployed camera resolution, compression, lighting, shoe/bag
 size, partial occlusion, and adjacent objects. Record CPU and available-GPU
 load time, p50/p95 warm latency, process RSS or device peak allocation, proposed
 box, whether the prompt lies inside it, and a human “useful starting box” review.
 Do not choose a numeric quality threshold until that labeled set exists.
 
-Backend tests must cover valid source-pixel points, exclusive point bounds,
+Backend tests cover valid source-pixel points, exclusive point bounds,
 unknown/corrupt resources, path/URL rejection by schema, empty and wrong-shaped
-masks, deterministic mask choice and box conversion, 4×4 expansion, source
-dimension agreement, one-at-a-time inference, cached unavailable state, fixed
-safe errors, and proof that artifacts/manifests are unchanged.
+masks, signed-logit thresholding, deterministic mask/score alignment, source
+dimension agreement, one-at-a-time inference, bounded timeout, cached
+unavailable state, fixed safe errors, and proof that artifacts/manifests are
+unchanged. The backend does not expand a rectangle to the frontend's existing
+4×4 editing minimum; the eventual client may normalize or manually correct it.
 
-Frontend tests must cover explicit mode, one request per activation, transport
-abort plus sequence rejection, candidate/resource/dimension stale checks,
+Frontend tests cover explicit mode, one request per activation, transport abort
+plus sequence rejection, candidate/resource/dimension stale checks,
 candidate-change cancellation, prior-ROI preservation, canonical committed ROI
 entry, subsequent move/resize/reset/manual redraw, source-coordinate authority,
-touch/mouse/keyboard activation, accessible pending/error state, and suggestion
-language without recognition claims.
+touch/mouse/keyboard behavior, accessible pending/error state, safe unavailable
+handling, and suggestion language without recognition claims.
 
 Regression gates remain the existing candidate order and no auto-selection,
 unchanged reference-frame schemas and direct decoder, all Phase 5 manual ROI
@@ -393,9 +434,9 @@ which does not require semantic completion of a shoe pair. The remaining
 primary limitation is merging adjacent visually connected shoes in dense
 shelving. Manual ROI correction remains authoritative.
 
-This is favorable initial real-CCTV validation, not production API or frontend
-acceptance. Production packaging, lifecycle, and integration remain the next
-phase.
+This is favorable initial real-CCTV validation, not a substitute for frontend
+acceptance. The production backend and frontend integration are implemented;
+operator smoke validation and physical desktop/mobile acceptance remain.
 
 Successful overlays and sessions remain for review. A failed overlay write
 removes only the partial overlay created by that attempt. To discard all
@@ -410,13 +451,107 @@ does not establish broad CCTV quality, model licensing beyond the recorded
 upstream source, GPU performance, or production API behavior. Those remain
 packaging and production integration gates.
 
+## Production predictor CPU validation (2026-08-01)
+
+The production `LazyEfficientSamPredictor` and
+`AssistedRoiSuggestionService` were exercised on native Windows x86-64 through
+the real reference-frame resource store. No frontend, API server, OpenAI
+component, or test double was used for the four inference cases. The isolated
+environment used Python `3.11.9`, `torch==2.10.0+cpu`,
+`torchvision==0.25.0+cpu`, Pillow `12.3.0`, and NumPy `2.4.6`; CUDA was not
+available. The official EfficientSAM source was commit
+`d525f622e6f640acf5a0fc37c7ca1f243da5bde0`. The existing checkpoint was
+`efficient_sam_vitt.pt`, `40,982,470` bytes, with verified SHA-256
+`dff858b19600a46461cbb7de98f796b23a7a888d9f5e34c0b033f7d6eb9e4e6a`.
+
+Automated assertions recorded source/JPEG dimension agreement, bounded boxes,
+boxes at least 4×4, prompt containment, and unchanged hashes for all 55 frame
+JPEGs plus 55 manifests (110 files; aggregate digest unchanged). The production
+service returns a validated rectangle plus a bounded transient mask preview;
+candidate mask pixels and model score remain response data for frontend review,
+not durable artifact fields.
+
+| Case | Source-space tap | Cold/warm elapsed | RSS after call | Returned ROI | Automated result |
+| --- | --- | ---: | ---: | --- | --- |
+| Normal visible object | `(571, 224)` | `8,203 ms` cold load + inference | `897 MiB` | `(540, 186, 99×77)` | success; bounded, ≥4×4, contains tap |
+| Small object | `(682, 270)` | `3,694 ms` warm | `930 MiB` | `(669, 235, 46×51)` | success; bounded, ≥4×4, contains tap |
+| Adjacent/touching shoes | `(162, 361)` | `4,040 ms` warm | `929 MiB` | `(100, 293, 181×119)` | success; bounded, ≥4×4, contains tap |
+| Background mis-tap | `(2559, 1439)` | `3,735 ms` warm | `933 MiB` | `(2548, 1422, 12×18)` | success; bounded, ≥4×4, contains tap |
+
+Visual review of the disposable overlays found a useful rack-object starting
+box in the normal case and a tight small-object box. The adjacent-shoe box
+merged neighboring shoes and needs manual correction. The bottom-right
+background mis-tap produced a tiny edge box; it is structurally valid but not a
+useful object selection, so the operator must review and reject it when
+necessary. These are visual observations, not automated quality assertions.
+
+A controlled timeout seam added only to the validation driver delayed the real
+predictor behind a `0.001 s` service timeout. The public result was
+`RoiSuggestionTimeoutError` / safe category `timeout` in about `14 ms`; no
+validation output was created by the timeout. After the worker settled, a normal
+call succeeded in `3,371 ms` with the same bounded ROI, demonstrating recovery
+without predictor-state corruption. Overlays and measurements are disposable
+and are under `artifacts/validation/assisted-roi-production/`; source JPEGs and
+manifests remain untouched.
+
+This run establishes production CPU execution and the current resource/memory
+cost, but it does not establish GPU behavior, broad camera/lighting quality, or
+that every background tap will be rejected automatically. The approximately
+`897–936 MiB` working-set range after model load is the primary deployment
+risk; frontend integration should retain manual ROI authority and a visible
+review step.
+
+## Phase 5-3C silhouette preview
+
+Phase 5-3C keeps the rectangle contract but returns the selected EfficientSAM
+mask as a bounded, exact source-row run preview. The browser paints those runs
+to a transient canvas aligned to the loaded JPEG, so responsive image scaling
+does not change source coordinates. The mask is primary visual evidence and
+the mask-derived rectangle is secondary compatibility state; both are replaced
+as one current suggestion.
+
+Reset ROI removes the mask, rectangle, marker, status, and assisted handle
+state. A new tap can start immediately. A failed, timed-out, unavailable, or
+stale request clears any assisted preview while preserving manual editing. A
+manual drag, move, or keyboard adjustment clears the mask because the user's
+rectangle is authoritative. Manual rectangle drawing remains the fallback when
+the optional model is unavailable.
+
+The preview is transient browser/API data only. It is not a manifest field,
+durable artifact, or Phase 6 confirmation record. Dense adjacent shoes or other
+visually connected objects may still merge into one silhouette and require
+manual correction; the UI makes no identity or tracking claim.
+
+## Phase 5-4A external ROI status
+
+The reference image is reserved for selection evidence: the source JPEG,
+transient assisted silhouette, secondary rectangle, and essential tap marker.
+General workflow messages now use the single existing live status region below
+the image, followed by assisted guidance and the ROI controls. The status keeps
+explicit ready, active/loading, success, warning, error, unavailable, and
+disabled state metadata so meaning is not conveyed by color alone, and its
+polite live semantics announce asynchronous changes without duplicating status
+regions. Status text remains in the current language; Phase 5-4C localization
+is not part of this change.
+
+Reset ROI clears the silhouette, rectangle, marker, pending assisted state, and
+external status back to ready guidance. Existing generation checks prevent a
+late response from restoring old visual or textual state. Manual mouse, touch,
+pen, and keyboard editing remains authoritative and uses the same external
+status region.
+
 ## Phase 5-3B scope
 
-Phase 5-3B-1 is complete as the disposable validation boundary above. A later
-production Phase 5-3B may add only the optional suggestion protocol/service,
-strict API models and safe errors, separate inference limiter/lifecycle,
-explicit assisted frontend state, tests, and operator-controlled checkpoint
-setup after the CCTV acceptance gate passes. It must not add ROI confirmation or persistence,
+Phase 5-3B-1 is complete as the disposable validation boundary above,
+Phase 5-3B-2 is complete as the optional backend boundary, Phase 5-3B-3 is
+complete as the explicit frontend invocation boundary, and Phase 5-3C is
+complete as the transient silhouette preview boundary. Phase 5-4A is complete
+as the external status boundary described above. Remaining Phase 5 work
+is manual desktop/mobile acceptance plus any controlled loopback backend smoke
+validation. The backend and frontend must not add ROI confirmation or persistence,
 manifest updates, investigation creation, tracking, recognition, disappearance
 reasoning, multiple ROIs, polygon/mask editing, NVR/replay/decoder changes, or
 automatic selection without a tap.
+
+Phase 6 is not started. There is no durable ROI or manifest write, no automatic
+investigation start, and no second authoritative ROI representation.

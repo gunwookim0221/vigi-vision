@@ -16,6 +16,9 @@
     <script src="/static/reference-frame-selection.js" defer></script>
     <script src="/static/reference-frame-roi-geometry.js" defer></script>
     <script src="/static/reference-frame-roi.js" defer></script>
+    <script src="/static/reference-frame-roi-assisted-request.js" defer></script>
+    <script src="/static/reference-frame-roi-assisted.js" defer></script>
+    <script src="/static/reference-frame-roi-assisted-pointer.js" defer></script>
     <script src="/static/reference-frame-roi-interaction.js" defer></script>
     <script src="/static/reference-frame-ui.js" defer></script>
   </head>
@@ -44,7 +47,12 @@
         <form id="candidate-form" class="candidate-form" novalidate aria-busy="false">
           <div class="field">
             <label for="channel-id">Channel ID</label>
-            <input id="channel-id" name="channel-id" type="number" min="1" step="1" required>
+            <select id="channel-id" name="channel-id" required disabled aria-describedby="channel-status">
+              <option value="">Loading channels…</option>
+            </select>
+            <p id="channel-status" class="field-hint" role="status" aria-live="polite">
+              Loading channels…
+            </p>
           </div>
           <div class="field">
             <label for="reference-time">Reference date and time</label>
@@ -152,8 +160,10 @@
                 hidden
               >
                 <img id="selected-preview-image" class="selected-preview-image" alt="" hidden>
-                <div id="roi-committed-overlay" class="roi-overlay roi-overlay-committed" data-label="Committed ROI" hidden aria-hidden="true"></div>
-                <div id="roi-draft-overlay" class="roi-overlay roi-overlay-draft" data-label="Draft ROI" hidden aria-hidden="true"></div>
+                <canvas id="roi-assisted-mask" class="roi-assisted-mask" hidden aria-hidden="true"></canvas>
+                <div id="roi-assisted-marker" class="roi-assisted-marker" hidden aria-hidden="true"></div>
+                <div id="roi-committed-overlay" class="roi-overlay roi-overlay-committed" hidden aria-hidden="true"></div>
+                <div id="roi-draft-overlay" class="roi-overlay roi-overlay-draft" hidden aria-hidden="true"></div>
                 <button id="roi-handle-nw" class="roi-handle roi-handle-nw" type="button" data-handle="nw" tabindex="-1" aria-label="Resize ROI north-west" aria-hidden="true"></button>
                 <button id="roi-handle-n" class="roi-handle roi-handle-n" type="button" data-handle="n" tabindex="-1" aria-label="Resize ROI north" aria-hidden="true"></button>
                 <button id="roi-handle-ne" class="roi-handle roi-handle-ne" type="button" data-handle="ne" tabindex="-1" aria-label="Resize ROI north-east" aria-hidden="true"></button>
@@ -163,8 +173,11 @@
                 <button id="roi-handle-sw" class="roi-handle roi-handle-sw" type="button" data-handle="sw" tabindex="-1" aria-label="Resize ROI south-west" aria-hidden="true"></button>
                 <button id="roi-handle-w" class="roi-handle roi-handle-w" type="button" data-handle="w" tabindex="-1" aria-label="Resize ROI west" aria-hidden="true"></button>
               </div>
-              <p id="roi-status" class="roi-status" role="status" aria-live="polite">
+              <p id="roi-status" class="roi-status" data-state="disabled" role="status" aria-live="polite" aria-busy="false">
                 Select a candidate first.
+              </p>
+              <p id="roi-assisted-guidance" class="field-hint roi-assisted-guidance">
+                Select a usable candidate to enable automatic ROI suggestions.
               </p>
               <div id="roi-summary" class="roi-summary" hidden>
                 <p class="roi-summary-title">ROI in original-image pixels</p>
@@ -178,6 +191,17 @@
                 </dl>
               </div>
               <div class="roi-actions">
+                <div class="roi-assisted-controls">
+                  <button
+                    id="roi-assisted-button"
+                    type="button"
+                    disabled
+                    aria-pressed="false"
+                    aria-describedby="roi-assisted-guidance roi-status"
+                  >
+                    Tap to suggest ROI
+                  </button>
+                </div>
                 <button id="roi-reset" type="button" disabled>Reset ROI</button>
               </div>
             </div>

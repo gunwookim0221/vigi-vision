@@ -19,9 +19,16 @@ function handleHitRadius() {
   const state = roi.getState();
   const image = document.querySelector("#selected-preview-image");
   const displayRect = image.getBoundingClientRect();
-  return Math.max(
+  const suggestedRadius = Math.max(
     MINIMUM_ROI_SIZE,
     Math.ceil(12 * Math.max(state.sourceSize.width / displayRect.width, state.sourceSize.height / displayRect.height)),
+  );
+  if (state.committedRoi === null) {
+    return suggestedRadius;
+  }
+  return Math.min(
+    suggestedRadius,
+    Math.max(MINIMUM_ROI_SIZE, Math.min(state.committedRoi.width, state.committedRoi.height) / 3),
   );
 }
 
@@ -41,6 +48,9 @@ function setDraftFromPoint(point) {
 
 function beginPointer(event) {
   const state = roi.getState();
+  if (window.vigiVisionReferenceFrameAssistedRoi?.isBlockingManualPointerInput()) {
+    return;
+  }
   if (state.selectedCandidate === null || state.sourceSize === null || roiStage.hidden || state.activePointerId !== null) {
     return;
   }
@@ -51,16 +61,17 @@ function beginPointer(event) {
   const point = sourcePoint(event);
   const handle = state.committedRoi === null ? null : geometry.resizeHandleAt(point, state.committedRoi, handleHitRadius());
   const mode = handle !== null ? "resizing" : state.committedRoi !== null && geometry.pointInRoi(point, state.committedRoi) ? "moving" : "drawing";
+  window.vigiVisionReferenceFrameAssistedRoi?.cancelPending?.();
   try {
     roiStage.setPointerCapture?.(event.pointerId);
   } catch {
-    roi.cancelInteraction("ROI edit could not start. Try again.");
+    roi.cancelInteraction("ROI edit could not start. Try again.", "error");
     return;
   }
   roiStage.focus?.({ preventScroll: true });
   roi.beginInteraction(event.pointerId, mode, handle, point);
   setDraftFromPoint(point);
-  roi.setStatus(mode === "drawing" ? "Drawing a replacement ROI." : mode === "moving" ? "Moving ROI." : `Resizing ROI from the ${handle} handle.`);
+  roi.setStatus(mode === "drawing" ? "Drawing a replacement ROI." : mode === "moving" ? "Moving ROI." : `Resizing ROI from the ${handle} handle.`, "active");
 }
 
 function updatePointer(event) {
@@ -80,14 +91,14 @@ function finishPointer(event) {
   const point = sourcePoint(event);
   const origin = state.interactionOriginPoint;
   if (origin !== null && Math.max(Math.abs(point.x - origin.x), Math.abs(point.y - origin.y)) < MINIMUM_ROI_SIZE) {
-    roi.cancelInteraction("ROI edit was too small; the previous ROI remains.");
+    roi.cancelInteraction("ROI edit was too small; the previous ROI remains.", "warning");
     return;
   }
   setDraftFromPoint(point);
   const next = roi.getState().draftRoi;
   const mode = state.activeEdit?.mode;
   if (next === null || next.width < MINIMUM_ROI_SIZE || next.height < MINIMUM_ROI_SIZE) {
-    roi.cancelInteraction("ROI is too small; draw at least 4 by 4 source pixels.");
+    roi.cancelInteraction("ROI is too small; draw at least 4 by 4 source pixels.", "warning");
     return;
   }
   const message = mode === "drawing"
@@ -103,14 +114,14 @@ function cancelPointer(event, message) {
     return;
   }
   event.preventDefault?.();
-  roi.cancelInteraction(message);
+  roi.cancelInteraction(message, "warning");
 }
 
 function keyboardRoi(event) {
   const state = roi.getState();
   if (event.key === "Escape" && state.activePointerId !== null) {
     event.preventDefault();
-    roi.cancelInteraction("ROI edit cancelled; the previous ROI remains.");
+    roi.cancelInteraction("ROI edit cancelled; the previous ROI remains.", "warning");
     return;
   }
   if (state.committedRoi === null) {
@@ -118,7 +129,7 @@ function keyboardRoi(event) {
   }
   if (event.key === "Delete" || event.key === "Backspace") {
     event.preventDefault();
-    roi.clearRoi("ROI reset. Draw a new region when ready.");
+    clearRoi("ROI reset. Draw a new region when ready.");
     return;
   }
   const directions = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
@@ -128,6 +139,7 @@ function keyboardRoi(event) {
   }
   event.preventDefault();
   const step = event.shiftKey ? 10 : 1;
+  window.vigiVisionReferenceFrameAssistedRoi?.cancelPending?.();
   if (!event.altKey) {
     roi.replaceCommittedRoi(geometry.moveRoi(state.committedRoi, { x: direction[0] * step, y: direction[1] * step }), "ROI moved with the keyboard.");
     return;
@@ -141,6 +153,11 @@ function keyboardRoi(event) {
   roi.replaceCommittedRoi(geometry.resizeRoi(state.committedRoi, handle, point, MINIMUM_ROI_SIZE), "ROI resized with the keyboard.");
 }
 
+function clearRoi(message) {
+  window.vigiVisionReferenceFrameAssistedRoi?.cancelPending?.();
+  roi.clearRoi(message);
+}
+
 [
   ["pointerdown", beginPointer],
   ["pointermove", updatePointer],
@@ -149,5 +166,5 @@ function keyboardRoi(event) {
   ["lostpointercapture", (event) => cancelPointer(event, "ROI edit was interrupted; the previous ROI remains.")],
 ].forEach(([name, handler]) => roiStage.addEventListener(name, handler));
 roiStage.addEventListener("keydown", keyboardRoi);
-resetButton.addEventListener("click", () => roi.clearRoi("ROI reset. Draw a new region when ready."));
+resetButton.addEventListener("click", () => clearRoi("ROI reset. Draw a new region when ready."));
 })();

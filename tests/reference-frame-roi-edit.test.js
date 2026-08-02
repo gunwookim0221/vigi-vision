@@ -89,6 +89,8 @@ test("Reset ROI preserves the candidate and permits immediate recreation", async
   assert.equal(harness.resetButton.disabled, true);
   assert.equal(harness.window.vigiVisionReferenceFrameSelection.getSelectedCandidate(), selected);
   assert.equal(harness.window.vigiVisionReferenceFrameRoi.getState().committedRoi, null);
+  assert.equal(harness.roiStatus.dataset.state, "ready");
+  assert.match(harness.roiStatus.textContent, /ROI reset/);
 
   drag(harness, [160, 130], [190, 150], "mouse", 42);
   assert.notEqual(harness.window.vigiVisionReferenceFrameRoi.getState().committedRoi, null);

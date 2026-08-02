@@ -166,6 +166,10 @@ For NVR, list safe channel metadata first to choose `VIGI_CHANNEL_ID` when neede
 uv run vigi-vision channels
 ```
 
+When `VIGI_CHANNEL_ID` is not set, NVR stream selection uses online channel 1
+when present, otherwise the smallest positive online channel ID. An explicitly
+configured channel remains selected only while it exists and is online.
+
 `snapshot` is NVR-only, verifies that the requested channel is online, and saves a persistent JPEG under `artifacts/channel-snapshots/` using a channel-and-UTC-timestamp filename. It reuses the same SDK live-URL and ffmpeg one-frame capture boundary as `inspect`, and never invokes OpenAI.
 
 ```text
@@ -183,12 +187,36 @@ but no OpenAI key. It synchronously creates or reuses one durable JPEG and has
 no authentication, so keep it on trusted loopback only. The API permits one
 in-flight operation per application; a client disconnect does not guarantee
 cancellation of replay or media work.
+The read-only `/api/v1/reference-frames/channels` endpoint supplies the current
+positive online channel metadata and the shared default used by the web form.
 
 ```text
 uv run uvicorn vigi_vision.reference_frame_api:create_reference_frame_app_from_environment --factory --host 127.0.0.1 --port 8000
+curl http://127.0.0.1:8000/api/v1/reference-frames/channels
 curl -X POST http://127.0.0.1:8000/api/v1/reference-frames -H "Content-Type: application/json" -d '{"channel_id":1,"requested_time":"2026-07-20T12:34:18+09:00","source_timezone":"Asia/Seoul"}'
 curl http://127.0.0.1:8000/api/v1/reference-frames/<resource_id>/image --output reference-frame.jpg
 ```
+
+The optional Phase 5-3C assisted-ROI flow accepts one source-pixel point for a
+selected completed reference frame and returns a bounded suggested rectangle
+plus a transient exact row-run silhouette preview. The mask is visual evidence;
+the rectangle remains the canonical ROI contract.
+The explicit **Tap to suggest ROI** control is disabled until a usable candidate
+is selected and the image dimensions are known. It is also unavailable when the
+optional backend cannot serve suggestions; manual ROI editing remains enabled.
+The backend is disabled unless operator configuration supplies an EfficientSAM-Ti
+checkpoint and expected SHA-256:
+
+```text
+POST /api/v1/reference-frames/<resource_id>/roi-suggestions
+{"point":{"x":560,"y":221}}
+```
+
+Configure `VIGI_ASSISTED_ROI_ENABLED`, `VIGI_ASSISTED_ROI_CHECKPOINT`,
+`VIGI_ASSISTED_ROI_CHECKPOINT_SHA256`, `VIGI_ASSISTED_ROI_DEVICE` (`cpu`,
+`cuda`, or `auto`), and `VIGI_ASSISTED_ROI_TIMEOUT_SECONDS` only in the server
+environment. Optional ML dependencies are lazy and are not required for the
+rest of the application.
 
 Creation returns `201` with `created`; a verified compatible completed resource
 returns `200` with `reused`. The decoded PTS is only relative to the replay
@@ -220,6 +248,18 @@ replacement clear draft and committed ROI state. Pointer interruption clears
 the draft and active pointer while preserving a prior committed ROI. The
 frontend-only `getPhase6Snapshot()` handoff is immutable and transient; ROI
 persistence, confirmation, and manifest storage remain deferred.
+
+After selecting a usable candidate, choose **Tap to suggest ROI** to enter an
+explicit assisted mode. A primary mouse, touch, or pen tap inside the displayed
+image is converted to intrinsic source-image pixels and sent to the selected
+resource. The visible marker and live status remain while the request is
+pending; a current valid response replaces the same committed ROI used by
+manual drawing. Previous ROI state survives failures, timeouts, cancellation,
+and stale responses. Assisted selections de-emphasize the small resize handles;
+Reset ROI removes the mask, rectangle, marker, and stale status, while manual
+drag/move/keyboard editing clears the mask and remains authoritative. No
+recognition claim, persistence, manifest update, or automatic investigation is
+added. Dense adjacent objects may still merge and require manual correction.
 
 For a standalone IPC, set `VIGI_SOURCE=ipc`; `inspect` uses the public IPC RTSP builder and does not perform IPC OpenAPI authentication. A live inspection completes only when source validation, one-frame extraction, and OpenAI structured image analysis all succeed.
 

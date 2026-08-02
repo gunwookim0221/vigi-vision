@@ -16,6 +16,13 @@ function resetRoi(message) {
   }
 }
 
+function resetAssistedRoi(message) {
+  const assistedRoi = window.vigiVisionReferenceFrameAssistedRoi;
+  if (assistedRoi) {
+    assistedRoi.reset(message);
+  }
+}
+
 function isSelectableCandidate(candidate) {
   const frame = candidate.reference_frame;
   return candidate.status === "succeeded"
@@ -68,6 +75,7 @@ function clearSelection(message = "No candidate selected.") {
   selectedCandidate = null;
   selectedView = null;
   clearPreview(message);
+  resetAssistedRoi(message);
   resetRoi(message);
 }
 
@@ -120,6 +128,10 @@ function selectCandidate(candidate, view) {
   const roi = window.vigiVisionReferenceFrameRoi;
   if (roi) {
     roi.setSelectedCandidate(candidate, selectedPreviewImage);
+  }
+  const assistedRoi = window.vigiVisionReferenceFrameAssistedRoi;
+  if (assistedRoi) {
+    assistedRoi.setSelectedCandidate(candidate, selectedPreviewImage);
   }
 }
 
