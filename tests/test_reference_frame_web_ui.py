@@ -31,12 +31,12 @@ def test_web_ui_serves_an_accessible_candidate_form() -> None:
     assert 'id="channel-id"' in response.text
     assert '<select id="channel-id"' in response.text
     assert 'id="channel-status"' in response.text
-    assert "Loading channels" in response.text
+    assert "채널 불러오는 중…" in response.text
     assert 'for="reference-time"' in response.text
     assert 'id="reference-time"' in response.text
     assert 'id="source-timezone"' in response.text
     assert 'id="apply-reference-time"' in response.text
-    assert "Apply date and time" in response.text
+    assert "날짜 및 시각 적용" in response.text
     assert 'id="generation-progress"' in response.text
     assert 'id="generation-indicator"' in response.text
     assert 'aria-live="polite"' in response.text
@@ -50,7 +50,7 @@ def test_web_ui_serves_an_accessible_candidate_form() -> None:
     assert 'id="roi-instructions"' in response.text
     assert 'id="roi-edit-instructions"' in response.text
     assert 'id="roi-assisted-button"' in response.text
-    assert "Tap to suggest ROI" in response.text
+    assert "ROI 자동 제안" in response.text
     assert 'id="roi-assisted-guidance"' in response.text
     assert 'id="roi-status"' in response.text
     assert 'data-state="disabled"' in response.text
@@ -62,10 +62,10 @@ def test_web_ui_serves_an_accessible_candidate_form() -> None:
     assert 'id="roi-reset"' in response.text
     assert 'data-handle="nw"' in response.text
     assert 'data-handle="se"' in response.text
-    assert "Shift+Arrow" in response.text
-    assert "Backspace resets" in response.text
-    assert "Escape cancels" in response.text
-    assert "touch, or pen" in response.text
+    assert "Shift+화살표" in response.text
+    assert "Backspace는 ROI를" in response.text
+    assert "Escape는 진행 중인 편집을 취소" in response.text
+    assert "터치 또는 펜" in response.text
     assert 'id="roi-summary"' in response.text
 
 
@@ -136,7 +136,7 @@ def test_web_ui_serves_its_static_scripts() -> None:
     assert "source_width" in assisted_request_script.text
     assert "mask_preview" in assisted_request_script.text
     assert assisted_script.status_code == 200
-    assert "Tap to suggest ROI" in assisted_script.text
+    assert "ROI 자동 제안" in assisted_script.text
     assert "AbortController" in assisted_script.text
     assert "renderMaskPreview" in assisted_script.text
     assert "roi-assisted-mask" in assisted_script.text
@@ -155,7 +155,9 @@ def test_web_ui_serves_its_static_scripts() -> None:
     assert "getRequestPayload" in script.text
     assert "generationProgress" in script.text
     assert "aria-busy" in script.text
-    assert "Exact source timestamp is not yet verified." in script.text
+    assert (
+        "Source timestamp mapping is unavailable pending real-NVR replay validation." in script.text
+    )
     assert "candidate.reference_frame.image_url" in script.text
     assert "candidate-thumbnail-placeholder" in script.text
 
@@ -171,7 +173,7 @@ def test_web_ui_script_handles_all_required_safe_result_states() -> None:
     assert "reused" in script.text
     assert "failure.code" in script.text
     assert "failure.message" in script.text
-    assert "No candidate positions were returned." in script.text
+    assert "후보 위치가 반환되지 않았습니다." in script.text
     assert "requestSequence" in script.text
 
 
@@ -179,7 +181,7 @@ def test_web_ui_script_loads_channel_inventory_safely() -> None:
     script = _client().get("/static/reference-frame-ui.js")
 
     assert script.status_code == 200
-    assert 'fetch("/api/v1/reference-frames/channels")' in script.text
+    assert '"/api/v1/reference-frames/channels"' in script.text
     assert "default_channel_id" in script.text
     assert "vigiVisionReferenceFrameChannels" in script.text
 

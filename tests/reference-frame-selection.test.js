@@ -31,7 +31,7 @@ test("selects exactly one loaded candidate and updates the larger preview", asyn
   assert.equal(harness.previewContent.hidden, false);
   assert.equal(harness.previewImage.src, "/api/v1/reference-frames/frame--10/image");
   assert.match(textOf(harness.previewFacts), /resource--10/);
-  assert.match(textOf(harness.previewFacts), /measured_clip_relative/);
+  assert.match(textOf(harness.previewFacts), /클립 기준 측정/);
 
   secondRadio.checked = true;
   secondRadio.listeners.change();
@@ -40,7 +40,7 @@ test("selects exactly one loaded candidate and updates the larger preview", asyn
   assert.equal(firstRadio.checked, false);
   assert.equal(secondCard.dataset.selected, "true");
   assert.equal(harness.previewImage.src, "/api/v1/reference-frames/frame-0/image");
-  assert.match(harness.selectionStatus.textContent, /Selected candidate/);
+  assert.match(harness.selectionStatus.textContent, /선택한 후보:/);
 });
 
 test("thumbnail or detail-preview failure disables and clears a selected candidate", async () => {
@@ -61,7 +61,7 @@ test("thumbnail or detail-preview failure disables and clears a selected candida
   assert.equal(harness.window.vigiVisionReferenceFrameSelection.getSelectedCandidate(), null);
   assert.equal(harness.previewContent.hidden, true);
   assert.equal(card.children[0].children[1].hidden, false);
-  assert.match(harness.selectionStatus.textContent, /unavailable/);
+  assert.equal(harness.selectionStatus.textContent, "선택한 후보를 사용할 수 없습니다.");
 });
 
 test("a succeeded candidate without backend identity stays unavailable", async () => {
@@ -74,7 +74,7 @@ test("a succeeded candidate without backend identity stays unavailable", async (
   const card = harness.results.children[0];
 
   assert.equal(findElement(card, "input"), undefined);
-  assert.match(textOf(card), /Unavailable for selection/);
+  assert.ok(textOf(card).includes("선택할 수 없습니다."));
 });
 
 test("a new request clears the current selection before the response arrives", async () => {
