@@ -51,6 +51,10 @@ const OUTCOME_LABELS = Object.freeze({ created: "생성됨", reused: "재사용�
 const CHANNEL_LOADING_MESSAGE = "채널을 불러오는 중입니다…";
 const CHANNEL_EMPTY_MESSAGE = "사용 가능한 온라인 채널이 없습니다.";
 const CHANNEL_DISCOVERY_FAILURE = "채널 목록을 불러오지 못했습니다. 잠시 후 다시 시도하세요.";
+const CHANNEL_DISCOVERY_TIMEOUT = "채널 정보를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.";
+const CHANNEL_DISCOVERY_TIMEOUT_MS = 10_000;
+const CHANNEL_REQUEST_ABORTED = Symbol("channel-request-aborted");
+let activeChannelRequest = null;
 
 function isUsableChannel(channel) {
   return channel
@@ -122,21 +126,64 @@ function replaceChannelOptions(channels, selectedId) {
   referenceFrameForm.refresh();
 }
 
+function abortChannelRequest(record) {
+  if (record === null || record === undefined) {
+    return;
+  }
+  record.aborted = true;
+  if (record.timerId !== null) {
+    window.clearTimeout(record.timerId);
+    record.timerId = null;
+  }
+  if (record.controller !== null) {
+    record.controller.abort();
+  }
+  record.rejectControl?.(CHANNEL_REQUEST_ABORTED);
+}
+
 async function loadChannels() {
   const sequence = ++channelRequestSequence;
-  const currentValue = channelIdInput.value;
+  abortChannelRequest(activeChannelRequest);
   const hadKnownOptions = Array.from(channelIdInput.children).some((option) =>
     /^\d+$/.test(option.value) && Number(option.value) > 0);
   channelStatus.textContent = CHANNEL_LOADING_MESSAGE;
   if (!hadKnownOptions) {
     channelIdInput.disabled = true;
   }
-  try {
-    const response = await fetch("/api/v1/reference-frames/channels");
-    if (!response.ok) {
-      throw new Error("channel discovery failed");
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const record = {
+    aborted: false,
+    controller,
+    rejectControl: null,
+    timerId: null,
+    timedOut: false,
+  };
+  activeChannelRequest = record;
+  const timeoutToken = Symbol("channel-request-timeout");
+  const control = new Promise((_, reject) => {
+    record.rejectControl = reject;
+  });
+  record.timerId = window.setTimeout(() => {
+    if (record.aborted || sequence !== channelRequestSequence) {
+      return;
     }
-    const payload = await response.json();
+    record.timedOut = true;
+    if (record.controller !== null) {
+      record.controller.abort();
+    }
+    record.rejectControl?.(timeoutToken);
+  }, CHANNEL_DISCOVERY_TIMEOUT_MS);
+  try {
+    const request = fetch(
+      "/api/v1/reference-frames/channels",
+      controller === null ? undefined : { signal: controller.signal },
+    ).then(async (response) => {
+      if (!response.ok) {
+        throw new Error("channel discovery failed");
+      }
+      return response.json();
+    });
+    const payload = await Promise.race([request, control]);
     const channels = normalizeChannelList(payload);
     if (channels === null) {
       throw new Error("channel discovery response was invalid");
@@ -154,7 +201,7 @@ async function loadChannels() {
     channelStatus.textContent = channels.length > 0
       ? `온라인 채널 ${channels.length}개를 사용할 수 있습니다.`
       : CHANNEL_EMPTY_MESSAGE;
-  } catch {
+  } catch (error) {
     if (sequence !== channelRequestSequence) {
       return;
     }
@@ -164,7 +211,17 @@ async function loadChannels() {
       channelIdInput.disabled = channelIdInput.value.length === 0;
       referenceFrameForm.refresh();
     }
-    channelStatus.textContent = CHANNEL_DISCOVERY_FAILURE;
+    channelStatus.textContent = error === timeoutToken || record.timedOut
+      ? CHANNEL_DISCOVERY_TIMEOUT
+      : CHANNEL_DISCOVERY_FAILURE;
+  } finally {
+    if (record.timerId !== null) {
+      window.clearTimeout(record.timerId);
+      record.timerId = null;
+    }
+    if (activeChannelRequest === record) {
+      activeChannelRequest = null;
+    }
   }
 }
 

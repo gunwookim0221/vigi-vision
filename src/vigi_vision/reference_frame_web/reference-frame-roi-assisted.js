@@ -1,5 +1,6 @@
 (function () {
 const assistedButton = document.querySelector("#roi-assisted-button");
+const assistedSpinner = document.querySelector("#roi-assisted-spinner");
 const assistedGuidance = document.querySelector("#roi-assisted-guidance");
 const assistedMarker = document.querySelector("#roi-assisted-marker");
 const assistedMask = document.querySelector("#roi-assisted-mask");
@@ -31,6 +32,11 @@ function selectedResourceId() {
 function setStatus(message, state = "ready") { roi.setStatus(message, state); }
 
 function setGuidance(message) { assistedGuidance.textContent = message; }
+
+function setRequestBusy(active) {
+  assistedSpinner.hidden = !active;
+  assistedSpinner.setAttribute("aria-hidden", String(!active));
+}
 
 function hideMarker() {
   assistedMarker.hidden = true;
@@ -205,6 +211,7 @@ function isCurrentRequest(requestGeneration, resourceId, image) {
 
 function finishCurrentRequest() {
   pending = null;
+  setRequestBusy(false);
   hideMarker();
   updateControl();
 }
@@ -253,6 +260,7 @@ function requestSuggestion(point, displayPoint) {
   pending = { controller, generation: requestGeneration };
   mode = "active";
   showMarker(displayPoint);
+  setRequestBusy(true);
   setGuidance("ROI 자동 제안을 요청하는 중입니다. 유효한 결과가 올 때까지 이전 ROI를 유지합니다.");
   setStatus("ROI 자동 제안을 요청하는 중입니다…", "loading");
   void requestBoundary.requestSuggestion({
@@ -280,6 +288,7 @@ function toggleMode() {
     clearPointer(null);
     hideMarker();
     clearMaskPreview();
+    setRequestBusy(false);
     mode = "inactive";
     setGuidance("ROI 자동 제안을 취소했습니다. ROI를 수동 조정하거나 다시 눌러 보세요.");
     setStatus("ROI 자동 제안을 취소했습니다. 이전 ROI를 유지합니다.", "warning");
@@ -298,6 +307,7 @@ function setSelectedCandidate(candidate, image) {
   clearPointer(null);
   hideMarker();
   clearMaskPreview();
+  setRequestBusy(false);
   selectedCandidate = candidate;
   selectedImage = image;
   bindImage(image);
@@ -315,6 +325,7 @@ function reset(message = "먼저 후보를 선택하세요.") {
   clearPointer(null);
   hideMarker();
   clearMaskPreview();
+  setRequestBusy(false);
   detachImage();
   selectedCandidate = null;
   selectedImage = null;
@@ -334,6 +345,7 @@ function cancelPending() {
   clearPointer(null);
   hideMarker();
   clearMaskPreview();
+  setRequestBusy(false);
   mode = "inactive";
   setGuidance("ROI를 초기화했습니다. 준비되면 새 영역을 그리거나 눌러 제안을 요청하세요.");
   updateControl();

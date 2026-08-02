@@ -88,6 +88,7 @@ test("assisted mode is inactive by default and ordinary image taps do not reques
 
   assert.equal(requests.length, 1);
   assert.equal(harness.assistedMarker.hidden, true);
+  assert.equal(harness.assistedSpinner.hidden, true);
   assert.equal(harness.window.vigiVisionReferenceFrameAssistedRoi.getState().active, false);
 });
 
@@ -106,6 +107,7 @@ test("the assisted control requires a selected usable candidate and exposes guid
   assert.match(selected.roiStatus.textContent, /대상을 눌러 ROI 자동 제안을 요청/);
   assert.equal(selected.roiStatus.dataset.state, "active");
   assert.equal(selected.roiStatus.attributes["aria-busy"], "false");
+  assert.equal(selected.assistedSpinner.hidden, true);
 });
 
 test("one assisted tap posts the selected resource and an intrinsic source-space point", async () => {
@@ -128,6 +130,27 @@ test("one assisted tap posts the selected resource and an intrinsic source-space
   assert.match(harness.roiStatus.textContent, /ROI 자동 제안을 요청하는 중/);
   assert.equal(harness.roiStatus.dataset.state, "loading");
   assert.equal(harness.roiStatus.attributes["aria-busy"], "true");
+  assert.equal(harness.assistedSpinner.hidden, false);
+});
+
+test("the assisted spinner starts on a tap request and clears after the result is applied", async () => {
+  const response = deferred();
+  const harness = await selectedHarness((url, options) => (
+    url.includes("roi-suggestions")
+      ? response.promise
+      : Promise.resolve({ ok: true, json: async () => candidateSet([candidate(0)]) })
+  ));
+
+  activate(harness);
+  assert.equal(harness.assistedSpinner.hidden, true);
+  tap(harness, 110, 100);
+  assert.equal(harness.assistedSpinner.hidden, false);
+
+  response.resolve({ ok: true, json: async () => suggestion("resource-0") });
+  await settle();
+
+  assert.equal(harness.assistedSpinner.hidden, true);
+  assert.equal(harness.roiStatus.attributes["aria-busy"], "false");
 });
 
 test("an image-boundary tap is bounded, while an outside tap is ignored", async () => {
@@ -261,6 +284,7 @@ test("pending, failed, and timed-out suggestions preserve the previous ROI", asy
   assert.equal(harness.roiStatus.dataset.state, "error");
   assert.doesNotMatch(harness.roiStatus.textContent, /secret stderr|checkpoint|ffmpeg|rtsp/i);
   assert.equal(harness.assistedMarker.hidden, true);
+  assert.equal(harness.assistedSpinner.hidden, true);
   assert.equal(harness.window.vigiVisionReferenceFrameAssistedRoi.getState().active, false);
   assert.equal(harness.assistedButton.textContent, "ROI 자동 제안");
 
@@ -281,6 +305,7 @@ test("unavailable assisted selection is identified without removing manual fallb
   assert.equal(harness.roiStatus.dataset.state, "unavailable");
   assert.match(harness.roiStatus.textContent, /ROI 자동 제안을 사용할 수 없습니다/);
   assert.equal(harness.assistedMask.hidden, true);
+  assert.equal(harness.assistedSpinner.hidden, true);
   drag(harness, [110, 100], [120, 105]);
   assert.notEqual(harness.window.vigiVisionReferenceFrameRoi.getState().committedRoi, null);
 });
@@ -326,6 +351,7 @@ test("button cancellation clears a stale silhouette while retaining the canonica
   harness.assistedButton.listeners.click();
 
   assert.equal(harness.assistedMask.hidden, true);
+  assert.equal(harness.assistedSpinner.hidden, true);
   assert.equal(harness.window.vigiVisionReferenceFrameRoi.getState().assistedPreviewActive, false);
   assert.notEqual(harness.window.vigiVisionReferenceFrameRoi.getState().committedRoi, null);
 });
@@ -350,6 +376,7 @@ test("Reset ROI aborts pending assisted work without clearing the selected candi
   assert.equal(harness.window.vigiVisionReferenceFrameAssistedRoi.getState().active, false);
   assert.equal(harness.window.vigiVisionReferenceFrameRoi.getState().committedRoi, null);
   assert.equal(harness.assistedMask.hidden, true);
+  assert.equal(harness.assistedSpinner.hidden, true);
 
   response.resolve({ ok: true, json: async () => suggestion("resource-0") });
   await settle();
@@ -432,6 +459,7 @@ test("candidate change and pointer cancellation invalidate pending assisted work
   assert.equal(requests.length, 2);
   harness.window.vigiVisionReferenceFrameAssistedRoi.reset("Candidate changed.");
   assert.equal(requests[1].options.signal.aborted, true);
+  assert.equal(harness.assistedSpinner.hidden, true);
   assert.equal(harness.window.vigiVisionReferenceFrameRoi.getState().committedRoi, null);
 });
 
@@ -465,6 +493,7 @@ test("manual keyboard edits invalidate pending assisted work", async () => {
   await settle();
   assert.deepEqual(harness.window.vigiVisionReferenceFrameRoi.getState().committedRoi, manualRoi);
   assert.equal(harness.assistedMask.hidden, true);
+  assert.equal(harness.assistedSpinner.hidden, true);
 });
 
 test("non-primary and non-left-button pointers do not issue assisted requests", async () => {
