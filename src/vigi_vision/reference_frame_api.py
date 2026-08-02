@@ -33,6 +33,12 @@ from vigi_vision.config import (
     load_capture_settings,
 )
 from vigi_vision.ffmpeg import resolve_ffmpeg
+from vigi_vision.investigation_confirmation_api import (
+    InvestigationConfirmationExecutionBoundary,
+    install_investigation_confirmation_routes,
+)
+from vigi_vision.investigation_confirmation_repository import InvestigationConfirmationRepository
+from vigi_vision.investigation_confirmation_service import InvestigationConfirmationService
 from vigi_vision.nvr import SdkNvrGateway
 from vigi_vision.recording import RecordingPlanner
 from vigi_vision.reference_frame_api_errors import (
@@ -76,6 +82,7 @@ from vigi_vision.replay import ReplayExtractor
 from vigi_vision.video import resolve_ffprobe
 
 _ARTIFACT_ROOT: Final = Path("artifacts/reference-frames")
+_CONFIRMATION_ARTIFACT_ROOT: Final = Path("artifacts/investigations")
 _IMAGE_HEADERS: Final = {
     "Cache-Control": "private, max-age=3600, immutable",
     "Content-Disposition": 'inline; filename="reference-frame.jpg"',
@@ -104,6 +111,9 @@ class ReferenceFrameApiDependencies:
     limiter: anyio.CapacityLimiter = field(repr=False)
     suggestion_service: RoiSuggestionExecutionBoundary | None = field(default=None, repr=False)
     channel_inventory: ChannelInventoryBoundary | None = field(default=None, repr=False)
+    confirmation_service: InvestigationConfirmationExecutionBoundary | None = field(
+        default=None, repr=False
+    )
 
 
 @final
@@ -121,12 +131,13 @@ class ReferenceFrameApiStartupError(RuntimeError):
         return self.message
 
 
-def create_reference_frame_app(
+def create_reference_frame_app(  # noqa: PLR0913 — each argument is an independently injectable boundary.
     service: ReferenceFrameExecutionBoundary,
     resources: ReferenceFrameImageBoundary,
     limiter: anyio.CapacityLimiter | None = None,
     suggestion_service: RoiSuggestionExecutionBoundary | None = None,
     channel_inventory: ChannelInventoryBoundary | None = None,
+    confirmation_service: InvestigationConfirmationExecutionBoundary | None = None,
 ) -> FastAPI:
     """Create an injectable local API application without reading configuration in handlers."""
     dependencies = ReferenceFrameApiDependencies(
@@ -135,6 +146,7 @@ def create_reference_frame_app(
         limiter=anyio.CapacityLimiter(1) if limiter is None else limiter,
         suggestion_service=suggestion_service,
         channel_inventory=channel_inventory,
+        confirmation_service=confirmation_service,
     )
     app = FastAPI(
         title="VIGI Vision Reference Frame API",
@@ -225,6 +237,9 @@ def create_reference_frame_app(
     _add_channel_route(app, dependencies)
     _add_candidate_route(app, dependencies)
     _add_roi_suggestion_route(app, dependencies)
+    install_investigation_confirmation_routes(
+        app, dependencies.confirmation_service, dependencies.limiter
+    )
     if isinstance(suggestion_service, AssistedRoiSuggestionService):
         app.router.add_event_handler("shutdown", suggestion_service.close)
     return app
@@ -375,6 +390,10 @@ def create_reference_frame_app_from_environment() -> FastAPI:
         ffprobe = resolve_ffprobe(ffmpeg)
         artifacts = ReferenceFrameArtifactStore(_ARTIFACT_ROOT)
         resources = ReferenceFrameResourceStore(_ARTIFACT_ROOT)
+        confirmation_repository = InvestigationConfirmationRepository(
+            _CONFIRMATION_ARTIFACT_ROOT, resources
+        )
+        confirmation_service = InvestigationConfirmationService(resources, confirmation_repository)
         channel_inventory = SdkNvrGateway(connection)
         service = ReferenceFrameService(
             planner=planner,
@@ -402,6 +421,7 @@ def create_reference_frame_app_from_environment() -> FastAPI:
             resources,
             suggestion_service=suggestion_service,
             channel_inventory=channel_inventory,
+            confirmation_service=confirmation_service,
         )
     except ReferenceFrameApiStartupError:
         raise

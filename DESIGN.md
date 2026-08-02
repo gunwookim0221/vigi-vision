@@ -134,7 +134,8 @@ trustworthy incremental progress contract.
   publishes that reviewed state as an immutable investigation
   package; see [Investigation Confirmation and Durable Persistence](docs/design/investigation-confirmation.md).
 - **Persistence:** the one ROI remains transient frontend state. Confirmation
-  HTTP/UI transport remains deferred to Phase 6-2B/6-3.
+  UI integration remains deferred to Phase 6-3; the Phase 6-2B HTTP boundary
+  is implemented.
 
 #### Assisted-selection integration
 

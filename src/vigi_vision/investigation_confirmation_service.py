@@ -68,21 +68,14 @@ class InvestigationConfirmationService:
         manifest = self._manifest(resource, anchor, candidate_offset, request)
         return self.repository.publish(manifest)
 
+    def load_confirmation_manifest(self, investigation_id: str) -> ConfirmationManifest:
+        """Load one strictly revalidated manifest for the Phase 6 API."""
+        manifest, _ = self._validated_manifest(investigation_id)
+        return manifest
+
     def load_confirmed(self, investigation_id: str) -> ConfirmedInvestigationInput:
         """Load a published schema 2 package and resolve its trusted JPEG."""
-        manifest = self.repository.load(investigation_id)
-        try:
-            resource = self.repository.resolve_resource_for_manifest(manifest)
-            _validate_loaded_manifest(manifest, resource)
-        except (
-            ConfirmationArtifactError,
-            ConfirmationImageDimensionMismatchError,
-            ConfirmationInvalidRoiError,
-            ConfirmationCandidateMismatchError,
-        ):
-            raise ConfirmedInputInvalidError from None
-        except ReferenceFrameError:
-            raise ConfirmedInputInvalidError from None
+        manifest, resource = self._validated_manifest(investigation_id)
         return ConfirmedInvestigationInput(
             investigation_id=manifest.investigation_id,
             channel_id=manifest.confirmation.channel_id,
@@ -105,6 +98,25 @@ class InvestigationConfirmationService:
             roi=manifest.confirmation.roi,
             jpeg_path=resource.jpeg_path,
         )
+
+    def _validated_manifest(
+        self, investigation_id: str
+    ) -> tuple[ConfirmationManifest, ReferenceFrameResourceMetadata]:
+        """Load and revalidate one manifest against its immutable frame resource."""
+        manifest = self.repository.load(investigation_id)
+        try:
+            resource = self.repository.resolve_resource_for_manifest(manifest)
+            _validate_loaded_manifest(manifest, resource)
+        except (
+            ConfirmationArtifactError,
+            ConfirmationImageDimensionMismatchError,
+            ConfirmationInvalidRoiError,
+            ConfirmationCandidateMismatchError,
+        ):
+            raise ConfirmedInputInvalidError from None
+        except ReferenceFrameError:
+            raise ConfirmedInputInvalidError from None
+        return manifest, resource
 
     def _anchor_request(
         self, resource: ReferenceFrameResourceMetadata, request: ConfirmationRequest

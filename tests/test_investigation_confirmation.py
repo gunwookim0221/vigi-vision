@@ -268,22 +268,37 @@ class Context:
     resource_id: str
     resource_root: Path
     investigation_root: Path
+    channel_id: int
+    confirmation_anchor_time_utc: datetime
 
     @property
     def investigation_id(self) -> str:
-        return "object-disappearance-ch1-20260720T033428Z"
+        token = self.confirmation_anchor_time_utc.strftime("%Y%m%dT%H%M%SZ")
+        return f"object-disappearance-ch{self.channel_id}-{token}"
 
 
-def _context(tmp_path: Path) -> Context:
+def _context(
+    tmp_path: Path,
+    *,
+    channel_id: int = 1,
+    requested_time_text: str = "2026-07-20T12:34:18",
+    confirmation_time_text: str = "2026-07-20T12:34:28",
+) -> Context:
     resource_root = tmp_path / "reference-frames"
     request = parse_reference_frame_request(
-        channel_id=1,
-        requested_time_text="2026-07-20T12:34:18",
+        channel_id=channel_id,
+        requested_time_text=requested_time_text,
+        source_timezone="Asia/Seoul",
+        now_utc=_NOW,
+    )
+    confirmation_anchor = parse_reference_frame_request(
+        channel_id=channel_id,
+        requested_time_text=confirmation_time_text,
         source_timezone="Asia/Seoul",
         now_utc=_NOW,
     )
     segment = RecordingSegment(
-        channel_id=1,
+        channel_id=channel_id,
         recording_day=request.requested_time_utc.date(),
         start_epoch_seconds=int((request.requested_time_utc - timedelta(minutes=1)).timestamp()),
         end_epoch_seconds=int((request.requested_time_utc + timedelta(minutes=1)).timestamp()),
@@ -297,7 +312,7 @@ def _context(tmp_path: Path) -> Context:
             request=request,
             segment=segment,
             extraction_window=RecordingWindow(
-                1,
+                channel_id,
                 request.requested_time_utc - timedelta(seconds=2),
                 request.requested_time_utc + timedelta(seconds=4),
             ),
@@ -322,7 +337,14 @@ def _context(tmp_path: Path) -> Context:
 
     repository = InvestigationConfirmationRepository(investigation_root, resources, clock)
     service = InvestigationConfirmationService(resources, repository, clock)
-    return Context(service, session.resource_id, resource_root, investigation_root)
+    return Context(
+        service,
+        session.resource_id,
+        resource_root,
+        investigation_root,
+        channel_id,
+        confirmation_anchor.requested_time_utc,
+    )
 
 
 def _request(
@@ -350,8 +372,19 @@ def _request(
     )
 
 
-def build_context(tmp_path: Path) -> Context:
-    return _context(tmp_path)
+def build_context(
+    tmp_path: Path,
+    *,
+    channel_id: int = 1,
+    requested_time_text: str = "2026-07-20T12:34:18",
+    confirmation_time_text: str = "2026-07-20T12:34:28",
+) -> Context:
+    return _context(
+        tmp_path,
+        channel_id=channel_id,
+        requested_time_text=requested_time_text,
+        confirmation_time_text=confirmation_time_text,
+    )
 
 
 def build_request(resource_id: str, *, roi: tuple[int, int] = (10, 120)) -> ConfirmationRequest:

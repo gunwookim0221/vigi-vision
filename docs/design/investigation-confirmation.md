@@ -2,12 +2,13 @@
 
 ## Status and scope
 
-**Status: approved Phase 6-1 contract; Phase 6-2A backend foundation implemented.**
+**Status: approved Phase 6-1 contract; Phase 6-2A backend foundation and
+Phase 6-2B HTTP boundary implemented.**
 
 This document defines the boundary where a user-reviewed reference frame and
 ROI stop being transient browser state and become one immutable, durable input
-for the next object-disappearance phase. The HTTP API belongs to Phase 6-2B
-and the web confirmation flow belongs to Phase 6-3.
+for the next object-disappearance phase. The HTTP API is implemented in Phase
+6-2B; the web confirmation flow belongs to Phase 6-3.
 
 The contract reuses the implemented reference-frame resource and investigation
 artifact ownership boundaries. It does not add object comparison, temporal
@@ -281,7 +282,7 @@ transient and the final rectangle is always authoritative.
 
 ## HTTP API contract
 
-Phase 6-2 adds one create-or-resolve endpoint:
+Phase 6-2B adds one create-or-resolve endpoint:
 
 ```http
 POST /api/v1/investigation-confirmations
@@ -304,6 +305,7 @@ uses the existing safe error envelope. It does not write files directly.
     "y": 927,
     "width": 214,
     "height": 163,
+    "coordinate_space": "source_pixels",
     "provenance": "assisted_then_adjusted"
   }
 }
@@ -355,6 +357,7 @@ immutable confirmed state without resubmitting it:
       "y": 927,
       "width": 214,
       "height": 163,
+      "coordinate_space": "source_pixels",
       "provenance": "assisted_then_adjusted"
     }
   }
@@ -375,7 +378,8 @@ Use fixed messages and the existing envelope. The transport mapping is:
 
 | Condition | Status | Safe code/category |
 | --- | ---: | --- |
-| Malformed JSON or structurally invalid request | 400 | `invalid_request` |
+| Malformed JSON | 400 | `invalid_request` |
+| Structurally invalid confirmation request | 422 | `invalid_confirmation` |
 | Reference frame or investigation not found | 404 | existing `resource_not_found` or `investigation_not_found` |
 | Current request disagrees with the resource, dimensions, anchor, or existing confirmation | 409 | `stale_selection` or `confirmation_conflict` |
 | Resolved resource's trusted channel or requested-time relation disagrees with the confirmation | 409 | `stale_selection` |
@@ -627,12 +631,18 @@ confirmation, or unsupported schema fails before media or model work.
 - Add typed confirmation request/result/domain models and validation.
 - Add the confirmation service and repository with claim, staging, strict read,
   canonical equivalence, and atomic promotion.
-- Add POST/GET transport models and fixed safe error translation.
 - Preserve all existing reference-frame, candidate, ROI-suggestion, recording,
   and multi-camera investigation contracts.
 - Test geometry, provenance, stale-state checks, schema parsing, idempotent retry,
   conflicts, concurrent claims, partial-write cleanup, resource revalidation,
   legacy rejection, and credential redaction.
+
+### Phase 6-2B: HTTP transport
+
+- Add the strict POST/GET transport models and fixed safe error translation.
+- Reuse the Phase 6-2A service, repository, claims, publication, and loader
+  boundaries without duplicating persistence logic.
+- Keep confirmation UI and browser draft integration deferred to Phase 6-3.
 
 ### Phase 6-3: web confirmation
 
