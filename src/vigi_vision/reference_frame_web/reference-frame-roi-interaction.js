@@ -48,7 +48,7 @@ function setDraftFromPoint(point) {
 
 function beginPointer(event) {
   const state = roi.getState();
-  if (window.vigiVisionReferenceFrameAssistedRoi?.isBlockingManualPointerInput()) {
+  if (state.readOnly || window.vigiVisionReferenceFrameAssistedRoi?.isBlockingManualPointerInput()) {
     return;
   }
   if (state.selectedCandidate === null || state.sourceSize === null || roiStage.hidden || state.activePointerId !== null) {
@@ -119,6 +119,9 @@ function cancelPointer(event, message) {
 
 function keyboardRoi(event) {
   const state = roi.getState();
+  if (state.readOnly) {
+    return;
+  }
   if (event.key === "Escape" && state.activePointerId !== null) {
     event.preventDefault();
     roi.cancelInteraction("ROI 편집을 취소했습니다. 이전 ROI를 유지합니다.", "warning");
@@ -141,7 +144,7 @@ function keyboardRoi(event) {
   const step = event.shiftKey ? 10 : 1;
   window.vigiVisionReferenceFrameAssistedRoi?.cancelPending?.();
   if (!event.altKey) {
-    roi.replaceCommittedRoi(geometry.moveRoi(state.committedRoi, { x: direction[0] * step, y: direction[1] * step }), "키보드로 ROI를 이동했습니다.");
+    roi.replaceAdjustedRoi(geometry.moveRoi(state.committedRoi, { x: direction[0] * step, y: direction[1] * step }), "키보드로 ROI를 이동했습니다.");
     return;
   }
   const isHorizontal = direction[0] !== 0;
@@ -150,7 +153,7 @@ function keyboardRoi(event) {
     y: isHorizontal ? state.committedRoi.y : state.committedRoi.y + state.committedRoi.height + direction[1] * step,
   };
   const handle = isHorizontal ? "e" : "s";
-  roi.replaceCommittedRoi(geometry.resizeRoi(state.committedRoi, handle, point, MINIMUM_ROI_SIZE), "키보드로 ROI 크기를 조정했습니다.");
+  roi.replaceAdjustedRoi(geometry.resizeRoi(state.committedRoi, handle, point, MINIMUM_ROI_SIZE), "키보드로 ROI 크기를 조정했습니다.");
 }
 
 function clearRoi(message) {

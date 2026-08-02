@@ -59,12 +59,11 @@ test("editing an applied time or timezone makes generation dirty until reapplica
   const harness = createHarness(async () => ({ ok: true, json: async () => candidateSet([candidate(0)]) }));
   applyReferenceTime(harness, "2026-07-31T17:02:29");
   await submit(harness);
-  const resultCount = harness.results.children.length;
 
   harness.referenceTime.value = "2026-07-31T17:02:30";
   harness.referenceTime.listeners.input();
   assert.equal(harness.button.disabled, true);
-  assert.equal(harness.results.children.length, resultCount);
+  assert.equal(harness.results.children.length, 0);
   assert.match(harness.referenceState.textContent, /변경되었습니다/);
 
   harness.timezone.value = "UTC";

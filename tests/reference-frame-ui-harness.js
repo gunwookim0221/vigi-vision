@@ -11,6 +11,7 @@ const assistedRoiScript = readFileSync(join(__dirname, "..", "src", "vigi_vision
 const assistedPointerScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-roi-assisted-pointer.js"), "utf8");
 const roiInteractionScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-roi-interaction.js"), "utf8");
 const script = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-ui.js"), "utf8");
+const confirmationScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-confirmation.js"), "utf8");
 
 class FakeElement {
   constructor(tagName) {
@@ -116,10 +117,13 @@ class FakeAbortController {
   }
 }
 
-function candidate(offsetSeconds, status = "succeeded") {
+function candidate(offsetSeconds, status = "succeeded", channelId = 1) {
+  const candidateRequestedTime = new Date(
+    Date.parse("2026-07-20T03:34:18Z") + offsetSeconds * 1000,
+  ).toISOString().replace(".000Z", "Z");
   const base = {
     offset_seconds: offsetSeconds,
-    candidate_requested_time_utc: `2026-07-20T03:${String(10 + offsetSeconds).padStart(2, "0")}:00Z`,
+    candidate_requested_time_utc: candidateRequestedTime,
     status,
   };
   if (status === "failed") {
@@ -136,7 +140,14 @@ function candidate(offsetSeconds, status = "succeeded") {
       resource_id: `resource-${offsetSeconds}`,
       image_url: `/api/v1/reference-frames/frame-${offsetSeconds}/image`,
       image: { width: 2560, height: 1440 },
-      timing: { precision_status: "measured_clip_relative" },
+      channel_id: channelId,
+      requested_time_utc: candidateRequestedTime,
+      timing: {
+        precision_status: "measured_clip_relative",
+        decoded_clip_relative_pts_seconds: 2.04,
+        estimated_source_time_utc: null,
+        offset_from_requested_seconds: null,
+      },
       warnings: ["Source timestamp mapping is unavailable pending real-NVR replay validation."],
     },
   };
@@ -170,6 +181,7 @@ function createHarness(
       default_channel_id: 1,
     }),
   },
+  options = {},
 ) {
   const form = new FakeElement("form");
   form.reportValidity = () => true;
@@ -218,6 +230,15 @@ function createHarness(
     ["#roi-summary-height", new FakeElement("dd")],
     ["#roi-summary-source-width", new FakeElement("dd")],
     ["#roi-summary-source-height", new FakeElement("dd")],
+    ["#confirmation-panel", new FakeElement("section")],
+    ["#confirmation-review", new FakeElement("p")],
+    ["#confirmation-status", new FakeElement("p")],
+    ["#confirmation-error", new FakeElement("p")],
+    ["#confirmation-action", new FakeElement("button")],
+    ["#confirmation-result", new FakeElement("div")],
+    ["#confirmation-id", new FakeElement("dd")],
+    ["#confirmation-confirmed-at", new FakeElement("dd")],
+    ["#confirmation-artifact", new FakeElement("dd")],
   ]);
   elements.get("#channel-id").value = "1";
   elements.get("#source-timezone").value = "Asia/Seoul";
@@ -241,6 +262,9 @@ function createHarness(
   elements.get("#roi-assisted-marker").hidden = true;
   elements.get("#roi-assisted-mask").hidden = true;
   elements.get("#roi-summary").hidden = true;
+  elements.get("#confirmation-panel").hidden = true;
+  elements.get("#confirmation-result").hidden = true;
+  elements.get("#confirmation-error").hidden = true;
   elements.get("#roi-status").textContent = "Select a candidate first.";
   elements.get("#roi-status").dataset.state = "disabled";
   elements.get("#roi-status").setAttribute("aria-busy", "false");
@@ -283,9 +307,11 @@ function createHarness(
       },
     },
     AbortController: FakeAbortController,
-    fetch: (url, options) => url === "/api/v1/reference-frames/channels"
-      ? (typeof channelResponse === "function" ? channelResponse(url, options) : Promise.resolve(channelResponse))
-      : fetchImplementation(url, options),
+     fetch: (url, requestOptions) => url === "/api/v1/reference-frames/channels"
+       ? (typeof channelResponse === "function" ? channelResponse(url, requestOptions) : Promise.resolve(channelResponse))
+       : (!options.confirmation && url.startsWith("/api/v1/investigation-confirmations/")
+         ? Promise.resolve({ ok: false, status: 404, json: async () => ({ error: { code: "investigation_not_found" } }) })
+         : fetchImplementation(url, requestOptions)),
   });
   vm.runInContext(formScript, context);
   vm.runInContext(selectionScript, context);
@@ -296,6 +322,7 @@ function createHarness(
   vm.runInContext(assistedPointerScript, context);
   vm.runInContext(roiInteractionScript, context);
   vm.runInContext(script, context);
+  vm.runInContext(confirmationScript, context);
   return {
     form,
     channel: elements.get("#channel-id"),
@@ -341,6 +368,15 @@ function createHarness(
     roiSummaryHeight: elements.get("#roi-summary-height"),
     roiSummarySourceWidth: elements.get("#roi-summary-source-width"),
     roiSummarySourceHeight: elements.get("#roi-summary-source-height"),
+    confirmationPanel: elements.get("#confirmation-panel"),
+    confirmationReview: elements.get("#confirmation-review"),
+    confirmationStatus: elements.get("#confirmation-status"),
+    confirmationError: elements.get("#confirmation-error"),
+    confirmationAction: elements.get("#confirmation-action"),
+    confirmationResult: elements.get("#confirmation-result"),
+    confirmationId: elements.get("#confirmation-id"),
+    confirmationConfirmedAt: elements.get("#confirmation-confirmed-at"),
+    confirmationArtifact: elements.get("#confirmation-artifact"),
     windowListeners,
     window: context.window,
     runTimers,

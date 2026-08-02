@@ -194,5 +194,26 @@ def test_web_ui_script_renders_server_values_as_text_not_html() -> None:
     assert 'startsWith("/api/v1/reference-frames/")' in script.text
 
 
+def test_web_ui_exposes_the_phase6_confirmation_surface_safely() -> None:
+    client = _client()
+
+    page = client.get("/")
+    script = client.get("/static/reference-frame-confirmation.js")
+
+    assert page.status_code == 200
+    assert 'id="confirmation-panel"' in page.text
+    assert 'id="confirmation-review"' in page.text
+    assert 'id="confirmation-action"' in page.text
+    assert 'id="confirmation-result"' in page.text
+    assert 'id="confirmation-id"' in page.text
+    assert 'id="confirmation-confirmed-at"' in page.text
+    assert 'id="confirmation-artifact"' in page.text
+    assert script.status_code == 200
+    assert "/api/v1/investigation-confirmations" in script.text
+    assert "coordinate_space" in script.text
+    assert "provenance" in script.text
+    assert "innerHTML" not in script.text
+
+
 def _client() -> TestClient:
     return TestClient(create_reference_frame_app(UnusedExecutor(), UnusedResources()))

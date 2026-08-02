@@ -2,13 +2,14 @@
 
 ## Status and scope
 
-**Status: approved Phase 6-1 contract; Phase 6-2A backend foundation and
-Phase 6-2B HTTP boundary implemented.**
+**Status: approved Phase 6-1 contract; Phase 6-2A backend foundation, Phase
+6-2B HTTP boundary, and Phase 6-2C web confirmation flow implemented.**
 
 This document defines the boundary where a user-reviewed reference frame and
 ROI stop being transient browser state and become one immutable, durable input
 for the next object-disappearance phase. The HTTP API is implemented in Phase
-6-2B; the web confirmation flow belongs to Phase 6-3.
+6-2B; the existing reference-frame page now provides the Phase 6-2C review,
+confirmation, and reopen flow.
 
 The contract reuses the implemented reference-frame resource and investigation
 artifact ownership boundaries. It does not add object comparison, temporal
@@ -529,8 +530,8 @@ is not.
 
 ## Inline Korean web flow
 
-Phase 6-3 adds a final review section within the existing page, not a new app or
-route. It presents:
+Phase 6-2C adds a final review section within the existing page, not a new app
+or route. It presents:
 
 - selected reference-frame image with the final rectangle overlay;
 - channel;
@@ -642,16 +643,17 @@ confirmation, or unsupported schema fails before media or model work.
 - Add the strict POST/GET transport models and fixed safe error translation.
 - Reuse the Phase 6-2A service, repository, claims, publication, and loader
   boundaries without duplicating persistence logic.
-- Keep confirmation UI and browser draft integration deferred to Phase 6-3.
+- Keep durable persistence and HTTP translation in the Phase 6-2A/6-2B
+  boundaries; the browser draft integration is implemented in Phase 6-2C.
 
-### Phase 6-3: web confirmation
+### Phase 6-2C: web confirmation
 
 - Track provenance alongside the existing canonical rectangle.
 - Extend the Phase 6 snapshot with the confirmation request fields without
   changing ROI interaction behavior.
 - Add the inline Korean review/pending/success/failure/read-only states.
 - Add POST/GET integration, duplicate-action suppression, refresh/reopen, stale
-  response guards, focus management, and mobile/keyboard accessibility tests.
+  response guards, and mobile/keyboard accessibility tests.
 
 ### Phase 6-4: real-NVR validation
 

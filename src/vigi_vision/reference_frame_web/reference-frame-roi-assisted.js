@@ -31,11 +31,16 @@ function selectedResourceId() {
 
 function setStatus(message, state = "ready") { roi.setStatus(message, state); }
 
+function notifyConfirmation() {
+  window.vigiVisionReferenceFrameConfirmation?.refresh?.();
+}
+
 function setGuidance(message) { assistedGuidance.textContent = message; }
 
 function setRequestBusy(active) {
   assistedSpinner.hidden = !active;
   assistedSpinner.setAttribute("aria-hidden", String(!active));
+  notifyConfirmation();
 }
 
 function hideMarker() {
@@ -195,6 +200,7 @@ function updateControl() {
   const canSuggest = selectedResourceId() !== null
     && selectedImage !== null
     && currentSourceSize() !== null
+    && !roi.getState().readOnly
     && !capabilityUnavailable;
   assistedButton.disabled = !canSuggest;
   assistedButton.textContent = mode === "inactive" ? "ROI 자동 제안" : "ROI 자동 제안 취소";
@@ -217,7 +223,7 @@ function finishCurrentRequest() {
 }
 
 function completeSuccess(nextRoi) {
-  roi.replaceCommittedRoi(nextRoi.roi, "ROI 자동 제안을 받았습니다. 확인하고 수동 조정하세요.");
+  roi.replaceCommittedRoi(nextRoi.roi, "ROI 자동 제안을 받았습니다. 확인하고 수동 조정하세요.", "success", "assisted");
   setMaskPreview(nextRoi.maskPreview);
   mode = "inactive";
   setGuidance("ROI 자동 제안을 받았습니다. 확인하거나 수동 조정하고, 다른 제안을 요청할 수 있습니다.");
@@ -397,6 +403,16 @@ function getState() {
   };
 }
 
+function setReadOnly() {
+  mode = "inactive";
+  abortPending();
+  clearPointer(null);
+  hideMarker();
+  clearMaskPreview();
+  setRequestBusy(false);
+  updateControl();
+}
+
 assistedButton.addEventListener("click", toggleMode);
 window.addEventListener("resize", renderMaskPreview);
 window.addEventListener("pagehide", () => reset(""));
@@ -413,6 +429,7 @@ window.vigiVisionReferenceFrameAssistedRoi = Object.freeze({
   reset,
   clearMaskPreview,
   setMaskPreview,
+  setReadOnly,
   setSelectedCandidate,
 });
 updateControl();

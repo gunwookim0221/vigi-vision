@@ -11,6 +11,15 @@ const appliedReferenceTimeZone = document.querySelector("#applied-reference-time
 let appliedRequest = null;
 let appliedRequestDirty = false;
 let generationActive = false;
+let formReadOnly = false;
+
+function notifyConfirmation() {
+  window.vigiVisionReferenceFrameConfirmation?.refresh?.();
+}
+
+function invalidateCandidates(message) {
+  window.vigiVisionReferenceFrameCandidates?.invalidate?.(message);
+}
 
 function normalizeLocalDateTime(value) {
   if (typeof value !== "string") {
@@ -45,12 +54,13 @@ function hasValidReferenceInputs() {
 
 function updateReferenceFormState() {
   const validReferenceInputs = hasValidReferenceInputs();
-  referenceFrameApplyButton.disabled = !validReferenceInputs || generationActive;
+  referenceFrameApplyButton.disabled = !validReferenceInputs || generationActive || formReadOnly;
   const ready = validReferenceInputs
     && hasValidChannel()
     && appliedRequest !== null
     && !appliedRequestDirty
-    && !generationActive;
+    && !generationActive
+    && !formReadOnly;
   referenceFrameGenerateButton.disabled = !ready;
 
   if (appliedRequest === null) {
@@ -74,6 +84,12 @@ function applyReferenceTime() {
     return;
   }
   referenceFrameTimeInput.value = normalized;
+  const changed = appliedRequest === null
+    || appliedRequest.reference_time !== normalized
+    || appliedRequest.source_timezone !== referenceFrameTimezoneInput.value;
+  if (changed && !formReadOnly) {
+    invalidateCandidates("기준 시각이 변경되어 후보를 다시 생성해야 합니다.");
+  }
   appliedRequest = {
     reference_time: normalized,
     source_timezone: referenceFrameTimezoneInput.value,
@@ -84,13 +100,18 @@ function applyReferenceTime() {
   appliedReferenceTimeZone.textContent = "시간대: " + appliedRequest.source_timezone;
   appliedReferenceTime.hidden = false;
   updateReferenceFormState();
+  notifyConfirmation();
 }
 
 function markReferenceTimeDirty() {
   if (appliedRequest !== null) {
     appliedRequestDirty = true;
   }
+  if (!formReadOnly) {
+    invalidateCandidates("기준 시각이 변경되어 후보를 다시 생성해야 합니다.");
+  }
   updateReferenceFormState();
+  notifyConfirmation();
 }
 
 referenceFrameApplyButton.addEventListener("click", applyReferenceTime);
@@ -115,9 +136,15 @@ const referenceFrameForm = Object.freeze({
     generationActive = active;
     updateReferenceFormState();
   },
+  setReadOnly(value) {
+    formReadOnly = value === true;
+    updateReferenceFormState();
+  },
   refresh() {
     updateReferenceFormState();
+    notifyConfirmation();
   },
 });
 
+window.vigiVisionReferenceFrameForm = referenceFrameForm;
 updateReferenceFormState();

@@ -129,13 +129,13 @@ trustworthy incremental progress contract.
   pixel minimum. The overlay is recalculated from canonical source pixels after
   image load and responsive resize.
 - **Handoff:** `getPhase6Snapshot()` returns an immutable candidate-bound
-  source-space snapshot only while a valid ROI is selected; it is not currently
-  stored or sent to an API. The Phase 6-2A backend contract validates and
-  publishes that reviewed state as an immutable investigation
-  package; see [Investigation Confirmation and Durable Persistence](docs/design/investigation-confirmation.md).
-- **Persistence:** the one ROI remains transient frontend state. Confirmation
-  UI integration remains deferred to Phase 6-3; the Phase 6-2B HTTP boundary
-  is implemented.
+  source-pixel snapshot with `coordinateSpace` and allowed `provenance` while a
+  valid ROI is selected. Phase 6-2C sends those fields through the strict
+  confirmation API; the server remains authoritative for the durable package.
+- **Persistence:** the draft remains transient until confirmation. The inline
+  Korean review/POST/GET flow locks the confirmed controls and displays only
+  the safe relative artifact destination; see [Investigation Confirmation and
+  Durable Persistence](docs/design/investigation-confirmation.md).
 
 #### Assisted-selection integration
 
@@ -152,8 +152,9 @@ previous ROI stays visible while pending, abort and generation/resource checks
 reject stale work, and safe unavailable/failure categories preserve manual
 editing. Assisted selections hide tiny resize handles; reset or manual editing
 clears the transient mask. The single canonical ROI remains transient and
-`getPhase6Snapshot()` remains the only handoff; no persistence or Phase 6
-behavior is added. The source image is reserved for visual evidence; general
+`getPhase6Snapshot()` remains the only handoff from ROI interaction; Phase 6-2C
+adapts that snapshot into the strict confirmation request. Assisted selection
+itself remains transient and does not add persistence. The source image is reserved for visual evidence; general
 ROI workflow status is rendered in the single polite live region below the
 image, with explicit non-color state markers and guidance before the controls.
 Reset clears visual and textual selection state, while manual mouse, touch, pen,
@@ -181,8 +182,8 @@ or glass effects are used.
   selected source timezone; the applied summary makes the 24-hour value
   authoritative for the UI.
 - ROI keyboard movement/resizing and reset are implemented in Phase 5-2; the
-  confirmation/persistence accessibility contract is approved in Phase 6-1 but
-  its UI and object-comparison semantics remain later-phase work.
+  confirmation/persistence accessibility contract is implemented in Phase 6-2C;
+  object-comparison semantics remain later-phase work.
 - Tap-assisted selection and the Phase 5-3C transient silhouette preview are
   implemented but remain acceptance-gated for physical desktop/mobile use; the
   disposable harness, production backend, canvas preview, and explicit
