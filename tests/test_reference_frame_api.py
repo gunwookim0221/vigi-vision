@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from vigi_vision import reference_frame_api
+from vigi_vision.channel_selection import Channel
 from vigi_vision.recording import RecordingSegment, RecordingWindow
 from vigi_vision.reference_frame_api import (
     ReferenceFrameApiStartupError,
@@ -49,6 +50,73 @@ class FakeResources:
         if self.failure is not None:
             raise self.failure
         return self.image
+
+
+@dataclass(frozen=True, slots=True)
+class FakeChannelInventory:
+    inventory: tuple[Channel, ...]
+    failure: Exception | None = None
+
+    def channels(self) -> tuple[Channel, ...]:
+        if self.failure is not None:
+            raise self.failure
+        return self.inventory
+
+
+def test_channel_list_returns_online_channels_and_shared_default(tmp_path: Path) -> None:
+    result = _result()
+    image_path = tmp_path / "frame.jpg"
+    _ = image_path.write_bytes(b"\xff\xd8frame\xff\xd9")
+    inventory = FakeChannelInventory(
+        (
+            Channel(7, "Dining", "Dining", online=True),
+            Channel(2, "Entrance", "Entrance", online=False),
+            Channel(3, "Counter", "Counter", online=True),
+            Channel(0, "Invalid", "Invalid", online=True),
+            Channel(1, "Main", "Main", online=True),
+        )
+    )
+    app = create_reference_frame_app(
+        FakeService(result),
+        FakeResources(ReferenceFrameImageResource(result.resource_id, image_path)),
+        channel_inventory=inventory,
+    )
+
+    response = TestClient(app).get("/api/v1/reference-frames/channels")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "channels": [
+            {"channel_id": 7, "name": "Dining", "alias": "Dining", "online": True},
+            {"channel_id": 3, "name": "Counter", "alias": "Counter", "online": True},
+            {"channel_id": 1, "name": "Main", "alias": "Main", "online": True},
+        ],
+        "default_channel_id": 1,
+    }
+
+
+def test_channel_list_failure_is_safe(tmp_path: Path) -> None:
+    marker = "rtsp://user:password@nvr.example/private"
+    result = _result()
+    image_path = tmp_path / "frame.jpg"
+    _ = image_path.write_bytes(b"\xff\xd8frame\xff\xd9")
+    app = create_reference_frame_app(
+        FakeService(result),
+        FakeResources(ReferenceFrameImageResource(result.resource_id, image_path)),
+        channel_inventory=FakeChannelInventory((), RuntimeError(marker)),
+    )
+
+    response = TestClient(app).get("/api/v1/reference-frames/channels")
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "error": {
+            "code": "internal_error",
+            "message": "The reference-frame operation could not be completed safely.",
+            "details": None,
+        }
+    }
+    assert marker not in response.text
 
 
 def test_create_reference_frame_returns_created_response(tmp_path: Path) -> None:

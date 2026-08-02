@@ -15,6 +15,13 @@ if TYPE_CHECKING:
     from fastapi import Request
     from pydantic_core import ErrorDetails
 
+from vigi_vision.assisted_roi_service import (
+    RoiSuggestionInferenceError,
+    RoiSuggestionInvalidPointError,
+    RoiSuggestionNoValidSuggestionError,
+    RoiSuggestionTimeoutError,
+    RoiSuggestionUnavailableError,
+)
 from vigi_vision.ffmpeg import FfmpegUnavailableError
 from vigi_vision.nvr import NvrRequestError
 from vigi_vision.recording import RecordingDataError, RecordingUnavailableError
@@ -137,6 +144,46 @@ _DOMAIN_ERROR_MAPPINGS: Final[tuple[_DomainErrorMapping, ...]] = (
             _UNPROCESSABLE_CONTENT,
             "no_acceptable_frame",
             "No acceptable decoded frame is available for the requested recording time.",
+        ),
+    ),
+    _DomainErrorMapping(
+        (RoiSuggestionInvalidPointError,),
+        ReferenceFrameApiError(
+            _UNPROCESSABLE_CONTENT,
+            "invalid_point",
+            "The assisted ROI point is outside the reference-frame image.",
+        ),
+    ),
+    _DomainErrorMapping(
+        (RoiSuggestionUnavailableError,),
+        ReferenceFrameApiError(
+            503,
+            "suggestion_unavailable",
+            "Assisted ROI suggestions are unavailable.",
+        ),
+    ),
+    _DomainErrorMapping(
+        (RoiSuggestionNoValidSuggestionError,),
+        ReferenceFrameApiError(
+            _UNPROCESSABLE_CONTENT,
+            "no_valid_suggestion",
+            "No valid assisted ROI suggestion is available for this point.",
+        ),
+    ),
+    _DomainErrorMapping(
+        (RoiSuggestionTimeoutError,),
+        ReferenceFrameApiError(
+            504,
+            "suggestion_timeout",
+            "Assisted ROI inference timed out safely.",
+        ),
+    ),
+    _DomainErrorMapping(
+        (RoiSuggestionInferenceError,),
+        ReferenceFrameApiError(
+            500,
+            "suggestion_failure",
+            "Assisted ROI inference failed safely.",
         ),
     ),
     _DomainErrorMapping(

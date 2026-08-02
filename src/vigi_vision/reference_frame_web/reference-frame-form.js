@@ -98,6 +98,7 @@ referenceFrameTimeInput.addEventListener("input", markReferenceTimeDirty);
 referenceFrameTimeInput.addEventListener("change", markReferenceTimeDirty);
 referenceFrameTimezoneInput.addEventListener("change", markReferenceTimeDirty);
 referenceFrameChannelInput.addEventListener("input", updateReferenceFormState);
+referenceFrameChannelInput.addEventListener("change", updateReferenceFormState);
 
 const referenceFrameForm = Object.freeze({
   getRequestPayload() {
@@ -112,6 +113,9 @@ const referenceFrameForm = Object.freeze({
   },
   setGenerationActive(active) {
     generationActive = active;
+    updateReferenceFormState();
+  },
+  refresh() {
     updateReferenceFormState();
   },
 });

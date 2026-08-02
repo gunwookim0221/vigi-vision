@@ -22,6 +22,11 @@ _OPTIONAL_ENVIRONMENT_KEYS: Final = frozenset(
         "FFMPEG_PATH",
         "VIGI_REPLAY_TIMEOUT_DIAGNOSTIC_DIRECTORY",
         "VIGI_REPLAY_PROGRESS_DIAGNOSTICS",
+        "VIGI_ASSISTED_ROI_ENABLED",
+        "VIGI_ASSISTED_ROI_CHECKPOINT",
+        "VIGI_ASSISTED_ROI_CHECKPOINT_SHA256",
+        "VIGI_ASSISTED_ROI_DEVICE",
+        "VIGI_ASSISTED_ROI_TIMEOUT_SECONDS",
         "VIGI_CHANNEL_ID",
         "VIGI_HOST",
         "VIGI_IPC_HOST",
@@ -210,6 +215,32 @@ class CaptureSettings(BaseSettings):
                 raise SourceConfigurationError(_NVR_SOURCE)
 
 
+class AssistedRoiSettings(BaseSettings):
+    """Validate optional operator-controlled assisted-ROI configuration."""
+
+    model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(extra="ignore")
+
+    enabled: bool = Field(default=False, validation_alias="VIGI_ASSISTED_ROI_ENABLED")
+    checkpoint_path: Path | None = Field(
+        default=None,
+        validation_alias="VIGI_ASSISTED_ROI_CHECKPOINT",
+    )
+    expected_sha256: str | None = Field(
+        default=None,
+        validation_alias="VIGI_ASSISTED_ROI_CHECKPOINT_SHA256",
+    )
+    device: Literal["cpu", "cuda", "auto"] = Field(
+        default="cpu",
+        validation_alias="VIGI_ASSISTED_ROI_DEVICE",
+    )
+    inference_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        le=300.0,
+        validation_alias="VIGI_ASSISTED_ROI_TIMEOUT_SECONDS",
+    )
+
+
 def load_settings(env_file: Path | None = None) -> Settings:
     """Load settings from process variables and an optional local dotenv file."""
     dotenv_file = Path(".env") if env_file is None else env_file
@@ -253,6 +284,21 @@ def load_capture_settings(env_file: Path | None = None) -> CaptureSettings:
         if value != "" or key not in _OPTIONAL_ENVIRONMENT_KEYS
     }
     return CaptureSettings.model_validate(normalized_values)
+
+
+def load_assisted_roi_settings(env_file: Path | None = None) -> AssistedRoiSettings:
+    """Load assisted-ROI settings without source or OpenAI credentials."""
+    dotenv_file = Path(".env") if env_file is None else env_file
+    file_values = {
+        key: value for key, value in dotenv_values(dotenv_file).items() if value is not None
+    }
+    values = {**file_values, **environ}
+    normalized_values = {
+        key: value
+        for key, value in values.items()
+        if value != "" or key not in _OPTIONAL_ENVIRONMENT_KEYS
+    }
+    return AssistedRoiSettings.model_validate(normalized_values)
 
 
 def _require_nvr_values(settings: Settings) -> None:

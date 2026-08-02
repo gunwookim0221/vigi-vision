@@ -33,6 +33,8 @@ decoded image is an exact source-time capture.
 | Border | `--border-default` | `#d9dde5` | `#393d47` | Controls and rows |
 | Accent | `--accent-primary` | `#315bb6` | `#8da9ff` | Action and focus |
 | Accent hover | `--accent-hover` | `#274b99` | `#b6c6ff` | Action hover |
+| ROI mask fill | `--roi-mask-fill` | `rgb(49 91 182 / 38%)` | `rgb(141 169 255 / 42%)` | Transient assisted silhouette |
+| ROI mask outline | `--roi-mask-outline` | `#f0bc68` | `#f0bc68` | Contrasting assisted selection edge |
 | Success | `--status-success` | `#176b45` | `#72d1a6` | Succeeded candidate state |
 | Warning | `--status-warning` | `#9a5d00` | `#f0bc68` | Partial result state |
 | Error | `--status-error` | `#a92d3b` | `#ff9fab` | Request and candidate failure state |
@@ -132,6 +134,30 @@ trustworthy incremental progress contract.
 - **Persistence:** the one ROI remains transient frontend state. Persistence
   and confirmation remain deferred to Phase 6.
 
+#### Assisted-selection integration
+
+Phase 5-3A defines the optional **Tap to suggest ROI** interaction. Phase
+5-3B-1 provides a disposable offline validation harness, Phase 5-3B-2 provides
+the production backend `POST
+/api/v1/reference-frames/{resource_id}/roi-suggestions`, and Phase 5-3B-3
+connects the explicit button/tap flow to that endpoint. One source-space point
+is sent only from the selected candidate image; a current, dimension-matched,
+bounded response enters the existing committed ROI state and paints an exact
+bounded source-row mask preview on a responsive canvas. The mask is primary
+selection evidence and the rectangle is secondary compatibility state. The
+previous ROI stays visible while pending, abort and generation/resource checks
+reject stale work, and safe unavailable/failure categories preserve manual
+editing. Assisted selections hide tiny resize handles; reset or manual editing
+clears the transient mask. The single canonical ROI remains transient and
+`getPhase6Snapshot()` remains the only handoff; no persistence or Phase 6
+behavior is added. The source image is reserved for visual evidence; general
+ROI workflow status is rendered in the single polite live region below the
+image, with explicit non-color state markers and guidance before the controls.
+Reset clears visual and textual selection state, while manual mouse, touch, pen,
+and keyboard fallback remains authoritative. Localization is deferred to
+Phase 5-4C. See [the routed assisted-ROI design](docs/design/assisted-roi-selection.md)
+for the full API, lifecycle, deployment, accessibility, and security boundary.
+
 ## 6. Motion & Interaction
 
 Only button hover/active, opacity, and the busy spinner communicate affordance
@@ -154,5 +180,12 @@ or glass effects are used.
 - ROI keyboard movement/resizing and reset are implemented in Phase 5-2; full
   confirmation, persistence, and object-comparison accessibility semantics
   remain later-phase work.
-- Accepted debt: the shell has fixture-backed desktop/mobile browser evidence,
-  but no physical touch-device or real-NVR validation has occurred.
+- Tap-assisted selection and the Phase 5-3C transient silhouette preview are
+  implemented but remain acceptance-gated for physical desktop/mobile use; the
+  disposable harness, production backend, canvas preview, and explicit
+  frontend control share one canonical source-space ROI.
+- Accepted debt: the shell has fixture-backed desktop/mobile browser evidence;
+  the disposable Phase 5-3B-1 harness has favorable initial real-CCTV evidence,
+  the production assisted-ROI backend and frontend integration now exist, but
+  physical touch-device validation and operator deployment smoke validation have
+  not occurred.

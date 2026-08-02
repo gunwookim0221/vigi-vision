@@ -6,6 +6,9 @@ const formScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "ref
 const selectionScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-selection.js"), "utf8");
 const roiGeometryScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-roi-geometry.js"), "utf8");
 const roiScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-roi.js"), "utf8");
+const assistedRequestScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-roi-assisted-request.js"), "utf8");
+const assistedRoiScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-roi-assisted.js"), "utf8");
+const assistedPointerScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-roi-assisted-pointer.js"), "utf8");
 const roiInteractionScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-roi-interaction.js"), "utf8");
 const script = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-ui.js"), "utf8");
 
@@ -29,6 +32,9 @@ class FakeElement {
     this.value = "";
     this.disabled = false;
     this.focused = false;
+    this.width = 0;
+    this.height = 0;
+    this.canvasOperations = [];
   }
 
   addEventListener(name, handler, options = {}) {
@@ -72,6 +78,17 @@ class FakeElement {
     return this.rect;
   }
 
+  getContext(name) {
+    if (this.tagName !== "canvas" || name !== "2d") {
+      return null;
+    }
+    return {
+      clearRect: (...args) => this.canvasOperations.push(["clearRect", ...args]),
+      fillRect: (...args) => this.canvasOperations.push(["fillRect", ...args]),
+      fillStyle: "",
+    };
+  }
+
   append(...children) {
     this.children.push(...children);
   }
@@ -86,6 +103,16 @@ class FakeElement {
 
   removeAttribute(name) {
     delete this.attributes[name];
+  }
+}
+
+class FakeAbortController {
+  constructor() {
+    this.signal = { aborted: false };
+  }
+
+  abort() {
+    this.signal.aborted = true;
   }
 }
 
@@ -134,12 +161,22 @@ function deferred() {
   return { promise, resolve };
 }
 
-function createHarness(fetchImplementation) {
+function createHarness(
+  fetchImplementation,
+  channelResponse = {
+    ok: true,
+    json: async () => ({
+      channels: [{ channel_id: 1, name: "Counter", alias: "Counter", online: true }],
+      default_channel_id: 1,
+    }),
+  },
+) {
   const form = new FakeElement("form");
   form.reportValidity = () => true;
   const elements = new Map([
     ["#candidate-form", form],
-    ["#channel-id", new FakeElement("input")],
+    ["#channel-id", new FakeElement("select")],
+    ["#channel-status", new FakeElement("p")],
     ["#reference-time", new FakeElement("input")],
     ["#source-timezone", new FakeElement("select")],
     ["#apply-reference-time", new FakeElement("button")],
@@ -161,6 +198,10 @@ function createHarness(fetchImplementation) {
     ["#selected-preview-warnings", new FakeElement("div")],
     ["#roi-workspace", new FakeElement("div")],
     ["#roi-stage", new FakeElement("div")],
+    ["#roi-assisted-button", new FakeElement("button")],
+    ["#roi-assisted-guidance", new FakeElement("p")],
+    ["#roi-assisted-marker", new FakeElement("div")],
+    ["#roi-assisted-mask", new FakeElement("canvas")],
     ["#roi-committed-overlay", new FakeElement("div")],
     ["#roi-draft-overlay", new FakeElement("div")],
     ["#roi-reset", new FakeElement("button")],
@@ -179,14 +220,27 @@ function createHarness(fetchImplementation) {
   ]);
   elements.get("#channel-id").value = "1";
   elements.get("#source-timezone").value = "Asia/Seoul";
+  const kstOption = new FakeElement("option");
+  kstOption.value = "Asia/Seoul";
+  kstOption.textContent = "Asia/Seoul (KST, UTC+09:00)";
+  const utcOption = new FakeElement("option");
+  utcOption.value = "UTC";
+  utcOption.textContent = "UTC (UTC+00:00)";
+  elements.get("#source-timezone").replaceChildren(kstOption, utcOption);
   elements.get("#apply-reference-time").disabled = true;
   elements.get("#generate-button").disabled = true;
   elements.get("#applied-reference-time").hidden = true;
   elements.get("#generation-progress").hidden = true;
   elements.get("#generation-spinner").hidden = true;
   elements.get("#roi-stage").hidden = true;
+  elements.get("#roi-assisted-button").disabled = true;
+  elements.get("#roi-assisted-button").setAttribute("aria-pressed", "false");
+  elements.get("#roi-assisted-marker").hidden = true;
+  elements.get("#roi-assisted-mask").hidden = true;
   elements.get("#roi-summary").hidden = true;
   elements.get("#roi-status").textContent = "Select a candidate first.";
+  elements.get("#roi-status").dataset.state = "disabled";
+  elements.get("#roi-status").setAttribute("aria-busy", "false");
   elements.get("#selected-preview-image").naturalWidth = 2560;
   elements.get("#selected-preview-image").naturalHeight = 1440;
   const windowListeners = {};
@@ -197,20 +251,33 @@ function createHarness(fetchImplementation) {
     },
     window: {
       addEventListener(name, handler) {
-        windowListeners[name] = handler;
+        if (windowListeners[name] === undefined) {
+          const handlers = [];
+          const listener = (...args) => handlers.forEach((entry) => entry(...args));
+          listener.handlers = handlers;
+          windowListeners[name] = listener;
+        }
+        windowListeners[name].handlers.push(handler);
       },
     },
-    fetch: fetchImplementation,
+    AbortController: FakeAbortController,
+    fetch: (url, options) => url === "/api/v1/reference-frames/channels"
+      ? (typeof channelResponse === "function" ? channelResponse(url, options) : Promise.resolve(channelResponse))
+      : fetchImplementation(url, options),
   });
   vm.runInContext(formScript, context);
   vm.runInContext(selectionScript, context);
   vm.runInContext(roiGeometryScript, context);
   vm.runInContext(roiScript, context);
+  vm.runInContext(assistedRequestScript, context);
+  vm.runInContext(assistedRoiScript, context);
+  vm.runInContext(assistedPointerScript, context);
   vm.runInContext(roiInteractionScript, context);
   vm.runInContext(script, context);
   return {
     form,
     channel: elements.get("#channel-id"),
+    channelStatus: elements.get("#channel-status"),
     referenceTime: elements.get("#reference-time"),
     timezone: elements.get("#source-timezone"),
     applyButton: elements.get("#apply-reference-time"),
@@ -232,6 +299,10 @@ function createHarness(fetchImplementation) {
     previewWarnings: elements.get("#selected-preview-warnings"),
     roiWorkspace: elements.get("#roi-workspace"),
     roiStage: elements.get("#roi-stage"),
+    assistedButton: elements.get("#roi-assisted-button"),
+    assistedGuidance: elements.get("#roi-assisted-guidance"),
+    assistedMarker: elements.get("#roi-assisted-marker"),
+    assistedMask: elements.get("#roi-assisted-mask"),
     committedOverlay: elements.get("#roi-committed-overlay"),
     draftOverlay: elements.get("#roi-draft-overlay"),
     resetButton: elements.get("#roi-reset"),

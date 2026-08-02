@@ -29,6 +29,9 @@ def test_web_ui_serves_an_accessible_candidate_form() -> None:
     assert response.headers["content-type"].startswith("text/html")
     assert 'for="channel-id"' in response.text
     assert 'id="channel-id"' in response.text
+    assert '<select id="channel-id"' in response.text
+    assert 'id="channel-status"' in response.text
+    assert "Loading channels" in response.text
     assert 'for="reference-time"' in response.text
     assert 'id="reference-time"' in response.text
     assert 'id="source-timezone"' in response.text
@@ -41,10 +44,21 @@ def test_web_ui_serves_an_accessible_candidate_form() -> None:
     assert 'type="radio"' not in response.text
     assert 'id="selection-status"' in response.text
     assert 'id="selected-preview-image"' in response.text
+    assert 'id="roi-assisted-mask"' in response.text
     assert 'id="roi-workspace"' in response.text
     assert 'id="roi-stage"' in response.text
     assert 'id="roi-instructions"' in response.text
     assert 'id="roi-edit-instructions"' in response.text
+    assert 'id="roi-assisted-button"' in response.text
+    assert "Tap to suggest ROI" in response.text
+    assert 'id="roi-assisted-guidance"' in response.text
+    assert 'id="roi-status"' in response.text
+    assert 'data-state="disabled"' in response.text
+    assert 'aria-busy="false"' in response.text
+    assert response.text.count('id="roi-status"') == 1
+    assert 'data-label="Committed ROI"' not in response.text
+    assert 'data-label="Draft ROI"' not in response.text
+    assert 'id="roi-assisted-marker"' in response.text
     assert 'id="roi-reset"' in response.text
     assert 'data-handle="nw"' in response.text
     assert 'data-handle="se"' in response.text
@@ -77,6 +91,8 @@ def test_web_ui_serves_its_static_assets() -> None:
     assert "touch-action: none" in roi_stylesheet.text
     assert "roi-overlay-committed" in roi_stylesheet.text
     assert "roi-overlay-draft" in roi_stylesheet.text
+    assert ".roi-assisted-mask" in roi_stylesheet.text
+    assert 'data-assisted="true"' in roi_stylesheet.text
     assert ".roi-handle" in roi_stylesheet.text
     assert "--roi-handle-hit-size" in roi_stylesheet.text
     assert ".roi-handle:hover:not(:disabled)" in roi_stylesheet.text
@@ -84,6 +100,9 @@ def test_web_ui_serves_its_static_assets() -> None:
     assert "justify-content: center" in roi_stylesheet.text
     assert "transform: translate(-50%, -50%)" in roi_stylesheet.text
     assert ".roi-stage:focus-visible" in roi_stylesheet.text
+    assert '.roi-status[data-state="success"]' in roi_stylesheet.text
+    assert '.roi-status[data-state="error"]' in roi_stylesheet.text
+    assert "content: attr(data-label)" not in roi_stylesheet.text
 
 
 def test_web_ui_serves_its_static_scripts() -> None:
@@ -93,6 +112,9 @@ def test_web_ui_serves_its_static_scripts() -> None:
     selection_script = client.get("/static/reference-frame-selection.js")
     roi_geometry_script = client.get("/static/reference-frame-roi-geometry.js")
     roi_script = client.get("/static/reference-frame-roi.js")
+    assisted_request_script = client.get("/static/reference-frame-roi-assisted-request.js")
+    assisted_script = client.get("/static/reference-frame-roi-assisted.js")
+    assisted_pointer_script = client.get("/static/reference-frame-roi-assisted-pointer.js")
     roi_interaction_script = client.get("/static/reference-frame-roi-interaction.js")
     script = client.get("/static/reference-frame-ui.js")
 
@@ -109,6 +131,18 @@ def test_web_ui_serves_its_static_scripts() -> None:
     assert "naturalWidth" in roi_script.text
     assert "sourceRoiToDisplay" in roi_script.text
     assert "getPhase6Snapshot" in roi_script.text
+    assert assisted_request_script.status_code == 200
+    assert "roi-suggestions" in assisted_request_script.text
+    assert "source_width" in assisted_request_script.text
+    assert "mask_preview" in assisted_request_script.text
+    assert assisted_script.status_code == 200
+    assert "Tap to suggest ROI" in assisted_script.text
+    assert "AbortController" in assisted_script.text
+    assert "renderMaskPreview" in assisted_script.text
+    assert "roi-assisted-mask" in assisted_script.text
+    assert assisted_pointer_script.status_code == 200
+    assert "pointercancel" in assisted_pointer_script.text
+    assert "pointToSource" in assisted_pointer_script.text
     assert roi_interaction_script.status_code == 200
     assert "pointercancel" in roi_interaction_script.text
     assert "lostpointercapture" in roi_interaction_script.text
@@ -139,6 +173,15 @@ def test_web_ui_script_handles_all_required_safe_result_states() -> None:
     assert "failure.message" in script.text
     assert "No candidate positions were returned." in script.text
     assert "requestSequence" in script.text
+
+
+def test_web_ui_script_loads_channel_inventory_safely() -> None:
+    script = _client().get("/static/reference-frame-ui.js")
+
+    assert script.status_code == 200
+    assert 'fetch("/api/v1/reference-frames/channels")' in script.text
+    assert "default_channel_id" in script.text
+    assert "vigiVisionReferenceFrameChannels" in script.text
 
 
 def test_web_ui_script_renders_server_values_as_text_not_html() -> None:

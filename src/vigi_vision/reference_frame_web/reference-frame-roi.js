@@ -18,10 +18,16 @@ let activePointerId = null;
 let activeEdit = null;
 let interactionOriginRoi = null;
 let interactionOriginPoint = null;
+let assistedPreviewActive = false;
 let boundImage = null;
 let boundImageHandlers = null;
-function setStatus(message) {
+const STATUS_STATES = new Set(["disabled", "ready", "active", "loading", "success", "warning", "error", "unavailable"]);
+let statusState = "disabled";
+function setStatus(message, state = "ready") {
   roiStatus.textContent = message;
+  statusState = STATUS_STATES.has(state) ? state : "ready";
+  roiStatus.dataset.state = statusState;
+  roiStatus.setAttribute("aria-busy", String(statusState === "loading"));
 }
 function releasePointerCapture(pointerId) {
   if (typeof roiStage.releasePointerCapture !== "function") {
@@ -66,7 +72,9 @@ function renderSummary() {
   Object.entries({ x: committedRoi.x, y: committedRoi.y, width: committedRoi.width, height: committedRoi.height, sourceWidth: committedRoi.source_width, sourceHeight: committedRoi.source_height }).forEach(([key, value]) => { summaryFields[key].textContent = String(value); });
 }
 function renderHandles(roi, displayRect) {
-  const displayRoi = roi === null ? null : roiGeometry.sourceRoiToDisplay(roi, displayRect);
+  const displayRoi = assistedPreviewActive || roi === null
+    ? null
+    : roiGeometry.sourceRoiToDisplay(roi, displayRect);
   const positions = displayRoi === null ? {} : Object.fromEntries([
     ["nw", [displayRoi.left, displayRoi.top]], ["n", [displayRoi.left + displayRoi.width / 2, displayRoi.top]], ["ne", [displayRoi.left + displayRoi.width, displayRoi.top]], ["e", [displayRoi.left + displayRoi.width, displayRoi.top + displayRoi.height / 2]],
     ["se", [displayRoi.left + displayRoi.width, displayRoi.top + displayRoi.height]], ["s", [displayRoi.left + displayRoi.width / 2, displayRoi.top + displayRoi.height]], ["sw", [displayRoi.left, displayRoi.top + displayRoi.height]], ["w", [displayRoi.left, displayRoi.top + displayRoi.height / 2]],
@@ -74,6 +82,7 @@ function renderHandles(roi, displayRect) {
   Object.entries(handleElements).forEach(([handle, element]) => {
     const position = positions[handle];
     element.hidden = position === undefined;
+    element.setAttribute("aria-hidden", String(position === undefined));
     if (position !== undefined) Object.assign(element.style, { left: `${position[0]}px`, top: `${position[1]}px` });
   });
 }
@@ -105,17 +114,17 @@ function activateImage(image) {
   sourceSize = readSourceSize(image);
   if (sourceSize === null) {
     roiStage.hidden = true;
-    setStatus("Selected image dimensions are unavailable.");
+    setStatus("Selected image dimensions are unavailable.", "unavailable");
     render();
     return;
   }
   setStatus(committedRoi === null
     ? "Ready. Drag on the image to draw one ROI."
-    : "ROI committed. Drag again to replace it.");
+    : "ROI committed. Drag again to replace it.", committedRoi === null ? "ready" : "success");
   render();
 }
 function setSelectedCandidate(candidate, image) {
-  reset("Loading selected candidate image.");
+  reset("Loading selected candidate image.", "loading");
   roiSelectedCandidate = candidate;
   selectedImage = image;
   boundImage = image;
@@ -123,7 +132,7 @@ function setSelectedCandidate(candidate, image) {
     load: () => activateImage(image),
     error: () => {
       if (image === selectedImage) {
-        reset("Selected candidate image is unavailable.");
+        reset("Selected candidate image is unavailable.", "unavailable");
       }
     },
   };
@@ -134,18 +143,20 @@ function setSelectedCandidate(candidate, image) {
   }
   render();
 }
-function reset(message = "Select a candidate first.") {
+function reset(message = "Select a candidate first.", state = "disabled") {
   clearInteractionState();
   detachImage();
   roiSelectedCandidate = selectedImage = sourceSize = committedRoi = null;
+  assistedPreviewActive = false;
   render();
-  setStatus(message);
+  setStatus(message, state);
 }
-function clearRoi(message = "ROI reset. Draw a new region when ready.") {
+function clearRoi(message = "ROI reset. Draw a new region when ready.", state = "ready") {
   clearInteractionState();
   committedRoi = null;
+  assistedPreviewActive = false;
   render();
-  setStatus(message);
+  setStatus(message, state);
 }
 function beginInteraction(pointerId, mode, handle, originPoint) {
   activePointerId = pointerId;
@@ -159,24 +170,29 @@ function setDraftRoi(nextRoi) {
   draftRoi = copyRoi(nextRoi);
   render();
 }
-function commitInteraction(message) {
+function commitInteraction(message, state = "success") {
   const nextRoi = copyRoi(draftRoi);
   clearInteractionState();
   if (nextRoi !== null && nextRoi.width >= MINIMUM_ROI_WIDTH && nextRoi.height >= MINIMUM_ROI_HEIGHT) {
     committedRoi = nextRoi;
-    setStatus(message);
+    setStatus(message, state);
   }
   render();
 }
-function cancelInteraction(message) {
+function cancelInteraction(message, state = "warning") {
   clearInteractionState();
-  setStatus(message);
+  setStatus(message, state);
   render();
 }
-function replaceCommittedRoi(nextRoi, message) {
+function replaceCommittedRoi(nextRoi, message, state = "success") {
   clearInteractionState();
   committedRoi = copyRoi(nextRoi);
-  setStatus(message);
+  setStatus(message, state);
+  render();
+}
+function setAssistedPreviewActive(active) {
+  assistedPreviewActive = active;
+  roiStage.dataset.assisted = String(active);
   render();
 }
 function deepFreeze(value) {
@@ -204,11 +220,11 @@ if (typeof window.ResizeObserver === "function") {
 
 const referenceFrameRoi = Object.freeze({
   getState() {
-    return { activePointerId, activeEdit: activeEdit === null ? null : { ...activeEdit }, committedRoi: copyRoi(committedRoi), draftRoi: copyRoi(draftRoi), interactionOriginPoint: copyPoint(interactionOriginPoint), interactionOriginRoi: copyRoi(interactionOriginRoi), selectedCandidate: roiSelectedCandidate, sourceSize: sourceSize === null ? null : { ...sourceSize } };
+    return { activePointerId, activeEdit: activeEdit === null ? null : { ...activeEdit }, assistedPreviewActive, committedRoi: copyRoi(committedRoi), draftRoi: copyRoi(draftRoi), interactionOriginPoint: copyPoint(interactionOriginPoint), interactionOriginRoi: copyRoi(interactionOriginRoi), selectedCandidate: roiSelectedCandidate, sourceSize: sourceSize === null ? null : { ...sourceSize }, statusState };
   },
   moveRoi: roiGeometry.moveRoi, normalizeRoi: roiGeometry.normalizeRoi, pointToSource: roiGeometry.pointToSource,
   pointInRoi: roiGeometry.pointInRoi, beginInteraction, cancelInteraction, clearRoi, commitInteraction, getPhase6Snapshot,
-  reset, replaceCommittedRoi, setDraftRoi, setStatus, setSelectedCandidate, resizeHandleAt: roiGeometry.resizeHandleAt,
+  reset, replaceCommittedRoi, setAssistedPreviewActive, setDraftRoi, setStatus, setSelectedCandidate, resizeHandleAt: roiGeometry.resizeHandleAt,
   resizeRoi: roiGeometry.resizeRoi, sourceRoiToDisplay: roiGeometry.sourceRoiToDisplay,
 });
 

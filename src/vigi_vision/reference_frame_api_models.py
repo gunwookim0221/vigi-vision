@@ -50,6 +50,26 @@ class ReferenceFrameCreateBody(BaseModel):
         return self
 
 
+class ReferenceFrameChannelResponse(BaseModel):
+    """One usable online channel exposed to the reference-frame page."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True)
+
+    channel_id: int = Field(gt=0)
+    name: str
+    alias: str
+    online: Literal[True] = True
+
+
+class ReferenceFrameChannelListResponse(BaseModel):
+    """Usable channels and the deterministic default selected by the gateway."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True)
+
+    channels: tuple[ReferenceFrameChannelResponse, ...]
+    default_channel_id: int | None = Field(default=None, gt=0)
+
+
 class ReferenceFrameSegmentResponse(BaseModel):
     """Credential-free facts identifying the recording segment that supplied a frame."""
 
