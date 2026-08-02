@@ -1,5 +1,6 @@
 (function () {
 const assistedButton = document.querySelector("#roi-assisted-button");
+const assistedSpinner = document.querySelector("#roi-assisted-spinner");
 const assistedGuidance = document.querySelector("#roi-assisted-guidance");
 const assistedMarker = document.querySelector("#roi-assisted-marker");
 const assistedMask = document.querySelector("#roi-assisted-mask");
@@ -31,6 +32,11 @@ function selectedResourceId() {
 function setStatus(message, state = "ready") { roi.setStatus(message, state); }
 
 function setGuidance(message) { assistedGuidance.textContent = message; }
+
+function setRequestBusy(active) {
+  assistedSpinner.hidden = !active;
+  assistedSpinner.setAttribute("aria-hidden", String(!active));
+}
 
 function hideMarker() {
   assistedMarker.hidden = true;
@@ -191,9 +197,9 @@ function updateControl() {
     && currentSourceSize() !== null
     && !capabilityUnavailable;
   assistedButton.disabled = !canSuggest;
-  assistedButton.textContent = mode === "inactive" ? "Tap to suggest ROI" : "Cancel assisted selection";
+  assistedButton.textContent = mode === "inactive" ? "ROI 자동 제안" : "ROI 자동 제안 취소";
   assistedButton.setAttribute("aria-pressed", String(mode !== "inactive"));
-  assistedButton.setAttribute("aria-label", mode === "inactive" ? "Tap to suggest ROI" : "Cancel assisted selection");
+  assistedButton.setAttribute("aria-label", mode === "inactive" ? "ROI 자동 제안" : "ROI 자동 제안 취소");
 }
 
 function isCurrentRequest(requestGeneration, resourceId, image) {
@@ -205,15 +211,16 @@ function isCurrentRequest(requestGeneration, resourceId, image) {
 
 function finishCurrentRequest() {
   pending = null;
+  setRequestBusy(false);
   hideMarker();
   updateControl();
 }
 
 function completeSuccess(nextRoi) {
-  roi.replaceCommittedRoi(nextRoi.roi, "Suggested ROI received. Verify and adjust it.");
+  roi.replaceCommittedRoi(nextRoi.roi, "ROI 자동 제안을 받았습니다. 확인하고 수동 조정하세요.");
   setMaskPreview(nextRoi.maskPreview);
   mode = "inactive";
-  setGuidance("Suggested ROI received. Verify it, adjust it manually, or request another suggestion.");
+  setGuidance("ROI 자동 제안을 받았습니다. 확인하거나 수동 조정하고, 다른 제안을 요청할 수 있습니다.");
   finishCurrentRequest();
 }
 
@@ -227,7 +234,7 @@ function handleRequestError(code) {
 
 function handleRequestFailure(kind) {
   mode = "inactive";
-  const message = kind === "cancelled" ? "Suggestion cancelled. The previous ROI remains." : ERROR_MESSAGES.suggestion_failure;
+  const message = kind === "cancelled" ? "제안을 취소했습니다. 이전 ROI를 유지합니다." : ERROR_MESSAGES.suggestion_failure;
   setGuidance(message);
   setStatus(message, kind === "cancelled" ? "warning" : "error");
   finishCurrentRequest();
@@ -235,8 +242,8 @@ function handleRequestFailure(kind) {
 
 function handleInvalidResponse() {
   mode = "inactive";
-  setGuidance("The response could not be applied safely. Try tapping the object again or draw the ROI manually.");
-  setStatus("Suggested ROI could not be applied safely. Try tapping the object again or draw the ROI manually.", "error");
+  setGuidance("응답을 안전하게 적용할 수 없습니다. 대상을 다시 누르거나 ROI를 수동 조정하세요.");
+  setStatus("ROI 자동 제안 응답을 안전하게 적용할 수 없습니다. 대상을 다시 누르거나 ROI를 수동 조정하세요.", "error");
   finishCurrentRequest();
 }
 
@@ -253,8 +260,9 @@ function requestSuggestion(point, displayPoint) {
   pending = { controller, generation: requestGeneration };
   mode = "active";
   showMarker(displayPoint);
-  setGuidance("Requesting an automatic ROI suggestion. The previous ROI remains until a valid result arrives.");
-  setStatus("Requesting an automatic ROI suggestion…", "loading");
+  setRequestBusy(true);
+  setGuidance("ROI 자동 제안을 요청하는 중입니다. 유효한 결과가 올 때까지 이전 ROI를 유지합니다.");
+  setStatus("ROI 자동 제안을 요청하는 중입니다…", "loading");
   void requestBoundary.requestSuggestion({
     controller,
     image: selectedImage,
@@ -280,13 +288,14 @@ function toggleMode() {
     clearPointer(null);
     hideMarker();
     clearMaskPreview();
+    setRequestBusy(false);
     mode = "inactive";
-    setGuidance("Assisted selection cancelled. Draw the ROI manually or tap to try again.");
-    setStatus("Assisted selection cancelled. The previous ROI remains.", "warning");
+    setGuidance("ROI 자동 제안을 취소했습니다. ROI를 수동 조정하거나 다시 눌러 보세요.");
+    setStatus("ROI 자동 제안을 취소했습니다. 이전 ROI를 유지합니다.", "warning");
   } else {
     mode = "active";
-    setGuidance("Tap the object to request an automatic ROI suggestion.");
-    setStatus("Tap the object to request an automatic ROI suggestion.", "active");
+    setGuidance("대상을 눌러 ROI 자동 제안을 요청하세요.");
+    setStatus("대상을 눌러 ROI 자동 제안을 요청하세요.", "active");
   }
   updateControl();
 }
@@ -298,29 +307,31 @@ function setSelectedCandidate(candidate, image) {
   clearPointer(null);
   hideMarker();
   clearMaskPreview();
+  setRequestBusy(false);
   selectedCandidate = candidate;
   selectedImage = image;
   bindImage(image);
   mode = "inactive";
   capabilityUnavailable = false;
-  setGuidance("Select Tap to suggest ROI, then tap the object in the displayed image.");
-  setStatus("Select Tap to suggest ROI to request an automatic suggestion.");
+  setGuidance("ROI 자동 제안을 선택한 다음 표시된 이미지에서 대상을 누르세요.");
+  setStatus("ROI 자동 제안을 선택하면 자동 제안을 요청할 수 있습니다.");
   updateControl();
 }
 
-function reset(message = "Select a candidate first.") {
+function reset(message = "먼저 후보를 선택하세요.") {
   generation += 1;
   abortPending();
   window.vigiVisionReferenceFrameAssistedPointer?.reset();
   clearPointer(null);
   hideMarker();
   clearMaskPreview();
+  setRequestBusy(false);
   detachImage();
   selectedCandidate = null;
   selectedImage = null;
   mode = "inactive";
   capabilityUnavailable = false;
-  setGuidance("Select a usable candidate to enable automatic ROI suggestions.");
+  setGuidance("사용 가능한 후보를 선택하면 ROI 자동 제안을 사용할 수 있습니다.");
   updateControl();
   if (message) {
     setStatus(message);
@@ -334,8 +345,9 @@ function cancelPending() {
   clearPointer(null);
   hideMarker();
   clearMaskPreview();
+  setRequestBusy(false);
   mode = "inactive";
-  setGuidance("ROI reset. Draw a new region when ready, or tap to request a suggestion.");
+  setGuidance("ROI를 초기화했습니다. 준비되면 새 영역을 그리거나 눌러 제안을 요청하세요.");
   updateControl();
 }
 
@@ -353,7 +365,7 @@ function getPointerContext() {
 function armPointer(pointerId, displayPoint) {
   armedPointerId = pointerId;
   showMarker(displayPoint);
-  setStatus("Tap registered. Release to request an automatic ROI suggestion.", "active");
+  setStatus("탭을 등록했습니다. 손을 떼면 ROI 자동 제안을 요청합니다.", "active");
 }
 
 function clearPointer(pointerId) {
@@ -365,7 +377,7 @@ function clearPointer(pointerId) {
 
 function cancelTap() {
   hideMarker();
-  setStatus("Tap cancelled. Try again or draw the ROI manually.", "warning");
+  setStatus("탭을 취소했습니다. 다시 시도하거나 ROI를 수동 조정하세요.", "warning");
 }
 
 function requestTap(point, displayPoint) {

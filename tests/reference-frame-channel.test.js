@@ -63,7 +63,7 @@ test("empty channel discovery leaves no fabricated selection", async () => {
   assert.equal(harness.channel.value, "");
   assert.equal(harness.channel.disabled, true);
   assert.equal(harness.channel.children.length, 0);
-  assert.equal(harness.channelStatus.textContent, "No online channels are available.");
+  assert.equal(harness.channelStatus.textContent, "사용 가능한 온라인 채널이 없습니다.");
 });
 
 test("channel discovery failure is safe and does not expose response details", async () => {
@@ -77,8 +77,110 @@ test("channel discovery failure is safe and does not expose response details", a
 
   assert.equal(harness.channel.value, "");
   assert.equal(harness.channel.disabled, true);
-  assert.equal(harness.channelStatus.textContent, "Channel list could not be loaded. Try again later.");
+  assert.equal(harness.channelStatus.textContent, "채널 목록을 불러오지 못했습니다. 잠시 후 다시 시도하세요.");
   assert.doesNotMatch(harness.channelStatus.textContent, /rtsp|password|nvr\.example/);
+});
+
+test("channel discovery terminates after the bounded timeout and aborts the request", async () => {
+  let requestOptions;
+  const harness = createHarness(
+    async () => ({ ok: true, json: async () => ({ candidates: [], summary: {} }) }),
+    (_url, options) => {
+      requestOptions = options;
+      return new Promise(() => {});
+    },
+  );
+
+  assert.equal(harness.channelStatus.textContent, "채널을 불러오는 중입니다…");
+  assert.equal(harness.channel.disabled, true);
+  assert.equal(harness.timerDelays.at(-1), 10_000);
+
+  harness.runTimers();
+  await settle();
+
+  assert.equal(requestOptions.signal.aborted, true);
+  assert.equal(harness.channel.value, "");
+  assert.equal(harness.channel.children.length, 0);
+  assert.equal(harness.channel.disabled, true);
+  assert.equal(harness.channelStatus.textContent, "채널 정보를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.");
+  assert.equal(harness.pendingTimerCount(), 0);
+});
+
+test("channel discovery timeout also covers a response body that never parses", async () => {
+  let requestOptions;
+  const harness = createHarness(
+    async () => ({ ok: true, json: async () => ({ candidates: [], summary: {} }) }),
+    (_url, options) => {
+      requestOptions = options;
+      return Promise.resolve({ ok: true, json: async () => new Promise(() => {}) });
+    },
+  );
+
+  harness.runTimers();
+  await settle();
+
+  assert.equal(requestOptions.signal.aborted, true);
+  assert.equal(harness.channelStatus.textContent, "채널 정보를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.");
+  assert.equal(harness.pendingTimerCount(), 0);
+});
+
+test("channel discovery network failure reaches a terminal safe state", async () => {
+  const marker = "rtsp://user:password@nvr.example/private";
+  const harness = createHarness(
+    async () => ({ ok: true, json: async () => ({ candidates: [], summary: {} }) }),
+    () => Promise.reject(new Error(marker)),
+  );
+
+  await settle();
+
+  assert.equal(harness.channelStatus.textContent, "채널 목록을 불러오지 못했습니다. 잠시 후 다시 시도하세요.");
+  assert.doesNotMatch(harness.channelStatus.textContent, /rtsp|password|nvr\.example/);
+  assert.equal(harness.pendingTimerCount(), 0);
+});
+
+test("malformed channel data reaches a terminal safe state", async () => {
+  const harness = createHarness(
+    async () => ({ ok: true, json: async () => ({ candidates: [], summary: {} }) }),
+    { ok: true, json: async () => ({ channels: "not-a-list" }) },
+  );
+
+  await settle();
+
+  assert.equal(harness.channelStatus.textContent, "채널 목록을 불러오지 못했습니다. 잠시 후 다시 시도하세요.");
+  assert.equal(harness.channel.value, "");
+  assert.equal(harness.channel.disabled, true);
+  assert.equal(harness.pendingTimerCount(), 0);
+});
+
+test("a refresh aborts the stale request and only the newest response updates channels", async () => {
+  const firstResponse = deferred();
+  let firstOptions;
+  let callCount = 0;
+  const harness = createHarness(
+    async () => ({ ok: true, json: async () => ({ candidates: [], summary: {} }) }),
+    (_url, options) => {
+      callCount += 1;
+      if (callCount === 1) {
+        return Promise.resolve(response([channel(1)], 1));
+      }
+      if (callCount === 2) {
+        firstOptions = options;
+        return firstResponse.promise;
+      }
+      return Promise.resolve(response([channel(7)], 7));
+    },
+  );
+
+  await settle();
+  const stale = harness.window.vigiVisionReferenceFrameChannels.refresh();
+  const latest = harness.window.vigiVisionReferenceFrameChannels.refresh();
+  await latest;
+  assert.equal(firstOptions.signal.aborted, true);
+  assert.equal(harness.channel.value, "7");
+  firstResponse.resolve(response([channel(3)], 3));
+  await stale;
+  assert.equal(harness.channel.value, "7");
+  assert.equal(harness.pendingTimerCount(), 0);
 });
 
 test("explicit channel selection survives a later refresh while still available", async () => {

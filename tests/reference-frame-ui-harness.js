@@ -199,6 +199,7 @@ function createHarness(
     ["#roi-workspace", new FakeElement("div")],
     ["#roi-stage", new FakeElement("div")],
     ["#roi-assisted-button", new FakeElement("button")],
+    ["#roi-assisted-spinner", new FakeElement("span")],
     ["#roi-assisted-guidance", new FakeElement("p")],
     ["#roi-assisted-marker", new FakeElement("div")],
     ["#roi-assisted-mask", new FakeElement("canvas")],
@@ -235,6 +236,8 @@ function createHarness(
   elements.get("#roi-stage").hidden = true;
   elements.get("#roi-assisted-button").disabled = true;
   elements.get("#roi-assisted-button").setAttribute("aria-pressed", "false");
+  elements.get("#roi-assisted-spinner").hidden = true;
+  elements.get("#roi-assisted-spinner").setAttribute("aria-hidden", "true");
   elements.get("#roi-assisted-marker").hidden = true;
   elements.get("#roi-assisted-mask").hidden = true;
   elements.get("#roi-summary").hidden = true;
@@ -244,12 +247,31 @@ function createHarness(
   elements.get("#selected-preview-image").naturalWidth = 2560;
   elements.get("#selected-preview-image").naturalHeight = 1440;
   const windowListeners = {};
+  const timers = new Map();
+  const timerDelays = [];
+  let timerSequence = 0;
+  const setTimeout = (handler, delay) => {
+    const id = ++timerSequence;
+    timers.set(id, { handler, delay });
+    timerDelays.push(delay);
+    return id;
+  };
+  const clearTimeout = (id) => {
+    timers.delete(id);
+  };
+  const runTimers = () => {
+    const scheduled = Array.from(timers.values());
+    timers.clear();
+    scheduled.forEach(({ handler }) => handler());
+  };
   const context = vm.createContext({
     document: {
       createElement: (tagName) => new FakeElement(tagName),
       querySelector: (selector) => elements.get(selector),
     },
     window: {
+      clearTimeout,
+      setTimeout,
       addEventListener(name, handler) {
         if (windowListeners[name] === undefined) {
           const handlers = [];
@@ -300,6 +322,7 @@ function createHarness(
     roiWorkspace: elements.get("#roi-workspace"),
     roiStage: elements.get("#roi-stage"),
     assistedButton: elements.get("#roi-assisted-button"),
+    assistedSpinner: elements.get("#roi-assisted-spinner"),
     assistedGuidance: elements.get("#roi-assisted-guidance"),
     assistedMarker: elements.get("#roi-assisted-marker"),
     assistedMask: elements.get("#roi-assisted-mask"),
@@ -320,6 +343,9 @@ function createHarness(
     roiSummarySourceHeight: elements.get("#roi-summary-source-height"),
     windowListeners,
     window: context.window,
+    runTimers,
+    timerDelays,
+    pendingTimerCount: () => timers.size,
   };
 }
 

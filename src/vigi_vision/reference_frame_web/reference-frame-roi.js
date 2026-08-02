@@ -114,17 +114,17 @@ function activateImage(image) {
   sourceSize = readSourceSize(image);
   if (sourceSize === null) {
     roiStage.hidden = true;
-    setStatus("Selected image dimensions are unavailable.", "unavailable");
+    setStatus("선택한 이미지의 크기를 확인할 수 없습니다.", "unavailable");
     render();
     return;
   }
   setStatus(committedRoi === null
-    ? "Ready. Drag on the image to draw one ROI."
-    : "ROI committed. Drag again to replace it.", committedRoi === null ? "ready" : "success");
+    ? "준비되었습니다. 이미지에서 드래그하여 ROI 하나를 그리세요."
+    : "ROI가 적용되었습니다. 다시 드래그하여 바꿀 수 있습니다.", committedRoi === null ? "ready" : "success");
   render();
 }
 function setSelectedCandidate(candidate, image) {
-  reset("Loading selected candidate image.", "loading");
+  reset("선택한 후보 이미지를 불러오는 중입니다.", "loading");
   roiSelectedCandidate = candidate;
   selectedImage = image;
   boundImage = image;
@@ -132,7 +132,7 @@ function setSelectedCandidate(candidate, image) {
     load: () => activateImage(image),
     error: () => {
       if (image === selectedImage) {
-        reset("Selected candidate image is unavailable.", "unavailable");
+        reset("선택한 후보 이미지를 사용할 수 없습니다.", "unavailable");
       }
     },
   };
@@ -143,7 +143,7 @@ function setSelectedCandidate(candidate, image) {
   }
   render();
 }
-function reset(message = "Select a candidate first.", state = "disabled") {
+function reset(message = "먼저 후보를 선택하세요.", state = "disabled") {
   clearInteractionState();
   detachImage();
   roiSelectedCandidate = selectedImage = sourceSize = committedRoi = null;
@@ -151,7 +151,7 @@ function reset(message = "Select a candidate first.", state = "disabled") {
   render();
   setStatus(message, state);
 }
-function clearRoi(message = "ROI reset. Draw a new region when ready.", state = "ready") {
+function clearRoi(message = "ROI를 초기화했습니다. 준비되면 새 영역을 그리세요.", state = "ready") {
   clearInteractionState();
   committedRoi = null;
   assistedPreviewActive = false;

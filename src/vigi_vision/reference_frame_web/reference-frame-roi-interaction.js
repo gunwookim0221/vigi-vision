@@ -65,13 +65,13 @@ function beginPointer(event) {
   try {
     roiStage.setPointerCapture?.(event.pointerId);
   } catch {
-    roi.cancelInteraction("ROI edit could not start. Try again.", "error");
+    roi.cancelInteraction("ROI 편집을 시작할 수 없습니다. 다시 시도하세요.", "error");
     return;
   }
   roiStage.focus?.({ preventScroll: true });
   roi.beginInteraction(event.pointerId, mode, handle, point);
   setDraftFromPoint(point);
-  roi.setStatus(mode === "drawing" ? "Drawing a replacement ROI." : mode === "moving" ? "Moving ROI." : `Resizing ROI from the ${handle} handle.`, "active");
+  roi.setStatus(mode === "drawing" ? "새 ROI를 그리는 중입니다." : mode === "moving" ? "ROI를 이동하는 중입니다." : `${handle} 핸들에서 ROI 크기를 조정하는 중입니다.`, "active");
 }
 
 function updatePointer(event) {
@@ -91,21 +91,21 @@ function finishPointer(event) {
   const point = sourcePoint(event);
   const origin = state.interactionOriginPoint;
   if (origin !== null && Math.max(Math.abs(point.x - origin.x), Math.abs(point.y - origin.y)) < MINIMUM_ROI_SIZE) {
-    roi.cancelInteraction("ROI edit was too small; the previous ROI remains.", "warning");
+    roi.cancelInteraction("ROI 편집 범위가 너무 작아 이전 ROI를 유지합니다.", "warning");
     return;
   }
   setDraftFromPoint(point);
   const next = roi.getState().draftRoi;
   const mode = state.activeEdit?.mode;
   if (next === null || next.width < MINIMUM_ROI_SIZE || next.height < MINIMUM_ROI_SIZE) {
-    roi.cancelInteraction("ROI is too small; draw at least 4 by 4 source pixels.", "warning");
+    roi.cancelInteraction("ROI가 너무 작습니다. 원본 기준 4 × 4 픽셀 이상으로 그리세요.", "warning");
     return;
   }
   const message = mode === "drawing"
-    ? "ROI committed in original-image pixels. Drag the box or handles to edit it."
+    ? "원본 이미지 픽셀 기준으로 ROI를 적용했습니다. 상자나 핸들을 드래그하여 수동 조정하세요."
     : mode === "moving"
-      ? "ROI moved in original-image pixels."
-      : "ROI resized in original-image pixels.";
+      ? "원본 이미지 픽셀 기준으로 ROI를 이동했습니다."
+      : "원본 이미지 픽셀 기준으로 ROI 크기를 조정했습니다.";
   roi.commitInteraction(message);
 }
 
@@ -121,7 +121,7 @@ function keyboardRoi(event) {
   const state = roi.getState();
   if (event.key === "Escape" && state.activePointerId !== null) {
     event.preventDefault();
-    roi.cancelInteraction("ROI edit cancelled; the previous ROI remains.", "warning");
+    roi.cancelInteraction("ROI 편집을 취소했습니다. 이전 ROI를 유지합니다.", "warning");
     return;
   }
   if (state.committedRoi === null) {
@@ -129,7 +129,7 @@ function keyboardRoi(event) {
   }
   if (event.key === "Delete" || event.key === "Backspace") {
     event.preventDefault();
-    clearRoi("ROI reset. Draw a new region when ready.");
+    clearRoi("ROI를 초기화했습니다. 준비되면 새 영역을 그리세요.");
     return;
   }
   const directions = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
@@ -141,7 +141,7 @@ function keyboardRoi(event) {
   const step = event.shiftKey ? 10 : 1;
   window.vigiVisionReferenceFrameAssistedRoi?.cancelPending?.();
   if (!event.altKey) {
-    roi.replaceCommittedRoi(geometry.moveRoi(state.committedRoi, { x: direction[0] * step, y: direction[1] * step }), "ROI moved with the keyboard.");
+    roi.replaceCommittedRoi(geometry.moveRoi(state.committedRoi, { x: direction[0] * step, y: direction[1] * step }), "키보드로 ROI를 이동했습니다.");
     return;
   }
   const isHorizontal = direction[0] !== 0;
@@ -150,7 +150,7 @@ function keyboardRoi(event) {
     y: isHorizontal ? state.committedRoi.y : state.committedRoi.y + state.committedRoi.height + direction[1] * step,
   };
   const handle = isHorizontal ? "e" : "s";
-  roi.replaceCommittedRoi(geometry.resizeRoi(state.committedRoi, handle, point, MINIMUM_ROI_SIZE), "ROI resized with the keyboard.");
+  roi.replaceCommittedRoi(geometry.resizeRoi(state.committedRoi, handle, point, MINIMUM_ROI_SIZE), "키보드로 ROI 크기를 조정했습니다.");
 }
 
 function clearRoi(message) {
@@ -162,9 +162,9 @@ function clearRoi(message) {
   ["pointerdown", beginPointer],
   ["pointermove", updatePointer],
   ["pointerup", finishPointer],
-  ["pointercancel", (event) => cancelPointer(event, "ROI edit cancelled; the previous ROI remains.")],
-  ["lostpointercapture", (event) => cancelPointer(event, "ROI edit was interrupted; the previous ROI remains.")],
+  ["pointercancel", (event) => cancelPointer(event, "ROI 편집을 취소했습니다. 이전 ROI를 유지합니다.")],
+  ["lostpointercapture", (event) => cancelPointer(event, "ROI 편집이 중단되었습니다. 이전 ROI를 유지합니다.")],
 ].forEach(([name, handler]) => roiStage.addEventListener(name, handler));
 roiStage.addEventListener("keydown", keyboardRoi);
-resetButton.addEventListener("click", () => clearRoi("ROI reset. Draw a new region when ready."));
+resetButton.addEventListener("click", () => clearRoi("ROI를 초기화했습니다. 준비되면 새 영역을 그리세요."));
 })();
