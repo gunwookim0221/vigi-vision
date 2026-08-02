@@ -36,6 +36,9 @@ documentation route is added, removed, or relocated.
   [design/reference-frame-candidates.md](design/reference-frame-candidates.md)
   for the implemented Phase 4A bounded candidate-set contract that reuses those
   single-frame resources without making absolute timing claims. Read
+  [design/investigation-confirmation.md](design/investigation-confirmation.md)
+  for the approved Phase 6-1 confirmation, immutable investigation package,
+  source-pixel ROI, idempotency, and Phase 7 handoff contract. Read
   [design/assisted-roi-selection.md](design/assisted-roi-selection.md) for the
   completed Phase 5-3A tap-assisted ROI feasibility decision, implemented
   Phase 5-3B-2 optional backend API/model lifecycle, and remaining frontend

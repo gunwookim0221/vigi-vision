@@ -277,8 +277,10 @@ coordinates are recalculated for responsive display sizes. Candidate changes,
 result replacement, and image failure clear draft and committed ROI state.
 Pointer interruption clears the draft and active pointer while preserving a
 prior committed ROI. Reset ROI preserves candidate selection and permits
-recreation. `getPhase6Snapshot()` is an immutable transient handoff only;
-persistence, confirmation, and manifest storage remain deferred. Editing an
+recreation. `getPhase6Snapshot()` is an immutable transient handoff only. Phase
+6-1 now defines a separate immutable investigation confirmation package; its
+backend and web implementation remain deferred, and it does not add
+candidate-set persistence. Editing an
 applied input marks it dirty and prevents generation until the user applies it
 again; editing does not clear already rendered candidates.
 
@@ -330,8 +332,9 @@ resource IDs, JPEG dimensions, and conservative timing fields.
   execution caps load rather than adding jobs.
 - Visual unsuitability remains possible because source timing is not frame-exact;
   the mitigation is human selection, not stronger timing language.
-- A later saved frame/ROI workflow may need a new durable selection resource;
-  it must not retroactively turn this transient request into a set manifest.
+- The approved Phase 6 confirmation workflow references one immutable child
+  resource from an investigation manifest; it does not retroactively turn this
+  transient request into a set manifest.
 - Increasing the count/range, adding cancellation, progress, rate limits across
   processes, or any asynchronous architecture requires measured operational
   evidence and a new design decision.
