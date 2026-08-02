@@ -2,12 +2,12 @@
 
 ## Status and scope
 
-**Status: approved Phase 6-1 design contract; not implemented.**
+**Status: approved Phase 6-1 contract; Phase 6-2A backend foundation implemented.**
 
 This document defines the boundary where a user-reviewed reference frame and
 ROI stop being transient browser state and become one immutable, durable input
-for the next object-disappearance phase. Phase 6-1 changes documentation only.
-The API, persistence code, and web confirmation flow belong to later slices.
+for the next object-disappearance phase. The HTTP API belongs to Phase 6-2B
+and the web confirmation flow belongs to Phase 6-3.
 
 The contract reuses the implemented reference-frame resource and investigation
 artifact ownership boundaries. It does not add object comparison, temporal

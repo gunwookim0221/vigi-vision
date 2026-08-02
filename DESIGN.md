@@ -130,11 +130,11 @@ trustworthy incremental progress contract.
   image load and responsive resize.
 - **Handoff:** `getPhase6Snapshot()` returns an immutable candidate-bound
   source-space snapshot only while a valid ROI is selected; it is not currently
-  stored or sent to an API. The approved, not-yet-implemented Phase 6 contract
-  validates and publishes that reviewed state as an immutable investigation
+  stored or sent to an API. The Phase 6-2A backend contract validates and
+  publishes that reviewed state as an immutable investigation
   package; see [Investigation Confirmation and Durable Persistence](docs/design/investigation-confirmation.md).
-- **Persistence:** the one ROI remains transient frontend state. Persistence
-  and confirmation implementation remain deferred to Phase 6-2/6-3.
+- **Persistence:** the one ROI remains transient frontend state. Confirmation
+  HTTP/UI transport remains deferred to Phase 6-2B/6-3.
 
 #### Assisted-selection integration
 
