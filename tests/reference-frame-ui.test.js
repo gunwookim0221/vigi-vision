@@ -13,7 +13,7 @@ test("renders successful thumbnails in API order and exposes backend timing", as
   assert.equal(harness.button.disabled, true);
   await request;
 
-  assert.deepEqual(headingTexts(harness.results), ["-10 sec", "Reference", "+10 sec"]);
+  assert.deepEqual(headingTexts(harness.results), ["-10초", "기준 위치", "+10초"]);
   assert.equal(harness.status.dataset.state, "success");
   assert.deepEqual(
     harness.results.children.map((card) => card.children[0].children[0].src),
@@ -23,9 +23,9 @@ test("renders successful thumbnails in API order and exposes backend timing", as
       "/api/v1/reference-frames/frame-10/image",
     ],
   );
-  assert.equal(harness.results.children[0].children[0].children[0].alt, "Recorded frame candidate at -10 sec.");
+  assert.equal(harness.results.children[0].children[0].children[0].alt, "-10초의 녹화 프레임 후보.");
   assert.equal(harness.results.children[0].children[0].children[1].hidden, true);
-  assert.match(textOf(harness.results.children[0].children[1]), /Exact source timestamp is not yet verified/);
+  assert.match(textOf(harness.results.children[0].children[1]), /정확한 원본 시각은 아직 확인되지 않았습니다/);
   assert.doesNotMatch(textOf(harness.results.children[0].children[1]), /pending real-NVR replay validation/);
   assert.equal(harness.window.vigiVisionReferenceFrameSelection.getSelectedCandidate(), null);
   assert.equal(harness.previewContent.hidden, true);
@@ -38,9 +38,9 @@ test("keeps failed candidates in place and falls back when an image load fails",
 
   await submit(harness);
 
-  assert.deepEqual(headingTexts(harness.results), ["-10 sec", "Reference", "+10 sec"]);
-  assert.equal(harness.results.children[1].children[0].children[0].textContent, "Preview unavailable for this candidate.");
-  assert.equal(textOf(harness.results.children[1].children[1].children[1].children[3]), "Failure: recording_unavailableNo recording is available for this position.");
+  assert.deepEqual(headingTexts(harness.results), ["-10초", "기준 위치", "+10초"]);
+  assert.equal(harness.results.children[1].children[0].children[0].textContent, "이 후보의 미리보기를 사용할 수 없습니다.");
+  assert.equal(textOf(harness.results.children[1].children[1].children[1].children[3]), "실패: 녹화 없음요청한 시각에 녹화 영상이 없습니다.");
   const image = harness.results.children[0].children[0].children[0];
   const placeholder = harness.results.children[0].children[0].children[1];
   image.listeners.error();
@@ -75,7 +75,7 @@ test("a late response cannot overwrite a newer request", async () => {
   requests[1].resolve({ ok: true, json: async () => candidateSet([candidate(10)]) });
   await Promise.all([first, second]);
 
-  assert.deepEqual(headingTexts(harness.results), ["+10 sec"]);
+  assert.deepEqual(headingTexts(harness.results), ["+10초"]);
   assert.equal(harness.status.dataset.state, "success");
   assert.equal(harness.window.vigiVisionReferenceFrameSelection.getSelectedCandidate(), null);
   assert.equal(harness.previewContent.hidden, true);
@@ -89,7 +89,7 @@ test("request failures stay safe and leave the form usable", async () => {
 
   assert.equal(harness.status.dataset.state, "error");
   assert.equal(harness.error.hidden, false);
-  assert.match(harness.error.textContent, /channel and recorded time/);
+  assert.match(harness.error.textContent, /채널과 녹화 시각/);
   assert.equal(harness.button.disabled, false);
   assert.equal(harness.form.attributes["aria-busy"], "false");
   assert.equal(harness.results.children.length, 0);
@@ -111,7 +111,7 @@ test("distinguishes empty and all-failed candidate responses", async () => {
   applyReferenceTime(emptyHarness);
   await submit(emptyHarness);
   assert.equal(emptyHarness.status.dataset.state, "empty");
-  assert.equal(emptyHarness.status.textContent, "No candidate positions were returned.");
+  assert.equal(emptyHarness.status.textContent, "후보 위치가 반환되지 않았습니다.");
 });
 
 test("invalid response data becomes a safe request error", async () => {
@@ -125,5 +125,5 @@ test("invalid response data becomes a safe request error", async () => {
 
   assert.equal(harness.status.dataset.state, "error");
   assert.equal(harness.results.children.length, 0);
-  assert.match(harness.error.textContent, /request could not be completed/);
+  assert.match(harness.error.textContent, /요청을 완료하지 못했습니다/);
 });

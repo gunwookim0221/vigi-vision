@@ -2,11 +2,11 @@
 const MINIMUM_ROI_SIZE = 4;
 const MAX_MASK_PREVIEW_RUNS = 50000;
 const ERROR_MESSAGES = Object.freeze({
-  invalid_point: "A suggestion could not be created for that point. Try tapping the object again.",
-  no_valid_suggestion: "No valid suggestion was available for that tap. Try tapping the object again.",
-  suggestion_timeout: "The suggestion took too long. Try again or draw the ROI manually.",
-  suggestion_unavailable: "Automatic suggestion is unavailable. Continue with manual ROI selection.",
-  suggestion_failure: "The automatic suggestion failed safely. Try again or draw the ROI manually.",
+  invalid_point: "해당 지점에 대한 제안을 만들 수 없습니다. 대상을 다시 눌러 보세요.",
+  no_valid_suggestion: "해당 탭에 사용할 수 있는 제안이 없습니다. 대상을 다시 눌러 보세요.",
+  suggestion_timeout: "제안 생성 시간이 너무 오래 걸렸습니다. 다시 시도하거나 ROI를 수동 조정하세요.",
+  suggestion_unavailable: "ROI 자동 제안을 사용할 수 없습니다. ROI를 수동 조정하세요.",
+  suggestion_failure: "ROI 자동 제안을 안전하게 처리하지 못했습니다. 다시 시도하거나 ROI를 수동 조정하세요.",
 });
 
 function responseErrorCode(payload) {

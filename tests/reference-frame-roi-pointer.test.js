@@ -42,7 +42,7 @@ test("selecting a candidate activates the ROI workspace and mouse drag commits s
   assert.equal(harness.roiSummaryY.textContent, "180");
   assert.equal(harness.roiSummaryWidth.textContent, "1536");
   assert.equal(harness.roiSummaryHeight.textContent, "720");
-  assert.match(harness.roiStatus.textContent, /original-image pixels/);
+  assert.match(harness.roiStatus.textContent, /원본 이미지 픽셀 기준/);
   assert.equal(harness.roiStatus.dataset.state, "success");
   assert.equal(harness.committedOverlay.textContent, "");
   assert.equal(harness.roiStage.capturedPointers.size, 0);
@@ -115,7 +115,7 @@ test("tiny drags and mobile taps are rejected while preserving a previous ROI", 
   drag(harness, [30, 40], [30.1, 40.1], "touch", 8);
 
   assert.deepEqual(harness.window.vigiVisionReferenceFrameRoi.getState().committedRoi, previous);
-  assert.match(harness.roiStatus.textContent, /too small/);
+  assert.match(harness.roiStatus.textContent, /너무 작아/);
   assert.equal(harness.roiStatus.dataset.state, "warning");
   assert.equal(harness.window.vigiVisionReferenceFrameRoi.getState().activePointerId, null);
 });

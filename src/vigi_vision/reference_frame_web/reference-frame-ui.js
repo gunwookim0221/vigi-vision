@@ -15,8 +15,42 @@ let channelSelectionExplicit = false;
 const SOURCE_TIMESTAMP_WARNING =
   "Source timestamp mapping is unavailable pending real-NVR replay validation.";
 const USER_SOURCE_TIMESTAMP_LIMITATION =
-  "Exact source timestamp is not yet verified. The displayed time is the requested position.";
-const CHANNEL_DISCOVERY_FAILURE = "Channel list could not be loaded. Try again later.";
+  "정확한 원본 시각은 아직 확인되지 않았습니다. 표시된 시각은 요청한 위치입니다.";
+const USER_WARNING_MESSAGES = Object.freeze({
+  [SOURCE_TIMESTAMP_WARNING]: USER_SOURCE_TIMESTAMP_LIMITATION,
+  "Only decoded frames before the requested clip position were available.":
+    "요청한 클립 위치보다 이전에 디코딩된 프레임만 사용할 수 있습니다.",
+  "Only decoded frames after the requested clip position were available.":
+    "요청한 클립 위치보다 이후에 디코딩된 프레임만 사용할 수 있습니다.",
+  "The channel is currently offline; historical recordings may still be available.":
+    "채널이 현재 오프라인입니다. 과거 녹화 영상은 사용할 수 있을 수 있습니다.",
+});
+const FAILURE_CODE_LABELS = Object.freeze({
+  recording_unavailable: "녹화 없음",
+  channel_not_found: "채널 없음",
+  replay_timeout: "재생 시간 초과",
+  replay_failure: "재생 처리 실패",
+  decode_timeout: "디코딩 시간 초과",
+  decode_failure: "프레임 디코딩 실패",
+});
+const FAILURE_MESSAGES = Object.freeze({
+  recording_unavailable: "요청한 시각에 녹화 영상이 없습니다.",
+  channel_not_found: "요청한 채널을 찾을 수 없습니다.",
+  replay_timeout: "녹화 재생 처리 시간이 초과되었습니다.",
+  replay_failure: "녹화 재생을 안전하게 처리하지 못했습니다.",
+  decode_timeout: "기준 프레임 디코딩 시간이 초과되었습니다.",
+  decode_failure: "재생 클립에서 기준 프레임을 만들지 못했습니다.",
+});
+const TIMING_PRECISION_LABELS = Object.freeze({
+  measured_clip_relative: "클립 기준 측정",
+  estimated: "추정",
+  unavailable: "사용할 수 없음",
+  indeterminate: "확인 불가",
+});
+const OUTCOME_LABELS = Object.freeze({ created: "생성됨", reused: "재사용됨" });
+const CHANNEL_LOADING_MESSAGE = "채널을 불러오는 중입니다…";
+const CHANNEL_EMPTY_MESSAGE = "사용 가능한 온라인 채널이 없습니다.";
+const CHANNEL_DISCOVERY_FAILURE = "채널 목록을 불러오지 못했습니다. 잠시 후 다시 시도하세요.";
 
 function isUsableChannel(channel) {
   return channel
@@ -93,7 +127,7 @@ async function loadChannels() {
   const currentValue = channelIdInput.value;
   const hadKnownOptions = Array.from(channelIdInput.children).some((option) =>
     /^\d+$/.test(option.value) && Number(option.value) > 0);
-  channelStatus.textContent = "Loading channels…";
+  channelStatus.textContent = CHANNEL_LOADING_MESSAGE;
   if (!hadKnownOptions) {
     channelIdInput.disabled = true;
   }
@@ -118,8 +152,8 @@ async function loadChannels() {
     channelSelectionExplicit = retained && channelSelectionExplicit;
     replaceChannelOptions(channels, selectedId);
     channelStatus.textContent = channels.length > 0
-      ? `${channels.length} online channel${channels.length === 1 ? "" : "s"} available.`
-      : "No online channels are available.";
+      ? `온라인 채널 ${channels.length}개를 사용할 수 있습니다.`
+      : CHANNEL_EMPTY_MESSAGE;
   } catch {
     if (sequence !== channelRequestSequence) {
       return;
@@ -139,6 +173,26 @@ function setRequestState(state, message) {
   requestStatus.textContent = message;
 }
 
+function displayWarning(warning) {
+  return USER_WARNING_MESSAGES[warning] ?? warning;
+}
+
+function displayFailureCode(code) {
+  return FAILURE_CODE_LABELS[code] ?? code;
+}
+
+function displayFailureMessage(failure) {
+  return FAILURE_MESSAGES[failure?.code] ?? failure?.message ?? "요청을 완료하지 못했습니다.";
+}
+
+function displayTimingPrecision(value) {
+  return TIMING_PRECISION_LABELS[value] ?? value;
+}
+
+function displayOutcome(value) {
+  return OUTCOME_LABELS[value] ?? value;
+}
+
 function clearResults() {
   referenceFrameSelection.reset();
   requestError.hidden = true;
@@ -146,11 +200,11 @@ function clearResults() {
   candidateResults.replaceChildren();
 }
 
-function renderRequestError(message = "The request could not be completed. Check the channel and recorded time, then try again.") {
+function renderRequestError(message = "요청을 완료하지 못했습니다. 채널과 녹화 시각을 확인한 후 다시 시도하세요.") {
   referenceFrameSelection.reset();
   requestError.hidden = false;
   requestError.textContent = message;
-  setRequestState("error", "Candidate request was not completed.");
+  setRequestState("error", "후보 요청을 완료하지 못했습니다.");
 }
 
 function appendFact(row, label, value, isMono = false) {
@@ -174,16 +228,14 @@ function appendWarnings(container, warnings) {
   warnings.filter((warning) => typeof warning === "string").forEach((warning) => {
     const text = document.createElement("p");
     text.className = "candidate-warning";
-    text.textContent = warning === SOURCE_TIMESTAMP_WARNING
-      ? USER_SOURCE_TIMESTAMP_LIMITATION
-      : warning;
+    text.textContent = displayWarning(warning);
     container.append(text);
   });
 }
 
 function setGenerationBusy(active) {
   referenceFrameForm.setGenerationActive(active);
-  generateButton.textContent = active ? "Generating candidates…" : "Generate candidates";
+  generateButton.textContent = active ? "후보를 생성하는 중…" : "후보 생성";
   generationProgress.hidden = !active;
   generationSpinner.hidden = !active;
   candidateForm.setAttribute("aria-busy", String(active));
@@ -191,9 +243,9 @@ function setGenerationBusy(active) {
 
 function formatOffset(offsetSeconds) {
   if (offsetSeconds === 0) {
-    return "Reference";
+    return "기준 위치";
   }
-  return `${offsetSeconds > 0 ? "+" : ""}${offsetSeconds} sec`;
+  return `${offsetSeconds > 0 ? "+" : ""}${offsetSeconds}초`;
 }
 
 function isSupportedImageUrl(value) {
@@ -206,7 +258,7 @@ function appendCandidateImage(card, candidate) {
   if (candidate.status !== "succeeded" || !isSupportedImageUrl(candidate.reference_frame.image_url)) {
     const unavailable = document.createElement("p");
     unavailable.className = "candidate-thumbnail-placeholder";
-    unavailable.textContent = "Preview unavailable for this candidate.";
+    unavailable.textContent = "이 후보의 미리보기를 사용할 수 없습니다.";
     unavailable.setAttribute("role", "status");
     frame.append(unavailable);
     card.append(frame);
@@ -216,7 +268,7 @@ function appendCandidateImage(card, candidate) {
   const image = document.createElement("img");
   image.className = "candidate-thumbnail";
   image.src = candidate.reference_frame.image_url;
-  image.alt = `Recorded frame candidate at ${formatOffset(candidate.offset_seconds)}.`;
+  image.alt = `${formatOffset(candidate.offset_seconds)}의 녹화 프레임 후보.`;
   image.loading = "lazy";
   const dimensions = candidate.reference_frame.image;
   if (dimensions && Number.isInteger(dimensions.width) && Number.isInteger(dimensions.height)) {
@@ -226,7 +278,7 @@ function appendCandidateImage(card, candidate) {
 
   const unavailable = document.createElement("p");
   unavailable.className = "candidate-thumbnail-placeholder";
-  unavailable.textContent = "Preview unavailable.";
+  unavailable.textContent = "미리보기를 사용할 수 없습니다.";
   unavailable.hidden = true;
   unavailable.setAttribute("role", "status");
   image.addEventListener("error", () => {
@@ -253,15 +305,15 @@ function renderCandidate(candidate) {
   referenceFrameSelection.attachCandidate(candidate, card, details, media.image, media.placeholder);
   const facts = document.createElement("dl");
   facts.className = "candidate-facts";
-  appendFact(facts, "Requested position", `${candidate.offset_seconds}s`, true);
-  appendFact(facts, "Requested UTC time", candidate.candidate_requested_time_utc, true);
+  appendFact(facts, "요청 위치", `${candidate.offset_seconds}초`, true);
+  appendFact(facts, "요청한 UTC 시각", candidate.candidate_requested_time_utc, true);
 
   if (candidate.status === "succeeded") {
-    appendFact(facts, "Status", `Succeeded, ${candidate.outcome}`);
-    appendFact(facts, "Timing precision", candidate.reference_frame.timing.precision_status);
+    appendFact(facts, "상태", `성공, ${displayOutcome(candidate.outcome)}`);
+    appendFact(facts, "시각 정밀도", displayTimingPrecision(candidate.reference_frame.timing.precision_status));
   } else {
-    appendFact(facts, "Status", "Failed");
-    appendFact(facts, `Failure: ${candidate.failure.code}`, candidate.failure.message);
+    appendFact(facts, "상태", "실패");
+    appendFact(facts, `실패: ${displayFailureCode(candidate.failure.code)}`, displayFailureMessage(candidate.failure));
   }
   details.append(facts);
   appendWarnings(details, candidate.status === "succeeded" ? candidate.reference_frame.warnings : candidate.warnings);
@@ -306,17 +358,17 @@ function renderCandidateSet(candidateSet) {
 
   candidateSet.candidates.forEach(renderCandidate);
   if (candidateSet.candidates.length === 0) {
-    setRequestState("empty", "No candidate positions were returned.");
+    setRequestState("empty", "후보 위치가 반환되지 않았습니다.");
     return;
   }
   const { created, reused, failed } = candidateSet.summary;
   const succeeded = created + reused;
   if (failed === 0) {
-    setRequestState("success", `Completed ${succeeded} candidate requests.`);
+    setRequestState("success", `후보 요청 ${succeeded}개를 완료했습니다.`);
   } else if (succeeded === 0) {
-    setRequestState("all-failed", "No candidate media was available for this valid request.");
+    setRequestState("all-failed", "이 유효한 요청에서 사용할 수 있는 후보 미디어가 없습니다.");
   } else {
-    setRequestState("partial", `${succeeded} candidate requests completed; ${failed} failed safely.`);
+    setRequestState("partial", `후보 요청 ${succeeded}개를 완료했고 ${failed}개는 안전하게 실패했습니다.`);
   }
 }
 
@@ -324,18 +376,18 @@ async function submitCandidateRequest(event) {
   event.preventDefault();
 
   if (!candidateForm.reportValidity()) {
-    setRequestState("error", "Enter a positive channel ID and a valid applied time.");
+    setRequestState("error", "양의 정수 채널과 적용된 올바른 시각을 입력하세요.");
     return;
   }
   if (!referenceFrameForm.isReady()) {
-    setRequestState("error", "Apply date and time before generating candidates.");
+    setRequestState("error", "후보를 생성하기 전에 날짜와 시각을 적용하세요.");
     return;
   }
 
   const sequence = ++requestSequence;
   clearResults();
   setGenerationBusy(true);
-  setRequestState("loading", "Generating candidate requests. This may take a few minutes.");
+  setRequestState("loading", "후보 요청을 생성하는 중입니다. 몇 분 정도 걸릴 수 있습니다.");
 
   try {
     const response = await fetch("/api/v1/reference-frame-candidate-sets", {

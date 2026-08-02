@@ -63,7 +63,7 @@ test("empty channel discovery leaves no fabricated selection", async () => {
   assert.equal(harness.channel.value, "");
   assert.equal(harness.channel.disabled, true);
   assert.equal(harness.channel.children.length, 0);
-  assert.equal(harness.channelStatus.textContent, "No online channels are available.");
+  assert.equal(harness.channelStatus.textContent, "사용 가능한 온라인 채널이 없습니다.");
 });
 
 test("channel discovery failure is safe and does not expose response details", async () => {
@@ -77,7 +77,7 @@ test("channel discovery failure is safe and does not expose response details", a
 
   assert.equal(harness.channel.value, "");
   assert.equal(harness.channel.disabled, true);
-  assert.equal(harness.channelStatus.textContent, "Channel list could not be loaded. Try again later.");
+  assert.equal(harness.channelStatus.textContent, "채널 목록을 불러오지 못했습니다. 잠시 후 다시 시도하세요.");
   assert.doesNotMatch(harness.channelStatus.textContent, /rtsp|password|nvr\.example/);
 });
 

@@ -101,8 +101,9 @@ test("the assisted control requires a selected usable candidate and exposes guid
 
   assert.equal(selected.assistedButton.disabled, false);
   assert.equal(selected.assistedButton.attributes["aria-pressed"], "true");
-  assert.match(selected.assistedGuidance.textContent, /Tap the object to request an automatic ROI suggestion/);
-  assert.match(selected.roiStatus.textContent, /Tap the object/);
+  assert.equal(selected.assistedButton.attributes["aria-label"], "ROI 자동 제안 취소");
+  assert.match(selected.assistedGuidance.textContent, /대상을 눌러 ROI 자동 제안을 요청/);
+  assert.match(selected.roiStatus.textContent, /대상을 눌러 ROI 자동 제안을 요청/);
   assert.equal(selected.roiStatus.dataset.state, "active");
   assert.equal(selected.roiStatus.attributes["aria-busy"], "false");
 });
@@ -124,7 +125,7 @@ test("one assisted tap posts the selected resource and an intrinsic source-space
   assert.deepEqual(JSON.parse(requests[1].options.body), { point: { x: 1280, y: 720 } });
   assert.equal(requests[1].options.signal.aborted, false);
   assert.equal(harness.assistedMarker.hidden, false);
-  assert.match(harness.roiStatus.textContent, /Requesting an automatic ROI suggestion/);
+  assert.match(harness.roiStatus.textContent, /ROI 자동 제안을 요청하는 중/);
   assert.equal(harness.roiStatus.dataset.state, "loading");
   assert.equal(harness.roiStatus.attributes["aria-busy"], "true");
 });
@@ -176,7 +177,7 @@ test("a current response enters the canonical ROI and remains manually editable"
     sourceHeight: 1440,
     roi: { x: 1200, y: 600, width: 240, height: 180 },
   });
-  assert.match(harness.roiStatus.textContent, /Suggested ROI received\. Verify and adjust it/);
+  assert.match(harness.roiStatus.textContent, /ROI 자동 제안을 받았습니다\. 확인하고 수동 조정/);
   assert.equal(harness.roiStatus.dataset.state, "success");
   assert.equal(harness.roiStatus.attributes["aria-busy"], "false");
   assert.equal(harness.committedOverlay.textContent, "");
@@ -213,7 +214,7 @@ test("the silhouette follows responsive image scaling and reset clears preview s
   assert.equal(harness.window.vigiVisionReferenceFrameRoi.getState().assistedPreviewActive, false);
   assert.equal(harness.window.vigiVisionReferenceFrameRoi.getState().committedRoi, null);
   assert.equal(harness.roiStatus.dataset.state, "ready");
-  assert.match(harness.roiStatus.textContent, /ROI reset/);
+  assert.match(harness.roiStatus.textContent, /ROI를 초기화했습니다/);
 });
 
 test("an irregular mask renders exposed row edges instead of a rectangle outline", async () => {
@@ -256,12 +257,12 @@ test("pending, failed, and timed-out suggestions preserve the previous ROI", asy
   await settle();
 
   assert.deepEqual(harness.window.vigiVisionReferenceFrameRoi.getState().committedRoi, previous);
-  assert.match(harness.roiStatus.textContent, /took too long/);
+  assert.match(harness.roiStatus.textContent, /제안 생성 시간이 너무 오래/);
   assert.equal(harness.roiStatus.dataset.state, "error");
   assert.doesNotMatch(harness.roiStatus.textContent, /secret stderr|checkpoint|ffmpeg|rtsp/i);
   assert.equal(harness.assistedMarker.hidden, true);
   assert.equal(harness.window.vigiVisionReferenceFrameAssistedRoi.getState().active, false);
-  assert.equal(harness.assistedButton.textContent, "Tap to suggest ROI");
+  assert.equal(harness.assistedButton.textContent, "ROI 자동 제안");
 
   drag(harness, [110, 100], [120, 105]);
   assert.notDeepEqual(harness.window.vigiVisionReferenceFrameRoi.getState().committedRoi, previous);
@@ -278,7 +279,7 @@ test("unavailable assisted selection is identified without removing manual fallb
   await settle();
 
   assert.equal(harness.roiStatus.dataset.state, "unavailable");
-  assert.match(harness.roiStatus.textContent, /unavailable/);
+  assert.match(harness.roiStatus.textContent, /ROI 자동 제안을 사용할 수 없습니다/);
   assert.equal(harness.assistedMask.hidden, true);
   drag(harness, [110, 100], [120, 105]);
   assert.notEqual(harness.window.vigiVisionReferenceFrameRoi.getState().committedRoi, null);
@@ -354,7 +355,7 @@ test("Reset ROI aborts pending assisted work without clearing the selected candi
   await settle();
   assert.equal(harness.window.vigiVisionReferenceFrameRoi.getState().committedRoi, null);
   assert.equal(harness.roiStatus.dataset.state, "ready");
-  assert.match(harness.roiStatus.textContent, /ROI reset/);
+  assert.match(harness.roiStatus.textContent, /ROI를 초기화했습니다/);
 });
 
 test("malformed, mismatched, and out-of-bounds responses fail safely", async () => {
@@ -378,7 +379,7 @@ test("malformed, mismatched, and out-of-bounds responses fail safely", async () 
     tap(harness, 110, 100);
     await settle();
     assert.equal(harness.window.vigiVisionReferenceFrameRoi.getState().committedRoi, null);
-    assert.match(harness.roiStatus.textContent, /could not be applied|try tapping/i);
+    assert.match(harness.roiStatus.textContent, /안전하게 적용할 수 없습니다|대상을 다시 누르/);
   }
 });
 

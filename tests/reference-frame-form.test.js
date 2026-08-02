@@ -19,7 +19,7 @@ test("starts unapplied and does not generate until date/time is applied", async 
   assert.equal(harness.appliedSummary.hidden, true);
   assert.equal(harness.button.disabled, true);
   assert.equal(harness.applyButton.disabled, true);
-  assert.match(harness.referenceState.textContent, /Apply date and time/);
+  assert.match(harness.referenceState.textContent, /날짜와 시각을 적용/);
   await submit(harness);
 
   assert.equal(calls.length, 0);
@@ -35,10 +35,10 @@ test("applies seconds and timezone without sending a request", () => {
 
   assert.equal(harness.appliedSummary.hidden, false);
   assert.equal(harness.appliedValue.textContent, "2026-07-31 17:02:29");
-  assert.equal(harness.appliedTimezone.textContent, "Timezone: Asia/Seoul");
+  assert.equal(harness.appliedTimezone.textContent, "시간대: Asia/Seoul");
   assert.equal(harness.button.disabled, false);
   assert.equal(harness.applyButton.disabled, false);
-  assert.match(harness.referenceState.textContent, /ready for candidate generation/);
+  assert.match(harness.referenceState.textContent, /후보를 생성할 준비/);
 });
 
 test("an invalid local time cannot be applied", () => {
@@ -52,7 +52,7 @@ test("an invalid local time cannot be applied", () => {
 
   assert.equal(harness.appliedSummary.hidden, true);
   assert.equal(harness.button.disabled, true);
-  assert.match(harness.referenceState.textContent, /Apply date and time/);
+  assert.match(harness.referenceState.textContent, /날짜와 시각을 적용/);
 });
 
 test("editing an applied time or timezone makes generation dirty until reapplication", async () => {
@@ -65,14 +65,14 @@ test("editing an applied time or timezone makes generation dirty until reapplica
   harness.referenceTime.listeners.input();
   assert.equal(harness.button.disabled, true);
   assert.equal(harness.results.children.length, resultCount);
-  assert.match(harness.referenceState.textContent, /changed/);
+  assert.match(harness.referenceState.textContent, /변경되었습니다/);
 
   harness.timezone.value = "UTC";
   harness.timezone.listeners.change();
   applyReferenceTime(harness, "2026-07-31T17:02:30", "UTC");
   assert.equal(harness.button.disabled, false);
   assert.equal(harness.appliedValue.textContent, "2026-07-31 17:02:30");
-  assert.equal(harness.appliedTimezone.textContent, "Timezone: UTC");
+  assert.equal(harness.appliedTimezone.textContent, "시간대: UTC");
 });
 
 test("submits the applied local timestamp and selected timezone", async () => {
@@ -101,20 +101,20 @@ test("shows indeterminate busy feedback and restores it after success", async ()
 
   assert.equal(harness.button.disabled, true);
   assert.equal(harness.applyButton.disabled, true);
-  assert.equal(harness.button.textContent, "Generating candidates…");
+  assert.equal(harness.button.textContent, "후보를 생성하는 중…");
   assert.equal(harness.generationProgress.hidden, false);
   assert.equal(harness.generationSpinner.hidden, false);
   assert.equal(harness.form.attributes["aria-busy"], "true");
   assert.equal(harness.generationIndicator.attributes["aria-valuenow"], undefined);
   assert.equal(harness.generationIndicator.attributes.value, undefined);
-  assert.match(harness.status.textContent, /may take a few minutes/);
+  assert.match(harness.status.textContent, /몇 분 정도 걸릴 수/);
 
   next.resolve({ ok: true, json: async () => candidateSet([candidate(0)]) });
   await request;
 
   assert.equal(harness.button.disabled, false);
   assert.equal(harness.applyButton.disabled, false);
-  assert.equal(harness.button.textContent, "Generate candidates");
+  assert.equal(harness.button.textContent, "후보 생성");
   assert.equal(harness.generationProgress.hidden, true);
   assert.equal(harness.generationSpinner.hidden, true);
   assert.equal(harness.form.attributes["aria-busy"], "false");
@@ -150,18 +150,18 @@ test("a stale response cannot stop the current request busy state", async () => 
 
   const first = submit(harness);
   const second = submit(harness);
-  assert.equal(harness.button.textContent, "Generating candidates…");
+  assert.equal(harness.button.textContent, "후보를 생성하는 중…");
   assert.equal(harness.generationProgress.hidden, false);
 
   requests[0].resolve({ ok: true, json: async () => candidateSet([candidate(-10)]) });
   await first;
-  assert.equal(harness.button.textContent, "Generating candidates…");
+  assert.equal(harness.button.textContent, "후보를 생성하는 중…");
   assert.equal(harness.generationProgress.hidden, false);
   assert.equal(harness.appliedValue.textContent, appliedSummary);
 
   requests[1].resolve({ ok: true, json: async () => candidateSet([candidate(10)]) });
   await second;
-  assert.equal(harness.button.textContent, "Generate candidates");
+  assert.equal(harness.button.textContent, "후보 생성");
   assert.equal(harness.generationProgress.hidden, true);
   assert.equal(harness.appliedValue.textContent, appliedSummary);
 });

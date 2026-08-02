@@ -51,7 +51,7 @@ function appendPreviewFact(label, value, isMono = false) {
   selectedPreviewFacts.append(fact);
 }
 
-function clearPreview(message = "No candidate selected.") {
+function clearPreview(message = "선택한 후보가 없습니다.") {
   previewSequence += 1;
   selectedPreviewContent.hidden = true;
   selectedPreviewImage.hidden = true;
@@ -64,12 +64,12 @@ function clearPreview(message = "No candidate selected.") {
   selectionStatus.textContent = message;
 }
 
-function clearSelection(message = "No candidate selected.") {
+function clearSelection(message = "선택한 후보가 없습니다.") {
   if (selectedView) {
     selectedView.card.dataset.selected = "false";
     selectedView.control.checked = false;
     if (!selectedView.unavailable) {
-      selectedView.status.textContent = "Ready to select.";
+      selectedView.status.textContent = "선택할 수 있습니다.";
     }
   }
   selectedCandidate = null;
@@ -83,7 +83,7 @@ function renderPreview(candidate) {
   const frame = candidate.reference_frame;
   const sequence = ++previewSequence;
   selectedPreviewImage.src = frame.image_url;
-  selectedPreviewImage.alt = `Selected recorded frame candidate at ${formatOffset(candidate.offset_seconds)}.`;
+  selectedPreviewImage.alt = `${formatOffset(candidate.offset_seconds)}의 선택한 녹화 프레임 후보.`;
   selectedPreviewImage.width = frame.image.width;
   selectedPreviewImage.height = frame.image.height;
   selectedPreviewImage.hidden = false;
@@ -98,14 +98,14 @@ function renderPreview(candidate) {
     }
   };
   selectedPreviewFacts.replaceChildren();
-  appendPreviewFact("Resource ID", frame.resource_id, true);
-  appendPreviewFact("Requested position", `${candidate.offset_seconds}s`, true);
-  appendPreviewFact("Requested UTC time", candidate.candidate_requested_time_utc, true);
-  appendPreviewFact("Timing precision", frame.timing.precision_status);
+  appendPreviewFact("리소스 ID", frame.resource_id, true);
+  appendPreviewFact("요청 위치", `${candidate.offset_seconds}초`, true);
+  appendPreviewFact("요청한 UTC 시각", candidate.candidate_requested_time_utc, true);
+  appendPreviewFact("시각 정밀도", displayTimingPrecision(frame.timing.precision_status));
   selectedPreviewWarnings.replaceChildren();
   appendWarnings(selectedPreviewWarnings, frame.warnings);
   selectedPreviewContent.hidden = false;
-  selectionStatus.textContent = `Selected candidate: ${formatOffset(candidate.offset_seconds)}.`;
+  selectionStatus.textContent = `선택한 후보: ${formatOffset(candidate.offset_seconds)}.`;
 }
 
 function selectCandidate(candidate, view) {
@@ -116,13 +116,13 @@ function selectCandidate(candidate, view) {
     selectedView.card.dataset.selected = "false";
     selectedView.control.checked = false;
     if (!selectedView.unavailable) {
-      selectedView.status.textContent = "Ready to select.";
+      selectedView.status.textContent = "선택할 수 있습니다.";
     }
   }
   selectedCandidate = candidate;
   selectedView = view;
   selectedView.card.dataset.selected = "true";
-  selectedView.status.textContent = "Selected candidate.";
+  selectedView.status.textContent = "선택한 후보입니다.";
   selectedView.control.checked = true;
   renderPreview(candidate);
   const roi = window.vigiVisionReferenceFrameRoi;
@@ -148,9 +148,9 @@ function markUnavailable(candidate) {
     view.control.disabled = true;
     view.control.checked = false;
   }
-  view.status.textContent = "Preview unavailable; selection disabled.";
+  view.status.textContent = "미리보기를 사용할 수 없어 선택할 수 없습니다.";
   if (selectedCandidate === candidate) {
-    clearSelection("Selected candidate is unavailable.");
+    clearSelection("선택한 후보를 사용할 수 없습니다.");
   }
 }
 
@@ -176,15 +176,15 @@ function attachCandidate(candidate, card, details, image, placeholder) {
     control.name = "reference-frame-candidate";
     control.value = candidate.reference_frame.resource_id;
     control.disabled = true;
-    control.setAttribute("aria-label", `Select ${formatOffset(candidate.offset_seconds)} candidate`);
+    control.setAttribute("aria-label", `${formatOffset(candidate.offset_seconds)} 후보 선택`);
     const labelText = document.createElement("span");
-    labelText.textContent = "Select candidate";
+    labelText.textContent = "후보 선택";
     label.append(control, labelText);
     details.append(label);
     const status = document.createElement("p");
     status.className = "candidate-selection-status";
     status.setAttribute("role", "status");
-    status.textContent = "Loading preview.";
+    status.textContent = "미리보기를 불러오는 중입니다.";
     details.append(status);
     view.control = control;
     view.status = status;
@@ -193,20 +193,20 @@ function attachCandidate(candidate, card, details, image, placeholder) {
     const status = document.createElement("p");
     status.className = "candidate-selection-status";
     status.setAttribute("role", "status");
-    status.textContent = "Unavailable for selection.";
+    status.textContent = "선택할 수 없습니다.";
     details.append(status);
     view.status = status;
   }
   image.addEventListener("load", () => {
     if (view.control && !view.unavailable) {
       view.control.disabled = false;
-      view.status.textContent = "Ready to select.";
+      view.status.textContent = "선택할 수 있습니다.";
     }
   }, { once: true });
   image.addEventListener("error", () => markUnavailable(candidate), { once: true });
 }
 
-function resetSelection(message = "No candidate selected.") {
+function resetSelection(message = "선택한 후보가 없습니다.") {
   clearSelection(message);
   candidateViews = new WeakMap();
 }

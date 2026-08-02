@@ -55,13 +55,13 @@ function updateReferenceFormState() {
 
   if (appliedRequest === null) {
     referenceFrameState.textContent = validReferenceInputs
-      ? "Date and time are ready to apply."
-      : "Apply date and time before generating candidates.";
+      ? "날짜와 시각을 적용할 준비가 되었습니다."
+      : "후보를 생성하기 전에 날짜와 시각을 적용하세요.";
   } else if (appliedRequestDirty) {
     referenceFrameState.textContent =
-      "Date and time changed. Apply date and time again before generating candidates.";
+      "날짜 또는 시각이 변경되었습니다. 후보를 생성하기 전에 다시 적용하세요.";
   } else {
-    referenceFrameState.textContent = "Applied reference time is ready for candidate generation.";
+    referenceFrameState.textContent = "적용된 기준 시각으로 후보를 생성할 준비가 되었습니다.";
   }
 }
 
@@ -69,7 +69,7 @@ function applyReferenceTime() {
   const normalized = getNormalizedTime();
   if (normalized === null || !hasValidReferenceInputs()) {
     referenceFrameState.textContent =
-      "Enter a valid date and time with seconds, then choose a timezone.";
+      "초 단위가 포함된 올바른 날짜와 시각을 입력한 다음 시간대를 선택하세요.";
     updateReferenceFormState();
     return;
   }
@@ -81,7 +81,7 @@ function applyReferenceTime() {
   appliedRequestDirty = false;
   const [date, time] = normalized.split("T");
   appliedReferenceTimeValue.textContent = date + " " + time;
-  appliedReferenceTimeZone.textContent = "Timezone: " + appliedRequest.source_timezone;
+  appliedReferenceTimeZone.textContent = "시간대: " + appliedRequest.source_timezone;
   appliedReferenceTime.hidden = false;
   updateReferenceFormState();
 }

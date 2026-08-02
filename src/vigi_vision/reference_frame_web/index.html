@@ -1,13 +1,13 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta
       name="description"
-      content="Local review shell for requested VIGI reference-frame candidates."
+      content="VIGI 기준 프레임 후보를 검토하는 로컬 화면입니다."
     >
-    <title>VIGI Vision | Reference frame candidates</title>
+    <title>VIGI Vision | 기준 프레임 후보</title>
     <link rel="stylesheet" href="/static/reference-frame-ui.css">
     <link rel="stylesheet" href="/static/reference-frame-candidates.css">
     <link rel="stylesheet" href="/static/reference-frame-form.css">
@@ -26,36 +26,36 @@
     <header class="site-header">
       <div class="content-limiter header-content">
         <p class="product-name">VIGI Vision</p>
-        <p class="product-context">Local reference-frame review</p>
+        <p class="product-context">기준 프레임 검토</p>
       </div>
     </header>
     <main class="content-limiter page-content">
       <section class="intro" aria-labelledby="page-title">
-        <p class="section-kicker">Candidate review</p>
-        <h1 id="page-title">Generate requested frame candidates</h1>
+        <p class="section-kicker">후보 검토</p>
+        <h1 id="page-title">요청한 프레임 후보 생성</h1>
         <p>
-          Review bounded positions around one recorded instant. Candidate times are requested
-          positions, not exact real-world capture times.
+          하나의 녹화 시각 주변에서 정해진 위치를 검토합니다. 후보 시각은 요청한 위치이며
+          실제 촬영 시각과 정확히 일치하지 않을 수 있습니다.
         </p>
       </section>
 
       <section class="panel" aria-labelledby="candidate-form-title">
         <div class="section-heading">
-          <h2 id="candidate-form-title">Request details</h2>
-          <p>Default offsets are used for this first review step.</p>
+          <h2 id="candidate-form-title">요청 정보</h2>
+          <p>첫 검토 단계에서는 기본 오프셋을 사용합니다.</p>
         </div>
         <form id="candidate-form" class="candidate-form" novalidate aria-busy="false">
           <div class="field">
-            <label for="channel-id">Channel ID</label>
+            <label for="channel-id">채널</label>
             <select id="channel-id" name="channel-id" required disabled aria-describedby="channel-status">
-              <option value="">Loading channels…</option>
+              <option value="">채널 불러오는 중…</option>
             </select>
             <p id="channel-status" class="field-hint" role="status" aria-live="polite">
-              Loading channels…
+              채널 불러오는 중…
             </p>
           </div>
           <div class="field">
-            <label for="reference-time">Reference date and time</label>
+            <label for="reference-time">기준 날짜 및 시각</label>
             <input
               id="reference-time"
               name="reference-time"
@@ -65,30 +65,30 @@
               aria-describedby="reference-time-hint"
             >
             <p id="reference-time-hint" class="field-hint">
-              Seconds are retained. The native picker follows the browser locale;
-              the applied summary uses 24-hour time.
+              초 단위까지 유지됩니다. 날짜 선택기는 브라우저 설정을 따르며,
+              적용된 요약은 24시간 형식으로 표시됩니다.
             </p>
           </div>
           <div class="field">
-            <label for="source-timezone">Source timezone</label>
+            <label for="source-timezone">원본 시간대</label>
             <select id="source-timezone" name="source-timezone" required aria-describedby="source-timezone-hint">
-              <option value="Asia/Seoul" selected>Asia/Seoul (KST, UTC+09:00)</option>
+              <option value="Asia/Seoul" selected>Asia/Seoul (한국 표준시, UTC+09:00)</option>
               <option value="UTC">UTC (UTC+00:00)</option>
             </select>
             <p id="source-timezone-hint" class="field-hint">
-              Choose the IANA timezone for the entered wall-clock time.
+              입력한 현지 시각에 사용할 IANA 시간대를 선택하세요.
             </p>
           </div>
           <div class="form-actions">
-            <button id="apply-reference-time" type="button" disabled>Apply date and time</button>
-            <button id="generate-button" type="submit" disabled>Generate candidates</button>
+            <button id="apply-reference-time" type="button" disabled>날짜 및 시각 적용</button>
+            <button id="generate-button" type="submit" disabled>후보 생성</button>
           </div>
         </form>
         <p id="reference-time-state" class="reference-time-state" role="status" aria-live="polite">
-          Apply date and time before generating candidates.
+          후보를 생성하기 전에 날짜와 시각을 적용하세요.
         </p>
         <div id="applied-reference-time" class="applied-reference-time" hidden>
-          <p class="applied-reference-time-label">Applied reference time</p>
+          <p class="applied-reference-time-label">적용된 기준 시각</p>
           <p id="applied-reference-time-value" class="mono"></p>
           <p id="applied-reference-time-zone" class="mono"></p>
         </div>
@@ -96,26 +96,26 @@
           <div class="generation-progress-status">
             <span id="generation-spinner" class="loading-spinner" aria-hidden="true"></span>
             <p id="generation-progress-message" role="status" aria-live="polite">
-              Generating candidates. This may take a few minutes.
+              후보를 생성하는 중입니다. 몇 분 정도 걸릴 수 있습니다.
             </p>
           </div>
-          <progress id="generation-indicator" aria-label="Candidate generation in progress"></progress>
+          <progress id="generation-indicator" aria-label="후보 생성 진행 중"></progress>
         </div>
       </section>
 
       <section class="panel results-panel" aria-labelledby="candidate-results-title">
         <div class="section-heading">
-          <h2 id="candidate-results-title">Candidate results</h2>
-          <p>Results remain in the server-provided requested order.</p>
+          <h2 id="candidate-results-title">후보 결과</h2>
+          <p>결과는 서버가 제공한 요청 순서로 표시됩니다.</p>
         </div>
         <p id="request-status" class="request-status" role="status" aria-live="polite">
-          Ready to generate candidates.
+          후보를 생성할 준비가 되었습니다.
         </p>
         <p id="request-error" class="request-error" role="alert" hidden></p>
         <fieldset class="candidate-selection-group" aria-describedby="selection-help">
-          <legend>Choose one successful candidate</legend>
+          <legend>성공한 후보 하나 선택</legend>
           <p id="selection-help" class="field-hint">
-            Candidate selection is temporary and remains in this browser tab only.
+            후보 선택은 임시이며 이 브라우저 탭에서만 유지됩니다.
           </p>
           <ol id="candidate-results" class="candidate-results" aria-live="polite" aria-relevant="all"></ol>
         </fieldset>
@@ -123,11 +123,11 @@
 
       <section class="panel selected-preview-panel" aria-labelledby="selected-preview-title">
         <div class="section-heading">
-          <h2 id="selected-preview-title">Selected candidate</h2>
-          <p>Draw one informational region on the selected frame.</p>
+          <h2 id="selected-preview-title">선택한 후보</h2>
+          <p>선택한 프레임에서 정보용 관심 영역(ROI)을 하나 그립니다.</p>
         </div>
         <p id="selection-status" class="selection-status" role="status" aria-live="polite">
-          No candidate selected.
+          선택한 후보가 없습니다.
         </p>
         <div id="selected-preview-content" class="selected-preview-content" hidden>
           <div class="selected-preview-media">
@@ -138,23 +138,23 @@
               aria-labelledby="roi-workspace-title"
               aria-describedby="roi-instructions roi-edit-instructions roi-status selection-status"
             >
-              <h3 id="roi-workspace-title">ROI workspace</h3>
+              <h3 id="roi-workspace-title">ROI 작업 영역</h3>
               <p id="roi-instructions" class="field-hint">
-                Select a candidate first, then drag across its image with a mouse, touch, or pen.
-                The page remains scrollable outside the image.
+                먼저 후보를 선택한 다음 마우스, 터치 또는 펜으로 이미지 위를 드래그하세요.
+                이미지 밖에서는 페이지를 계속 스크롤할 수 있습니다.
               </p>
               <p id="roi-edit-instructions" class="field-hint">
-                Drag to select an object. Drag the box to move it or use the handles to resize.
-                Focus the box to use Arrow keys to move it; Shift+Arrow moves by ten source pixels;
-                Alt+Arrow keys resize it (Alt+Shift uses ten). Delete or Backspace resets the ROI;
-                Escape cancels an edit in progress.
+                드래그하여 대상을 선택하세요. 상자를 드래그해 이동하거나 핸들로 크기를 조정할 수 있습니다.
+                상자에 초점을 맞추면 화살표 키로 이동합니다. Shift+화살표는 원본 픽셀 10만큼 이동하고,
+                Alt+화살표는 크기를 조정합니다(Alt+Shift는 10만큼 조정). Delete 또는 Backspace는 ROI를
+                초기화하고, Escape는 진행 중인 편집을 취소합니다.
               </p>
               <div
                 id="roi-stage"
                 class="roi-stage"
                 role="group"
                 tabindex="0"
-                aria-label="ROI editor"
+                aria-label="ROI 편집기"
                 aria-describedby="roi-edit-instructions roi-status"
                 aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Shift+ArrowUp Shift+ArrowDown Shift+ArrowLeft Shift+ArrowRight Alt+ArrowUp Alt+ArrowDown Alt+ArrowLeft Alt+ArrowRight Delete Backspace Escape"
                 hidden
@@ -164,30 +164,30 @@
                 <div id="roi-assisted-marker" class="roi-assisted-marker" hidden aria-hidden="true"></div>
                 <div id="roi-committed-overlay" class="roi-overlay roi-overlay-committed" hidden aria-hidden="true"></div>
                 <div id="roi-draft-overlay" class="roi-overlay roi-overlay-draft" hidden aria-hidden="true"></div>
-                <button id="roi-handle-nw" class="roi-handle roi-handle-nw" type="button" data-handle="nw" tabindex="-1" aria-label="Resize ROI north-west" aria-hidden="true"></button>
-                <button id="roi-handle-n" class="roi-handle roi-handle-n" type="button" data-handle="n" tabindex="-1" aria-label="Resize ROI north" aria-hidden="true"></button>
-                <button id="roi-handle-ne" class="roi-handle roi-handle-ne" type="button" data-handle="ne" tabindex="-1" aria-label="Resize ROI north-east" aria-hidden="true"></button>
-                <button id="roi-handle-e" class="roi-handle roi-handle-e" type="button" data-handle="e" tabindex="-1" aria-label="Resize ROI east" aria-hidden="true"></button>
-                <button id="roi-handle-se" class="roi-handle roi-handle-se" type="button" data-handle="se" tabindex="-1" aria-label="Resize ROI south-east" aria-hidden="true"></button>
-                <button id="roi-handle-s" class="roi-handle roi-handle-s" type="button" data-handle="s" tabindex="-1" aria-label="Resize ROI south" aria-hidden="true"></button>
-                <button id="roi-handle-sw" class="roi-handle roi-handle-sw" type="button" data-handle="sw" tabindex="-1" aria-label="Resize ROI south-west" aria-hidden="true"></button>
-                <button id="roi-handle-w" class="roi-handle roi-handle-w" type="button" data-handle="w" tabindex="-1" aria-label="Resize ROI west" aria-hidden="true"></button>
+                <button id="roi-handle-nw" class="roi-handle roi-handle-nw" type="button" data-handle="nw" tabindex="-1" aria-label="ROI 북서쪽 크기 조정" aria-hidden="true"></button>
+                <button id="roi-handle-n" class="roi-handle roi-handle-n" type="button" data-handle="n" tabindex="-1" aria-label="ROI 북쪽 크기 조정" aria-hidden="true"></button>
+                <button id="roi-handle-ne" class="roi-handle roi-handle-ne" type="button" data-handle="ne" tabindex="-1" aria-label="ROI 북동쪽 크기 조정" aria-hidden="true"></button>
+                <button id="roi-handle-e" class="roi-handle roi-handle-e" type="button" data-handle="e" tabindex="-1" aria-label="ROI 동쪽 크기 조정" aria-hidden="true"></button>
+                <button id="roi-handle-se" class="roi-handle roi-handle-se" type="button" data-handle="se" tabindex="-1" aria-label="ROI 남동쪽 크기 조정" aria-hidden="true"></button>
+                <button id="roi-handle-s" class="roi-handle roi-handle-s" type="button" data-handle="s" tabindex="-1" aria-label="ROI 남쪽 크기 조정" aria-hidden="true"></button>
+                <button id="roi-handle-sw" class="roi-handle roi-handle-sw" type="button" data-handle="sw" tabindex="-1" aria-label="ROI 남서쪽 크기 조정" aria-hidden="true"></button>
+                <button id="roi-handle-w" class="roi-handle roi-handle-w" type="button" data-handle="w" tabindex="-1" aria-label="ROI 서쪽 크기 조정" aria-hidden="true"></button>
               </div>
               <p id="roi-status" class="roi-status" data-state="disabled" role="status" aria-live="polite" aria-busy="false">
-                Select a candidate first.
+                먼저 후보를 선택하세요.
               </p>
               <p id="roi-assisted-guidance" class="field-hint roi-assisted-guidance">
-                Select a usable candidate to enable automatic ROI suggestions.
+                사용 가능한 후보를 선택하면 ROI 자동 제안을 사용할 수 있습니다.
               </p>
               <div id="roi-summary" class="roi-summary" hidden>
-                <p class="roi-summary-title">ROI in original-image pixels</p>
+                <p class="roi-summary-title">원본 이미지 픽셀 기준 ROI</p>
                 <dl class="candidate-facts">
                   <div class="candidate-fact"><dt>x</dt><dd id="roi-summary-x" class="mono"></dd></div>
                   <div class="candidate-fact"><dt>y</dt><dd id="roi-summary-y" class="mono"></dd></div>
-                  <div class="candidate-fact"><dt>Width</dt><dd id="roi-summary-width" class="mono"></dd></div>
-                  <div class="candidate-fact"><dt>Height</dt><dd id="roi-summary-height" class="mono"></dd></div>
-                  <div class="candidate-fact"><dt>Source width</dt><dd id="roi-summary-source-width" class="mono"></dd></div>
-                  <div class="candidate-fact"><dt>Source height</dt><dd id="roi-summary-source-height" class="mono"></dd></div>
+                  <div class="candidate-fact"><dt>너비</dt><dd id="roi-summary-width" class="mono"></dd></div>
+                  <div class="candidate-fact"><dt>높이</dt><dd id="roi-summary-height" class="mono"></dd></div>
+                  <div class="candidate-fact"><dt>원본 너비</dt><dd id="roi-summary-source-width" class="mono"></dd></div>
+                  <div class="candidate-fact"><dt>원본 높이</dt><dd id="roi-summary-source-height" class="mono"></dd></div>
                 </dl>
               </div>
               <div class="roi-actions">
@@ -199,10 +199,10 @@
                     aria-pressed="false"
                     aria-describedby="roi-assisted-guidance roi-status"
                   >
-                    Tap to suggest ROI
+                    ROI 자동 제안
                   </button>
                 </div>
-                <button id="roi-reset" type="button" disabled>Reset ROI</button>
+                <button id="roi-reset" type="button" disabled>ROI 초기화</button>
               </div>
             </div>
           </div>
