@@ -2,8 +2,9 @@
 
 ## Status and scope
 
-**Status: approved Phase 6-1 contract; Phase 6-2A backend foundation, Phase
-6-2B HTTP boundary, and Phase 6-2C web confirmation flow implemented.**
+**Status: schema 2 Phase 6-2A/2B/2C is implemented. The schema 3 baseline-
+integrity extension and explicit legacy reconfirmation required by Phase 7 are
+approved here as the Phase 6C compatibility increment.**
 
 This document defines the boundary where a user-reviewed reference frame and
 ROI stop being transient browser state and become one immutable, durable input
@@ -23,8 +24,9 @@ search, reports, OpenAI, YOLO, background work, or a database.
   until accepted into the canonical rectangle.
 - **Final ROI:** the current valid canonical source-pixel rectangle after any
   manual correction. This is what confirmation persists.
-- **Confirmed investigation:** an immutable schema 2 package that passed server
-  validation and atomic publication and is therefore eligible for Phase 7.
+- **Confirmed investigation:** an immutable schema 2 or schema 3 package that
+  passed server validation and atomic publication. Only schema 3 carries the
+  authoritative JPEG integrity facts required for automatic Phase 7 search.
 - **Legacy investigation:** an existing unversioned multi-camera package. It is
   not a confirmed object-disappearance input.
 
@@ -99,11 +101,12 @@ Each confirmed object-disappearance investigation is stored at:
 
 ```text
 artifacts/investigations/
-  object-disappearance-ch{channel_id}-{anchor_utc_token}/
+  object-disappearance-v3-ch{channel_id}-{anchor_utc_token}/
     manifest.json
 ```
 
-The deterministic `investigation_id` is the directory name. The UTC token uses
+For new schema 3 packages, the deterministic `investigation_id` is the versioned
+directory name. The UTC token uses
 the existing compact whole-second UTC convention. Including the channel avoids
 collisions between cameras at the same anchor. The MVP supports one confirmed
 object selection per channel and anchor; a second distinct object at the same
@@ -114,31 +117,34 @@ copy the JPEG, modify its manifest, or persist the transient mask. This keeps
 reference-frame ownership and lifecycle unchanged while giving Phase 7 a
 stable, validated lookup key.
 
-Existing unversioned multi-camera investigation manifests are legacy schema 1.
-They remain readable by their current consumers, are treated as unconfirmed by
-the Phase 7 loader, and are never rewritten automatically. The new confirmed
-shape is `schema_version: 2`; implementation must not silently reinterpret an
-old package as confirmed.
+Existing unversioned multi-camera manifests are legacy schema 1. The implemented
+confirmation shape is schema 2. Phase 6C adds schema 3 without rewriting either:
+its deterministic directory namespace includes `v3`, so explicit reconfirmation
+publishes a new immutable package and leaves the old package readable.
 
 ### Required persisted fields
 
-The schema 2 manifest contains:
+The Phase 7-eligible schema 3 manifest contains:
 
-- `schema_version`: integer `2`;
+- `schema_version`: integer `3`;
 - `investigation_id`: deterministic credential-free ID;
 - `investigation_kind`: `object_disappearance`;
 - `scenario_id`: `object-disappearance`;
 - `status`: `confirmed`;
 - `anchor_time_utc`: normalized whole-second UTC anchor;
-- `source_timezone`: the applied IANA zone, currently normally `Asia/Seoul`;
+- `source_timezone`: the normalized source-timezone provenance preserved by the
+  existing input boundary, normally the IANA zone `Asia/Seoul` but also a
+  fixed-offset form such as `UTC+09:00` for an aware input;
 - `confirmed_at_utc`: server-generated UTC audit time, retained across retries;
 - `artifact_directory_relative`: the safe repository-relative package path;
 - `confirmation.channel_id`;
 - `confirmation.candidate_offset_seconds`;
 - `confirmation.reference_frame`: stable resource ID, resource manifest schema
   and generation-policy versions, resource dimensions, requested time text and
-  UTC, and frame-selection policy. The JPEG is resolved from this trusted
-  resource ID and is neither accepted from the client nor duplicated here;
+  UTC, frame-selection policy, authoritative lowercase `jpeg_sha256`, and
+  positive `jpeg_size_bytes`. Phase 6 computes integrity from the exact fully
+  decoded JPEG bytes after dimension validation; neither value is accepted from
+  the client and the JPEG is not duplicated here;
 - `confirmation.timing`: decoded local/clip-relative PTS, nullable estimated source
   time, nullable offset from requested time, precision status, and safe
   warnings copied from the validated reference-frame manifest; and
@@ -148,15 +154,15 @@ An illustrative shape is:
 
 ```json
 {
-  "schema_version": 2,
-  "investigation_id": "object-disappearance-ch1-20260720T033418Z",
+  "schema_version": 3,
+  "investigation_id": "object-disappearance-v3-ch1-20260720T033418Z",
   "investigation_kind": "object_disappearance",
   "scenario_id": "object-disappearance",
   "status": "confirmed",
   "anchor_time_utc": "2026-07-20T03:34:18Z",
   "source_timezone": "Asia/Seoul",
   "confirmed_at_utc": "2026-08-02T04:05:06Z",
-  "artifact_directory_relative": "artifacts/investigations/object-disappearance-ch1-20260720T033418Z",
+  "artifact_directory_relative": "artifacts/investigations/object-disappearance-v3-ch1-20260720T033418Z",
   "confirmation": {
     "channel_id": 1,
     "candidate_offset_seconds": -10,
@@ -169,7 +175,9 @@ An illustrative shape is:
       "source_timezone": "Asia/Seoul",
       "frame_selection_policy": "nearest_decoded_frame",
       "width": 2560,
-      "height": 1440
+      "height": 1440,
+      "jpeg_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "jpeg_size_bytes": 481920
     },
     "timing": {
       "decoded_local_pts_seconds": 2.04,
@@ -190,11 +198,12 @@ An illustrative shape is:
 }
 ```
 
-The resource ID is the only persisted frame reference. No JPEG path is accepted
-from or returned to the client, and the confirmation manifest does not duplicate
-one. The investigation repository resolves the JPEG and checks its containment
-and existence through the trusted reference-frame resource store; it must not
-concatenate a client-controlled path.
+The resource ID is the only persisted frame locator. The integrity values bind
+the confirmation to its resolved bytes but are not paths. No JPEG path is
+accepted from or returned to the client, and the confirmation manifest does not
+duplicate one. The repository resolves only through the trusted resource store,
+fully decodes the file, and hashes the same bytes; it never concatenates a
+client-controlled path.
 
 ### Field ownership and validation
 
@@ -204,6 +213,7 @@ concatenate a client-controlled path.
 | Channel | Validated reference-frame manifest; current inventory is informational for an already completed historical resource | Never accept channel metadata in the body; reject a resource whose trusted channel is invalid or does not match the selected resource. Do not reject solely because the camera is now offline. |
 | Applied anchor, timezone, offset | Browser draft checked through the existing input parser; resource time is server-authoritative | Normalize the anchor, derive the offset from trusted resource time, and use any submitted offset only as a stale-state equality guard. |
 | Requested frame time and decoder evidence | Validated reference-frame manifest | Copy server-side; never accept replacements from the browser. |
+| JPEG integrity | Exact trusted JPEG bytes resolved and fully decoded at confirmation | Persist SHA-256 and byte size in schema 3; never accept either from the browser. |
 | Source dimensions | Validated reference-frame manifest | Body dimensions are equality guards; the manifest values are authoritative. |
 | ROI and provenance | Current user-reviewed browser state | Validate strictly against authoritative dimensions; persist final integer coordinates and one allowed provenance value. |
 | Investigation ID, kind, status, artifact path | Confirmation service/repository | Derive deterministically; never accept a client path or ID. |
@@ -289,6 +299,37 @@ Phase 6-2B adds one create-or-resolve endpoint:
 POST /api/v1/investigation-confirmations
 ```
 
+The endpoint and client request shape do not change for ordinary schema 3
+confirmation. The current runtime still publishes schema 2; after Phase 6C, new and
+explicitly reconfirmed submissions resolve under the `v3` identity namespace
+and return schema 3.
+
+Phase 6C also adds one compatibility action for an existing schema 2 package:
+
+```http
+POST /api/v1/investigation-confirmations/{investigation_id}/reconfirm-for-recording-search
+```
+
+The existing GET representation first reopens the schema 2 package read-only.
+The page resolves its existing reference-frame resource through the current safe
+image route, renders that JPEG with the persisted source-pixel ROI, and presents
+one explicit action labelled **Reconfirm for recording search**. The POST accepts
+no replacement JPEG, ROI, dimensions, timing, provenance, digest, path, or other
+server-owned facts. It expresses only the user's decision to reconfirm the
+displayed immutable selection.
+
+The service strictly reloads the schema 2 package and referenced resource,
+preserves every applicable Phase 6 field, fully decodes and dimension-checks the
+current JPEG, validates the persisted ROI, computes `jpeg_sha256` and
+`jpeg_size_bytes` from those exact bytes, and publishes a new immutable schema 3
+package under its versioned identity. Immediately before publication it
+re-resolves and revalidates the same resource so changed bytes cannot be
+confirmed. Missing, corrupt, ambiguous, outside-root, indirect, changed, or
+dimension-mismatched JPEGs and invalid ROIs fail through fixed safe errors. The
+schema 2 package is never edited, replaced, or migrated in place. Success returns
+the new schema 3 representation and makes it available through
+`load_confirmed()` as `ConfirmedInvestigationInput`.
+
 Request fields are the user-controlled confirmation-boundary fields listed
 above. The route parses transport data, invokes one confirmation service, and
 uses the existing safe error envelope. It does not write files directly.
@@ -314,7 +355,8 @@ uses the existing safe error envelope. It does not write files directly.
 
 There is no path parameter on create because the current web flow has no
 persisted draft investigation ID. The service creates its deterministic
-investigation identity from the trusted resource channel and normalized anchor.
+investigation identity from the publication schema, trusted resource channel,
+and normalized anchor.
 Thus a client cannot attach a candidate or channel to an arbitrary existing
 investigation. The current candidate/resource relation is proven from resource
 facts rather than a nonexistent draft manifest.
@@ -336,12 +378,12 @@ immutable confirmed state without resubmitting it:
 
 ```json
 {
-  "investigation_id": "object-disappearance-ch1-20260720T033418Z",
+  "investigation_id": "object-disappearance-v3-ch1-20260720T033418Z",
   "outcome": "created",
   "status": "confirmed",
-  "schema_version": 2,
+  "schema_version": 3,
   "confirmed_at_utc": "2026-08-02T04:05:06Z",
-  "artifact_directory_relative": "artifacts/investigations/object-disappearance-ch1-20260720T033418Z",
+  "artifact_directory_relative": "artifacts/investigations/object-disappearance-v3-ch1-20260720T033418Z",
   "confirmation": {
     "channel_id": 1,
     "candidate_offset_seconds": -10,
@@ -410,8 +452,11 @@ canonical document before publication.
 - A materially different submission for the same deterministic ID returns
   `confirmation_conflict`. It does not overwrite, merge, or create a numbered
   sibling implicitly.
-- A confirmed package is immutable. Reopen is read-only; editing and explicit
-  creation of a replacement investigation are future product decisions.
+- A confirmed package is immutable. Ordinary reopen is read-only; editing and
+  general replacement creation remain future product decisions. Phase 6C's
+  narrowly scoped **Reconfirm for recording search** action is the sole
+  compatibility exception: it preserves the schema 2 package and creates a new
+  schema 3 identity from the same explicitly re-reviewed selection.
 
 The browser also disables the confirmation action while a request is active,
 but server-side idempotency remains authoritative for double clicks, retries,
@@ -520,13 +565,18 @@ package; the Phase 7 loader must revalidate it and fail safely if unavailable.
 browser draft (not durable)
   -> confirming (transient request state)
   -> confirmed (immutable durable package)
+
+confirmed schema 2 (read-only)
+  -> reconfirming for recording search (transient Phase 6C request state)
+  -> confirmed schema 3 (new immutable package; schema 2 unchanged)
 ```
 
 A confirmation failure returns the browser to its reviewable draft with the
-current valid candidate and ROI intact. There is no durable `confirming` or
-`failed` manifest. Once confirmed, candidate and ROI editing controls become
-read-only for that investigation. Identical retry and read are allowed; mutation
-is not.
+current valid candidate and ROI intact. A Phase 6C reconfirmation failure returns
+to the read-only schema 2 review with its displayed JPEG and ROI intact. There is
+no durable `confirming`, `reconfirming`, or `failed` manifest. Once confirmed,
+candidate and ROI editing controls remain read-only for that package. Identical
+retry and read are allowed; neither action mutates an existing package.
 
 ## Inline Korean web flow
 
@@ -557,6 +607,12 @@ surface, preserves the valid draft, and permits retry. The layout remains the
 existing single-column mobile flow with a full-width action and source-aspect
 image; no modal or hover-only interaction is introduced.
 
+For a schema 2 reopen, Phase 6C uses the same read-only summary surface to show
+the existing JPEG and ROI, adds only the **Reconfirm for recording search**
+action, disables it while the compatibility POST is pending, and replaces the
+summary with the returned schema 3 confirmation on success. It does not enable
+candidate or ROI editing and does not introduce general version management.
+
 ## Phase 7 handoff
 
 Phase 7 consumes a confirmed domain object, not browser state, API models, or
@@ -566,23 +622,76 @@ unvalidated JSON. A narrow repository/loader boundary should expose one method:
 load_confirmed(investigation_id) -> ConfirmedInvestigationInput
 ```
 
-The loader:
+The implemented schema 2 typed output contains exactly:
 
-- confines lookup to `artifacts/investigations/`;
-- rejects symlinks, traversal, unknown schema versions, duplicate/unknown keys,
-  non-`confirmed` status, and legacy manifests;
-- parses time, dimensions, ROI, provenance, and timing evidence strictly;
-- resolves the reference-frame resource and its JPEG through the existing store,
-  applying path-containment and artifact-existence checks rather than reading a
-  confirmation-supplied path;
-- verifies channel, requested time, generation facts, and dimensions still agree
-  with the confirmation snapshot; and
-- returns credential-free typed values and resolved local paths only inside the
-  service boundary.
+```text
+investigation_id
+channel_id
+anchor_time_utc
+source_timezone
+candidate_offset_seconds
+reference_frame_resource_id
+requested_time_text
+requested_time_utc
+generation_policy_version
+frame_selection_policy
+estimated_source_time_utc | null
+decoded_local_pts_seconds | null
+timing_precision_status
+warnings
+source_width
+source_height
+roi
+jpeg_path
+```
 
-Phase 7 search/classification receives this loader output and cannot accept an
-unconfirmed frontend snapshot. A missing/corrupt referenced frame, corrupt
-confirmation, or unsupported schema fails before media or model work.
+Phase 6C must add schema 3 parsing and these two server-owned fields to the typed
+output before recording search can run:
+
+```text
+jpeg_sha256
+jpeg_size_bytes
+```
+
+The current Python dataclass does not contain those fields; this is an explicit
+Phase 6 models/repository/service update, not a documentation alias for current
+behavior. Phase 7 requires schema 3 and returns `reconfirmation_required` for a
+schema 2 package.
+
+The loader confines lookup to `artifacts/investigations/`, rejects path
+indirection and invalid or legacy manifests, strictly parses the confirmation,
+resolves the immutable resource, and revalidates channel, requested time,
+generation facts, dimensions, ROI, and JPEG existence. For schema 3 it also
+fully decodes the resolved JPEG, recomputes SHA-256 and byte size, and requires
+both to match the confirmation before returning. `jpeg_path` is a trusted
+internal value hidden from representations; it is neither persisted in the
+confirmation manifest nor exposed to a caller.
+
+The handoff does not contain an NVR identity, camera serial number, or stable
+`source_identity`. Phase 7 must not describe one as Phase 6-confirmed evidence.
+It may use existing inventory metadata for a small current-channel preflight and
+must request reconfirmation when a mismatch is explicitly detected. If the SDK
+cannot prove that the same channel number still maps to the same physical
+camera, that remains an explicit MVP limitation.
+
+Phase 7 search/classification cannot accept an unconfirmed frontend snapshot. A
+missing, ambiguous, path-unsafe, corrupt, digest-mismatched, size-mismatched, or
+unsupported confirmation fails before recording or classifier work and cannot
+produce baseline `PRESENT`, probe `ABSENT`, or `FOUND`. An intact schema 3 Phase
+6 confirmation and JPEG
+remain a valid baseline even if their original historical recording segment has
+expired. Phase 7 never invents a segment, session, PTS, or ordinal for that
+baseline; newly decoded recording probes retain their own recording provenance.
+
+Phase 7 must preserve `source_timezone` exactly as normalized here. An
+offset-aware search end may be validated against either IANA or fixed-offset
+provenance and converted to UTC. A naive search end requires an IANA zone with
+date-aware ambiguity/nonexistence checks; fixed-offset provenance alone cannot
+resolve it, so an aware end is required. Phase 7 does not rewrite the Phase 6
+timezone field.
+The consuming single-host run, observation, search, and Phase 8 handoff contract
+is defined in
+[Phase 7 Object-Disappearance Recording Search MVP](object-disappearance-recording-search.md).
 
 ## Backward compatibility
 
@@ -594,9 +703,17 @@ confirmation, or unsupported schema fails before media or model work.
 - Existing unversioned multi-camera investigation manifests default to legacy
   schema 1 for readers that understand them. They have no implied confirmation
   status and Phase 7 returns a safe `not_confirmed` result before processing.
-- No destructive migration is required. A future explicit migration could
-  create a new schema 2 package only from independently validated user intent;
-  it must not infer an ROI from legacy data.
+- Existing schema 2 confirmations remain readable and immutable but cannot
+  start Phase 7. Reopen/reconfirm recomputes integrity from the current trusted
+  resource and publishes a new schema 3 package in the versioned namespace.
+  Phase 7 must not silently hash and bless a schema 2 path.
+- Phase 6C adds the explicit **Reconfirm for recording search** action when Phase
+  6 reopens schema 2. The dedicated compatibility POST carries no replacement
+  selection facts; the server reloads the canonical schema 2 selection, resolves
+  all trusted facts, and publishes a new schema 3 package. No update endpoint,
+  client-supplied digest, or mutable overwrite is introduced.
+- No destructive migration is required. Schema 1 and schema 2 packages remain
+  in place; reconfirmation requires current user intent and never infers an ROI.
 - Unknown future schema versions fail closed rather than being treated as the
   current contract.
 
@@ -626,6 +743,20 @@ confirmation, or unsupported schema fails before media or model work.
   rejected by the Phase 7 confirmation loader.
 
 ## Delivery slices
+
+### Phase 6C: schema 3 compatibility
+
+- **Inputs:** one strictly loaded schema 2 confirmation, its trusted immutable
+  reference resource, and explicit user activation after read-only JPEG/ROI
+  review.
+- **Outputs:** one new immutable schema 3 package and its strict
+  `ConfirmedInvestigationInput`; the schema 2 package remains unchanged.
+- **Tests:** read-only reopen and rendering, explicit action ownership, strict
+  resource/ROI validation, digest/size calculation, changed-byte revalidation,
+  safe failure, new identity, and old-package immutability.
+- **Complete:** a user can review a schema 2 JPEG/ROI, explicitly reconfirm it,
+  and load the resulting schema 3 input after restart without any in-place
+  migration.
 
 ### Phase 6-2: backend persistence
 
@@ -673,8 +804,10 @@ resource/time/dimension ownership, every ROI boundary, all provenance
 transitions, deterministic identity, canonical JSON, identical reuse, lost
 response retry, concurrent claim conflict, different-payload conflict, staging
 cleanup, dependency disappearance before promotion, restart/read, malformed and
-legacy manifests, Phase 7 loader rejection, path containment, symlink rejection,
-and secret redaction.
+legacy manifests, schema 2 reconfirmation requirement, schema 3 digest/size
+creation and mismatch rejection, the Phase 6C compatibility action, Phase 7
+loader rejection, path containment,
+symlink rejection, and secret redaction.
 
 Frontend tests should exercise enablement from the actual selected image and ROI,
 manual/assisted/adjusted provenance, stale candidate and dimension rejection,
@@ -692,9 +825,10 @@ behavior against local real-NVR artifacts without adding automated NVR tests.
   not defined.
 - Candidate sets are not durable, so membership is validated by deterministic
   resource/time facts rather than a set manifest.
-- The current web draft has no forward search-end field. Phase 7 must define its
-  bounded search horizon as a separate validated input or policy; confirmation
-  must not invent or silently persist one.
+- The confirmation intentionally has no forward search-end field. Phase 7 now
+  accepts it as a separate validated whole-second input. Aware values work with
+  IANA or fixed-offset Phase 6 provenance; naive values require IANA resolution.
+  The immutable Phase 6 package remains unchanged.
 - Reference-frame dependency and confirmation publication are not one filesystem
   transaction; the loader detects later dependency loss.
 - Exact absolute selected-frame time remains unavailable until an evidence-backed
@@ -705,7 +839,9 @@ behavior against local real-NVR artifacts without adding automated NVR tests.
 ## Acceptance criteria for implementation
 
 Phase 6 is ready to hand to Phase 7 only when an operator can review one current
-candidate/ROI, confirm it once, safely retry or reopen it, and load the same
-immutable typed input after process restart; no partial package is observable,
-no conflicting submission overwrites it, and all timing/security limitations
-remain explicit.
+candidate/ROI, publish or reuse schema 3 with authoritative JPEG SHA-256 and byte
+size, safely retry or reopen it, and load the same immutable typed input after
+process restart. A schema 2 package requires the explicit Phase 6C reconfirmation
+action and remains unchanged after the new schema 3 package is published; no partial
+package is observable, no conflicting submission overwrites it, and all
+timing/security limitations remain explicit.

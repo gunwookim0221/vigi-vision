@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted for Phase 6 implementation.
+Accepted. Schema 2 is implemented; the schema 3 integrity extension required by
+Phase 7 is approved as the Phase 6C compatibility increment.
 
 ## Context
 
@@ -19,13 +20,15 @@ partial writes and make retry/conflict behavior ambiguous.
 
 ## Decision
 
-Confirmation creates an immutable schema 2 object-disappearance package under
+New confirmation creates an immutable schema 3 object-disappearance package under
 `artifacts/investigations/`. Its deterministic identity includes scenario,
-channel, and whole-second UTC anchor. The manifest references the existing
-reference-frame resource by stable ID, snapshots its validated safe facts, and
-stores one integer half-open source-pixel ROI with provenance. It stores no JPEG
-filesystem path: the backend resolves the JPEG from the trusted resource ID,
-and neither the client nor confirmation duplicates or modifies that resource.
+schema version, channel, and whole-second UTC anchor. The manifest references
+the existing reference-frame resource by stable ID, snapshots its validated
+safe facts, and stores one integer half-open source-pixel ROI with provenance.
+After fully decoding and dimension-checking the trusted JPEG, Phase 6 also
+persists its SHA-256 and byte size. It stores no JPEG filesystem path: the
+backend resolves the JPEG from the trusted resource ID, and neither the client
+nor confirmation duplicates or modifies that resource.
 
 Publication uses an exclusive sibling claim, same-filesystem staging directory,
 deterministic JSON, and atomic no-overwrite directory promotion. The
@@ -36,9 +39,18 @@ cleanup cannot make a successful retry appear in progress. Identical submissions
 reuse the completed package; materially different submissions for the same
 identity conflict. No confirmed package is edited in place.
 
-Legacy unversioned investigation manifests remain legacy schema 1 and are not
-automatically migrated or accepted as confirmed Phase 7 inputs. The complete
-schema, API, lifecycle, and loader contract is in
+Legacy unversioned manifests remain schema 1. Existing schema 2 confirmations
+remain immutable and readable but lack authoritative integrity facts, so they
+cannot start Phase 7 automatically. Phase 6C's explicit **Reconfirm for recording
+search** action reopens the schema 2 JPEG and source-pixel ROI read-only, shows
+both for user confirmation, and uses a dedicated compatibility POST that accepts
+no replacement selection or server-owned facts. The server strictly reloads the
+existing package and trusted resource, validates the JPEG and ROI, computes
+SHA-256 and byte size from the newly confirmed bytes, revalidates immediately
+before publication, and creates a new schema 3 package in a versioned namespace.
+Missing, corrupt, changed, path-unsafe, dimension-mismatched, or ROI-invalid input
+fails safely. The action never updates the schema 2 package or silently blesses
+its current path. The complete schema, API, lifecycle, and loader contract is in
 [Investigation Confirmation and Durable Persistence](../design/investigation-confirmation.md).
 
 ## Alternatives considered
@@ -75,13 +87,17 @@ derived when required.
 
 ## Consequences
 
-- Phase 7 has one strict loader boundary and never consumes browser state.
+- Phase 7 has one strict schema 3 loader boundary and never consumes browser
+  state or a freshly hashed legacy path.
 - Reference-frame resources, candidate APIs, and existing multi-camera packages
   remain unchanged.
 - Confirmation is idempotent but immutable; editing or selecting a second object
   at the same channel/anchor needs a future explicit identity flow.
-- The referenced JPEG is not duplicated. Manual deletion or corruption after
-  confirmation is detected by loader revalidation rather than prevented by a
-  cross-package transaction.
+- The referenced JPEG is not duplicated. Manual deletion, replacement, or
+  corruption after confirmation is detected by full decode plus digest, size,
+  and dimension revalidation rather than prevented by a cross-package
+  transaction.
 - Existing legacy manifests remain usable by existing consumers but cannot start
   Phase 7 object-disappearance work.
+- Phase 6C is a narrow compatibility path, not a general replacement,
+  migration, or confirmation-version management system.
