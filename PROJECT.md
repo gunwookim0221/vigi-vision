@@ -166,17 +166,33 @@ status feedback into the single external live region below the image, keeps the
 image dedicated to source/mask/rectangle/tap evidence, adds explicit state
 semantics, and preserves reset/stale-response cleanup plus manual fallback;
 localization remains deferred to Phase 5-4C. Phase 6-1 approved the
-confirmation contract: one reviewed candidate and canonical
-source-pixel ROI will publish an immutable schema 2 package under the existing
-investigation artifact root, reference the immutable frame resource, preserve
-truthful nullable absolute timing, and expose one strict Phase 7 loader
-boundary. Phase 6-2A now implements the typed backend persistence foundation,
+confirmation contract: one reviewed candidate and canonical source-pixel ROI
+currently publish an immutable schema 2 package under the existing investigation
+artifact root, reference the immutable frame resource, preserve truthful nullable
+absolute timing, and expose one strict loader boundary. Phase 6-2A now implements
+the typed backend persistence foundation,
 and Phase 6-2B exposes it through the existing safe FastAPI boundary. Phase
 6-2C now connects the existing reference-frame/ROI page to that boundary with
 inline Korean review, strict POST/GET confirmation, reopen restoration, and
-immutable read-only success state. Absolute
-source-time calibration and object comparison
-remain deferred; Phase 4C-2 provides transient frontend-only selection of one
+immutable read-only success state. Phase 7 now has a deliberately small
+single-site recording-search MVP design. Before search, Phase 6C adds the small
+schema 3 compatibility increment: confirmation-time JPEG SHA-256 and byte size,
+explicit read-only schema 2 reconfirmation into a new immutable identity, and
+mismatch-safe loading. Search uses
+one unique run ID and directory
+per attempt, rejects concurrent starts with one local OS-backed lock, marks
+abandoned nonterminal runs `INTERRUPTED`, and requires an explicit new run
+instead of automatic resume or takeover. The search samples recordings every
+five minutes, resolves absence support through one bounded multi-target decode,
+deduplicates canonical frames, and uses the production EfficientSAM-Ti mask plus
+aligned-ROI luma-NCC comparator before whole-second binary narrowing. Its compact
+manifest persists the closed baseline/probe/alias union and full policy snapshot
+without inventing stable source identity. Advanced lease, fencing, takeover,
+resume, and crash-recovery analysis is preserved as non-normative future
+reference. No Phase 7 runtime, schema 3 update, classifier, transport, Phase 8
+review media, or Phase 9 result UI is implemented. Absolute source-time
+calibration remains deferred; Phase 4C-2
+provides transient frontend-only selection of one
 successful candidate, and Phase 5-1/5-2 provide the transient source-space
 editing surface without altering the API or evidence semantics.
 Generic Event Discovery remains a longer-term direction rather than a current
@@ -201,6 +217,15 @@ capability.
    desktop/mobile acceptance. Continue with Phase 6-4 real-NVR validation
    without changing recording or reference-frame
    ownership.
+6. Implement the scope-reviewed single-site object-disappearance MVP in bounded
+   slices: Phase 6C schema 3 compatibility, Phase 7A-1 local lifecycle, Phase
+   7A-2 canonical multi-target acquisition, then Phase 7B-7E for the production
+   three-state comparator;
+   chronological coarse sampling and exhaustive support transitions; binary
+   narrowing, terminal persistence, and Phase 8 handoff; then real-NVR
+   validation. Preserve published Phase 6 package immutability, reject duplicate
+   starts, never reuse interrupted-run evidence, and defer Phase 8 media plus
+   Phase 9 judgment.
 
 ## High-level roadmap
 
@@ -211,6 +236,7 @@ capability.
    SDK in the smallest working path.
 4. **Hardening:** improve tests, errors, documentation, and operability based on
    observed MVP needs.
-5. **Expansion:** validate user-selected object change investigation before
+5. **Expansion:** implement and validate the designed Phase 7 user-selected
+   object-change search before Phase 8 evidence creation, Phase 9 user judgment,
    broader event types, object relocation, generic Event Discovery, or optional
    VLM interpretation.

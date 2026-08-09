@@ -183,7 +183,14 @@ or glass effects are used.
   authoritative for the UI.
 - ROI keyboard movement/resizing and reset are implemented in Phase 5-2; the
   confirmation/persistence accessibility contract is implemented in Phase 6-2C;
-  object-comparison semantics remain later-phase work.
+  the current
+  [Phase 7 recording-search MVP](docs/design/object-disappearance-recording-search.md)
+  now defines the required Phase 6 schema 3 JPEG integrity gate, one local active
+  run, canonical multi-target decoding, the production EfficientSAM-Ti plus
+  aligned-ROI comparison policy, deterministic coarse/binary search, and a Phase
+  8 handoff. Its runtime and the Phase 8/9 review UI remain later work.
+  Advanced recovery analysis is retained only as
+  [non-normative future reference](docs/future/recording-search-resilience.md).
 - Tap-assisted selection and the Phase 5-3C transient silhouette preview are
   implemented but remain acceptance-gated for physical desktop/mobile use; the
   disposable harness, production backend, canvas preview, and explicit

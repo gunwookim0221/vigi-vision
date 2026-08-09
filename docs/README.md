@@ -25,9 +25,15 @@ documentation route is added, removed, or relocated.
   planned generic NVR frame-sampling contract is in
   [design/recording-sampling.md](design/recording-sampling.md). Read
   [design/object-disappearance-investigation.md](design/object-disappearance-investigation.md)
-  when planning the approved, not-yet-implemented user-selected object change
-  investigation slice and its later reference-frame, ROI, and temporal-search
-  boundaries. Read [design/reference-frame-service.md](design/reference-frame-service.md)
+  for the bounded object-change product scope and safety constraints. Read
+  [design/object-disappearance-recording-search.md](design/object-disappearance-recording-search.md)
+  for the current normative Phase 7 single-site MVP: one active local run,
+  interruption and explicit restart, the required Phase 6 schema 3 integrity
+  handoff, canonical multi-target decoding, the production three-state
+  classifier, deterministic coarse/binary search, compact persistence, and the
+  Phase 8 request boundary.
+  Read
+  [design/reference-frame-service.md](design/reference-frame-service.md)
   when implementing or reviewing the proposed recorded reference-frame service,
   its timing evidence or durable artifacts. Read
   [design/reference-frame-api.md](design/reference-frame-api.md) for the
@@ -37,8 +43,9 @@ documentation route is added, removed, or relocated.
   for the implemented Phase 4A bounded candidate-set contract that reuses those
   single-frame resources without making absolute timing claims. Read
   [design/investigation-confirmation.md](design/investigation-confirmation.md)
-  for the approved Phase 6-1 confirmation, immutable investigation package,
-  source-pixel ROI, idempotency, and Phase 7 handoff contract. Read
+  for the implemented schema 2 Phase 6 confirmation and the approved Phase 6C
+  schema 3 JPEG-integrity/reconfirmation compatibility increment, immutable package,
+  source-pixel ROI, idempotency, and typed handoff contract. Read
   [design/assisted-roi-selection.md](design/assisted-roi-selection.md) for the
   completed Phase 5-3A tap-assisted ROI feasibility decision, implemented
   Phase 5-3B-2 optional backend API/model lifecycle, and remaining frontend
@@ -52,6 +59,11 @@ documentation route is added, removed, or relocated.
   [integrations/recording-retrieval.md](integrations/recording-retrieval.md).
 - **ADR — `adr/`:** durable decisions whose alternatives and consequences matter.
   Read when revisiting a recorded choice.
+- **Future reference — `future/`:** explicitly non-normative analysis that is
+  not part of current implementation, review, or completion criteria. The
+  deferred lease, fencing, takeover, resume, crash-recovery, full-manifest, and
+  source-binding analysis is in
+  [future/recording-search-resilience.md](future/recording-search-resilience.md).
 - **Submission — `submission/`:** material required for an actual demo, review,
   release, or competition submission.
 

@@ -66,6 +66,7 @@ Focus on the reasoning behind the decision rather than implementation details.
 - [ADR-0004: Direct Reference-Frame Decoding and Nearest-Frame Selection](ADR-0004-direct-decoder-and-nearest-frame.md)
 - [ADR-0005: Reference Frame Artifact Lifecycle and Immutable Identity](ADR-0005-reference-frame-artifact-lifecycle.md)
 - [ADR-0006: Immutable Investigation Confirmation Packages](ADR-0006-investigation-confirmation-persistence.md)
+- [ADR-0007: Single-Site Coarse-to-Binary Recording Search](ADR-0007-validated-recording-search.md)
 
 ## Relationship with other documentation
 
