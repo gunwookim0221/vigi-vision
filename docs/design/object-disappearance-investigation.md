@@ -4,10 +4,10 @@
 
 **Status: approved object-disappearance direction; Phases 2-6 implement
 reference-frame retrieval, candidate review, source-space ROI selection, and
-immutable confirmation. Phase 7A-1 now implements only its validated local run
-lifecycle and safe start/status boundary. Phase 7A-2 is contract-defined as
-acquisition-only but remains unimplemented; classifier/search and the Phase 8/9
-review workflow remain unimplemented.**
+immutable confirmation. Phase 7A-1 now implements its validated local run
+lifecycle and safe start/status boundary. Phase 7A-2 now implements its
+acquisition-only schema-2 request/frame persistence and strict reopen boundary;
+classifier/search and the Phase 8/9 review workflow remain unimplemented.**
 
 This document defines the first bounded use case for VIGI Vision's longer-term
 Event Discovery direction: a user investigates one selected object on one NVR
@@ -291,11 +291,11 @@ version after Phase 7E evidence.
 2. **Phase 6 (schema 2 and schema 3 compatibility implemented):** strict
    immutable confirmation publication, explicit legacy reconfirmation, and
    digest-bound typed Phase 7 loading.
-3. **Phase 7 (A-1 implemented; A-2 contract-defined but unimplemented):**
-   single-host run lifecycle, interruption/new-run isolation, and truthful
-   baseline provenance; A-2 next adds acquisition-only request/frame records,
-   canonical frame identities, run-relative JPEG publication, and strict
-   acquisition indexes. Later slices add recording observations, production
+3. **Phase 7 (A-1 and A-2 implemented):** single-host run lifecycle,
+   interruption/new-run isolation, truthful baseline provenance, and
+   acquisition-only request/frame records with canonical frame identities,
+   run-relative JPEG publication, and strict acquisition indexes. Later slices
+   add recording observations, production
    three-state classification, five-minute coarse sampling, one-second binary
    narrowing, compact persistence, and Phase 8 handoff.
 4. **Phase 8 (future):** boundary images, evidence timeline, and review video.

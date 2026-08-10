@@ -3,11 +3,12 @@
 ## Status and normative authority
 
 **Status: normative design for the current single-site Phase 7 MVP. Phase 7A-1
-implements only the validated local run lifecycle, baseline gate, isolated
-repository, duplicate/interruption handling, and safe start/status API. Recording
-acquisition, classifier, search orchestration, and Phase 8 review-media generation
-remain unimplemented; the required Phase 6C schema 3 compatibility increment is
-complete.**
+implements the validated local run lifecycle, baseline gate, isolated repository,
+duplicate/interruption handling, and safe start/status API. Phase 7A-2 implements
+acquisition-only schema-2 request/frame persistence, strict provenance, and
+reopen validation. Classifier, search orchestration, and Phase 8 review-media
+generation remain unimplemented; the required Phase 6C schema 3 compatibility
+increment is complete.**
 
 This document is the current implementation and review contract for Phase 7.
 It is intentionally limited to one restaurant, one local application host, one

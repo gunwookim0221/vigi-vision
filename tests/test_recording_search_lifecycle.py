@@ -109,6 +109,7 @@ def test_valid_schema_three_baseline_creates_running_run_without_search_work(
     result = service.start(_request(context.investigation_id))
 
     assert result.outcome.value == "started"
+    assert isinstance(result.manifest, RecordingSearchManifest)
     assert result.manifest.state is RecordingSearchState.RUNNING
     assert result.manifest.canonical_observation_ids == ()
     assert result.manifest.target_alias_ids == ()

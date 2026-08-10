@@ -19,6 +19,20 @@ from vigi_vision.durable_io import (
     is_safe_path,
     load_durable_json_object,
 )
+from vigi_vision.recording_search_a2_models import (
+    AcquisitionOperationRecord,
+    CanonicalProbeFrameRecord,
+    ProbeFrameRequestRecord,
+    RecordingSearchManifestV2,
+)
+from vigi_vision.recording_search_a2_repository import (
+    admit_operation,
+    parse_schema2_manifest,
+    promote_schema2,
+    publish_a2_bundle,
+    transition_schema2,
+    validate_schema2_tree,
+)
 from vigi_vision.recording_search_models import (
     RecordingSearchArtifactError,
     RecordingSearchManifest,
@@ -36,6 +50,8 @@ if TYPE_CHECKING:
 
 
 _STAGING_PREFIX: Final = ".phase7a1-"
+_SCHEMA2: Final = 2
+SearchManifest = RecordingSearchManifest | RecordingSearchManifestV2
 
 
 def _utc_now() -> datetime:
@@ -99,6 +115,8 @@ class RecordingSearchRepository:
             self._publish_staging_directory(staging_directory, run_directory)
             published = True
             result = self.load(manifest.investigation_id, manifest.search_run_id)
+            if not isinstance(result, RecordingSearchManifest):
+                raise RecordingSearchManifestCorruptError
             successful = True
         except RecordingSearchArtifactError:
             raise
@@ -115,7 +133,7 @@ class RecordingSearchRepository:
                 with suppress(OSError):
                     investigation_directory.rmdir()
 
-    def load(self, investigation_id: str, search_run_id: str) -> RecordingSearchManifest:
+    def load(self, investigation_id: str, search_run_id: str) -> SearchManifest:
         """Strictly load one persisted manifest."""
         path = self.run_path(investigation_id, search_run_id)
         try:
@@ -132,6 +150,8 @@ class RecordingSearchRepository:
                 _raise_corrupt()
             raw = manifest_path.read_text(encoding="utf-8")
             manifest = _parse_manifest(raw)
+            if isinstance(manifest, RecordingSearchManifestV2):
+                validate_schema2_tree(self.root, path, manifest)
         except RecordingSearchManifestCorruptError:
             raise
         except (DurableJsonError, OSError, UnicodeError, ValidationError, ValueError):
@@ -140,7 +160,7 @@ class RecordingSearchRepository:
             raise RecordingSearchManifestCorruptError
         return manifest
 
-    def latest_nonterminal(self, investigation_id: str) -> RecordingSearchManifest | None:
+    def latest_nonterminal(self, investigation_id: str) -> SearchManifest | None:
         """Return the newest strict pending or running run."""
         if not is_recording_search_investigation_id(investigation_id):
             raise RecordingSearchNotFoundError
@@ -153,7 +173,7 @@ class RecordingSearchRepository:
             entries = tuple(directory.iterdir())
         except (OSError, ValueError):
             raise RecordingSearchManifestCorruptError from None
-        manifests: list[RecordingSearchManifest] = []
+        manifests: list[SearchManifest] = []
         for entry in entries:
             if entry.name.startswith(_STAGING_PREFIX):
                 continue
@@ -176,9 +196,11 @@ class RecordingSearchRepository:
         search_run_id: str,
         target: RecordingSearchState,
         failure_reason: str | None = None,
-    ) -> RecordingSearchManifest:
+    ) -> SearchManifest:
         """Atomically apply one Phase 7A-1 lifecycle transition."""
         current = self.load(investigation_id, search_run_id)
+        if isinstance(current, RecordingSearchManifestV2):
+            return transition_schema2(self, current, target, failure_reason)
         if current.state not in (RecordingSearchState.PENDING, RecordingSearchState.RUNNING):
             raise RecordingSearchTransitionError
         if target not in (
@@ -215,6 +237,27 @@ class RecordingSearchRepository:
         self._write_manifest(updated)
         return self.load(investigation_id, search_run_id)
 
+    def promote_schema2(self, manifest: RecordingSearchManifestV2) -> RecordingSearchManifestV2:
+        """Publish a schema-2 successor for an active schema-1 run."""
+        return promote_schema2(self, manifest)
+
+    def admit_operation(
+        self,
+        manifest: RecordingSearchManifestV2,
+        operation: AcquisitionOperationRecord,
+    ) -> RecordingSearchManifestV2:
+        """Publish one admitted A2 operation and its manifest index successor."""
+        return admit_operation(self, manifest, operation)
+
+    def publish_a2_bundle(
+        self,
+        manifest: RecordingSearchManifestV2,
+        request_records: tuple[ProbeFrameRequestRecord, ...],
+        frame_records: tuple[tuple[CanonicalProbeFrameRecord, bytes], ...],
+    ) -> RecordingSearchManifestV2:
+        """Publish immutable A2 children and one manifest index successor."""
+        return publish_a2_bundle(self, manifest, request_records, frame_records)
+
     def run_path(self, investigation_id: str, search_run_id: str) -> Path:
         """Return a validated run path without creating it."""
         if not is_recording_search_investigation_id(investigation_id):
@@ -236,16 +279,21 @@ class RecordingSearchRepository:
             raise RecordingSearchArtifactError
         return path
 
-    def _write_manifest(self, manifest: RecordingSearchManifest) -> None:
+    def write_schema2_manifest(self, manifest: RecordingSearchManifestV2, directory: Path) -> None:
+        """Write one schema-2 manifest through the repository's atomic writer."""
+        self._write_manifest_to_directory(manifest, directory)
+
+    def _write_manifest(self, manifest: SearchManifest) -> None:
         directory = self.run_path(manifest.investigation_id, manifest.search_run_id)
         self._write_manifest_to_directory(manifest, directory)
 
-    def _write_manifest_to_directory(
-        self, manifest: RecordingSearchManifest, directory: Path
-    ) -> None:
+    def _write_manifest_to_directory(self, manifest: SearchManifest, directory: Path) -> None:
         if not is_safe_contained_path(self.root, directory, require_target=True):
             raise RecordingSearchArtifactError
-        validate_phase7a1_manifest(manifest)
+        if isinstance(manifest, RecordingSearchManifestV2):
+            _ = manifest
+        else:
+            validate_phase7a1_manifest(manifest)
         canonical = manifest.canonical_json()
         _ = _parse_manifest(canonical)
         path = directory / "manifest.json"
@@ -293,8 +341,14 @@ def _raise_corrupt() -> NoReturn:
     raise RecordingSearchManifestCorruptError
 
 
-def _parse_manifest(raw: str) -> RecordingSearchManifest:
+def _parse_manifest(raw: str) -> RecordingSearchManifest | RecordingSearchManifestV2:
     _ = load_durable_json_object(raw)
+    try:
+        schema = _.get("schema_version")
+    except AttributeError:
+        schema = None
+    if schema == _SCHEMA2:
+        return parse_schema2_manifest(raw)
     manifest = RecordingSearchManifest.model_validate_json(raw, strict=True)
     validate_phase7a1_manifest(manifest)
     return manifest

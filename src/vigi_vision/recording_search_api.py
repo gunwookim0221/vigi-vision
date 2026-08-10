@@ -10,6 +10,7 @@ from fastapi import APIRouter, FastAPI, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 
+from vigi_vision.recording_search_a2_models import RecordingSearchManifestV2
 from vigi_vision.recording_search_models import (
     ReconfirmationRequiredError,
     RecordingSearchArtifactError,
@@ -78,7 +79,7 @@ def install_recording_search_routes(
 
     async def start(
         body: RecordingSearchRequestBody, response: Response
-    ) -> RecordingSearchManifest | JSONResponse:
+    ) -> RecordingSearchManifest | RecordingSearchManifestV2 | JSONResponse:
         if dependencies.service is None:
             return _unavailable()
         try:
@@ -102,7 +103,7 @@ def install_recording_search_routes(
 
     async def get_status(
         investigation_id: str, search_run_id: str
-    ) -> RecordingSearchManifest | JSONResponse:
+    ) -> RecordingSearchManifest | RecordingSearchManifestV2 | JSONResponse:
         if dependencies.service is None:
             return _unavailable()
         try:
@@ -121,7 +122,7 @@ def install_recording_search_routes(
         "",
         start,
         methods=["POST"],
-        response_model=RecordingSearchManifest,
+        response_model=RecordingSearchManifest | RecordingSearchManifestV2,
         status_code=status.HTTP_201_CREATED,
         responses={
             status.HTTP_400_BAD_REQUEST: {"model": ReferenceFrameErrorResponse},
@@ -134,7 +135,7 @@ def install_recording_search_routes(
         "/{investigation_id}/{search_run_id}",
         get_status,
         methods=["GET"],
-        response_model=RecordingSearchManifest,
+        response_model=RecordingSearchManifest | RecordingSearchManifestV2,
         status_code=status.HTTP_200_OK,
         responses={
             status.HTTP_404_NOT_FOUND: {"model": ReferenceFrameErrorResponse},
