@@ -5,7 +5,8 @@
 **Status: approved object-disappearance direction; Phases 2-6 implement
 reference-frame retrieval, candidate review, source-space ROI selection, and
 immutable confirmation. Phase 7A-1 now implements only its validated local run
-lifecycle and safe start/status boundary; recording search and the Phase 8/9
+lifecycle and safe start/status boundary. Phase 7A-2 is contract-defined as
+acquisition-only but remains unimplemented; classifier/search and the Phase 8/9
 review workflow remain unimplemented.**
 
 This document defines the first bounded use case for VIGI Vision's longer-term
@@ -160,7 +161,8 @@ The proposed lifecycle is:
 validated channel and times
   -> reference-frame retrieval
   -> ROI selection and confirmation
-  -> Phase 7 recording observations and candidate interval
+  -> Phase 7A-2 recording acquisition
+  -> Phase 7B observations and candidate interval
   -> Phase 8 review images and video
   -> Phase 9 user decision
 ```
@@ -180,7 +182,8 @@ binary midpoints until the bracket is one second wide.
 
 A single `ABSENT` frame never proves disappearance. The absence rule requests
 one-second target cadence but requires those targets to resolve to three
-distinct canonical frames in strictly increasing decoded order; multiple
+distinct canonical frames in strictly increasing normalized decoded UTC order;
+multiple
 targets that decode the same frame count once. `INDETERMINATE`, a
 recording gap, or contradictory ordering stops narrowing safely. The MVP does
 not introduce adaptive grids, leases, fencing, automatic takeover, or resume.
@@ -215,9 +218,12 @@ The intended user-facing result contains:
 
 Phase 7A-1 now defines and implements one run ID and directory, a compact
 lifecycle manifest, strict baseline validation, duplicate/interruption handling,
-and a safe start/status HTTP boundary. Recording observations, deterministic
-outcomes, and a separate Phase 8 handoff remain later slices. Artifacts retain
-the repository's
+and a safe start/status HTTP boundary. The contract-defined Phase 7A-2 slice adds
+only bounded replay acquisition: immutable request records, canonical decoded
+frame records, run-relative JPEGs, and distinct frame/request indexes. It does
+not create observations or classify evidence. Recording observations,
+deterministic outcomes, and a separate Phase 8 handoff remain later slices.
+Artifacts retain the repository's
 credential-free principles: no usernames, passwords, hosts, authenticated
 RTSP/replay URLs, ffmpeg arguments, raw subprocess diagnostics, or absolute
 paths enter manifests or user-facing output.
@@ -257,11 +263,19 @@ rejected. If a process exits, the next inspection marks its nonterminal run
 explicit new attempt uses a new ID without adopting old evidence.
 
 The runtime then adds the schema 3 integrity gate, truthful recording-probe
-provenance, a bounded continuous multi-target decoder extension, the production
-three-state classifier, chronological coarse sampling, deterministic binary
-narrowing, and a separate Phase 8 request. Existing single-target callers remain
-unchanged. Requested time never substitutes for session-scoped decoded-frame
-identity. A public transport or new frontend is not part of Phase 7.
+provenance, and the bounded continuous multi-target acquisition contract. That
+acquisition slice writes one request record per requested target and one
+canonical frame record per distinct authoritative decoded source frame; it has no classifier state or
+absence result. Later slices add the production three-state classifier,
+chronological coarse sampling, deterministic binary narrowing, and a separate
+Phase 8 request. Existing single-target callers remain unchanged. Requested time
+never substitutes for stable authoritative decoded-frame provenance. Phase 7A-2
+must add a decoder-boundary source-time capability that retains the physical
+replay origin, raw source/container PTS, positive source time base, replay-local
+PTS/time base, and attempt-local ordinal; the current Phase 7A-1 direct decoder
+does not provide those absolute source-time facts. Missing or irreproducible
+mapping fails as `missing_provenance` before publication. A public transport or
+new frontend is not part of Phase 7.
 
 The selected comparator uses the existing verified EfficientSAM-Ti point-mask
 path plus aligned source-ROI mask IoU and mean-centered luma correlation. Its
@@ -277,11 +291,13 @@ version after Phase 7E evidence.
 2. **Phase 6 (schema 2 and schema 3 compatibility implemented):** strict
    immutable confirmation publication, explicit legacy reconfirmation, and
    digest-bound typed Phase 7 loading.
-3. **Phase 7 (A-1 implemented; later slices unimplemented):** single-host run
-   lifecycle, interruption/new-run isolation, and truthful baseline provenance;
-   later slices add recording provenance, production three-state classifier,
-   five-minute coarse sampling,
-   one-second binary narrowing, compact persistence, and Phase 8 handoff.
+3. **Phase 7 (A-1 implemented; A-2 contract-defined but unimplemented):**
+   single-host run lifecycle, interruption/new-run isolation, and truthful
+   baseline provenance; A-2 next adds acquisition-only request/frame records,
+   canonical frame identities, run-relative JPEG publication, and strict
+   acquisition indexes. Later slices add recording observations, production
+   three-state classification, five-minute coarse sampling, one-second binary
+   narrowing, compact persistence, and Phase 8 handoff.
 4. **Phase 8 (future):** boundary images, evidence timeline, and review video.
 5. **Phase 9 (future):** user-facing review and final human decision.
 6. **Later work:** object relocation, automatic detection, broader event types,
