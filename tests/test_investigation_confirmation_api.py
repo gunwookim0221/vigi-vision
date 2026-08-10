@@ -7,6 +7,7 @@ from typing import NoReturn, Protocol, final
 import pytest
 from fastapi.testclient import TestClient
 from tests.test_investigation_confirmation import Context, build_context
+from tests.test_investigation_confirmation_phase6c import write_schema_two_package
 
 from vigi_vision import investigation_confirmation_repository as confirmation_repository_module
 from vigi_vision.investigation_confirmation_api_models import (
@@ -50,6 +51,10 @@ class FailingConfirmationService:
         raise self.failure
 
     def load_confirmation_manifest(self, investigation_id: str) -> NoReturn:
+        _ = investigation_id
+        raise self.failure
+
+    def reconfirm_for_recording_search(self, investigation_id: str) -> NoReturn:
         _ = investigation_id
         raise self.failure
 
@@ -215,7 +220,7 @@ _INVALID_BODY_CASES: tuple[tuple[Callable[[JsonBody], None], str], ...] = (
 )
 
 
-def test_confirmation_api_creates_and_retrieves_safe_schema_two_result(tmp_path: Path) -> None:
+def test_confirmation_api_creates_and_retrieves_safe_schema_three_result(tmp_path: Path) -> None:
     client, context = _client(tmp_path)
 
     response = client.post("/api/v1/investigation-confirmations", json=_body(context.resource_id))
@@ -223,7 +228,7 @@ def test_confirmation_api_creates_and_retrieves_safe_schema_two_result(tmp_path:
     assert response.status_code == 201
     payload = _confirmation_payload(response)
     assert payload.status == "confirmed"
-    assert payload.schema_version == 2
+    assert payload.schema_version == 3
     assert payload.outcome.value == "created"
     assert payload.confirmation.channel_id == 1
     assert payload.confirmation.reference_frame_resource_id == context.resource_id
@@ -633,3 +638,44 @@ def test_confirmation_api_openapi_exposes_only_designed_paths(tmp_path: Path) ->
 
     assert '"/api/v1/investigation-confirmations"' in schema_text
     assert '"/api/v1/investigation-confirmations/{investigation_id}"' in schema_text
+
+
+def test_confirmation_api_reconfirms_schema_two_without_mutating_original(tmp_path: Path) -> None:
+    context, legacy_id, before = write_schema_two_package(tmp_path)
+    client = TestClient(
+        create_reference_frame_app(
+            UnusedReferenceFrameService(),
+            UnusedReferenceFrameResources(),
+            confirmation_service=context.service,
+        )
+    )
+
+    response = client.post(
+        f"/api/v1/investigation-confirmations/{legacy_id}/reconfirm-for-recording-search",
+        json={},
+    )
+
+    assert response.status_code == 201
+    payload = _confirmation_payload(response)
+    assert payload.schema_version == 3
+    assert payload.investigation_id.startswith("object-disappearance-v3-")
+    assert (context.investigation_root / legacy_id / "manifest.json").read_bytes() == before
+
+
+def test_confirmation_api_reconfirm_rejects_client_owned_facts(tmp_path: Path) -> None:
+    context, legacy_id, _ = write_schema_two_package(tmp_path)
+    client = TestClient(
+        create_reference_frame_app(
+            UnusedReferenceFrameService(),
+            UnusedReferenceFrameResources(),
+            confirmation_service=context.service,
+        )
+    )
+
+    response = client.post(
+        f"/api/v1/investigation-confirmations/{legacy_id}/reconfirm-for-recording-search",
+        json={"source_width": 1},
+    )
+
+    assert response.status_code == 422
+    assert _error_code(response) == "invalid_confirmation"

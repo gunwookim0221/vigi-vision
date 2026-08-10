@@ -6,12 +6,19 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, final
 
+from vigi_vision.investigation_confirmation_integrity import (
+    JpegDecoder,
+    JpegIntegrity,
+    compute_jpeg_integrity,
+)
 from vigi_vision.investigation_confirmation_models import (
     CONFIRMATION_KIND,
     CONFIRMATION_SCENARIO,
+    CONFIRMATION_SCHEMA_TWO,
     CONFIRMATION_SCHEMA_VERSION,
     ConfirmationArtifactError,
     ConfirmationCandidateMismatchError,
+    ConfirmationConflictError,
     ConfirmationImageDimensionMismatchError,
     ConfirmationInvalidRoiError,
     ConfirmationManifest,
@@ -23,6 +30,7 @@ from vigi_vision.investigation_confirmation_models import (
     ConfirmationTiming,
     ConfirmedInputInvalidError,
     ConfirmedInvestigationInput,
+    LegacyInvestigationError,
     artifact_relative_path,
     investigation_id_for,
 )
@@ -54,6 +62,7 @@ class InvestigationConfirmationService:
     resource_store: ReferenceFrameResourceStore = field(repr=False)
     repository: InvestigationConfirmationRepository = field(repr=False)
     now_utc: Callable[[], datetime] = _utc_now
+    jpeg_decoder: JpegDecoder | None = field(default=None, repr=False)
 
     def confirm(self, request: ConfirmationRequest) -> ConfirmationResult:
         """Create or reuse one immutable confirmation package."""
@@ -65,17 +74,42 @@ class InvestigationConfirmationService:
         if request.source_width != resource.width or request.source_height != resource.height:
             raise ConfirmationImageDimensionMismatchError
         _validate_roi(request, resource.width, resource.height)
-        manifest = self._manifest(resource, anchor, candidate_offset, request)
+        integrity = compute_jpeg_integrity(
+            resource.jpeg_path,
+            resource.width,
+            resource.height,
+            self.jpeg_decoder,
+        )
+        manifest = self._manifest(resource, anchor, candidate_offset, request, integrity)
+        return self.repository.publish(manifest)
+
+    def reconfirm_for_recording_search(self, investigation_id: str) -> ConfirmationResult:
+        """Reconfirm one immutable schema 2 package as a new schema 3 package."""
+        legacy, resource = self._validated_manifest(investigation_id, allow_schema_two=True)
+        if legacy.schema_version != CONFIRMATION_SCHEMA_TWO:
+            raise ConfirmationConflictError
+        integrity = compute_jpeg_integrity(
+            resource.jpeg_path,
+            resource.width,
+            resource.height,
+            self.jpeg_decoder,
+        )
+        manifest = _schema_three_manifest(legacy, resource, integrity, self.now_utc)
         return self.repository.publish(manifest)
 
     def load_confirmation_manifest(self, investigation_id: str) -> ConfirmationManifest:
         """Load one strictly revalidated manifest for the Phase 6 API."""
-        manifest, _ = self._validated_manifest(investigation_id)
+        manifest, _ = self._validated_manifest(investigation_id, allow_schema_two=True)
         return manifest
 
     def load_confirmed(self, investigation_id: str) -> ConfirmedInvestigationInput:
-        """Load a published schema 2 package and resolve its trusted JPEG."""
+        """Load a published schema 3 package and resolve its trusted JPEG."""
         manifest, resource = self._validated_manifest(investigation_id)
+        if manifest.schema_version != CONFIRMATION_SCHEMA_VERSION:
+            raise LegacyInvestigationError
+        reference = manifest.confirmation.reference_frame
+        if reference.jpeg_sha256 is None or reference.jpeg_size_bytes is None:
+            raise ConfirmedInputInvalidError
         return ConfirmedInvestigationInput(
             investigation_id=manifest.investigation_id,
             channel_id=manifest.confirmation.channel_id,
@@ -96,17 +130,37 @@ class InvestigationConfirmationService:
             source_width=manifest.confirmation.reference_frame.width,
             source_height=manifest.confirmation.reference_frame.height,
             roi=manifest.confirmation.roi,
+            jpeg_sha256=reference.jpeg_sha256,
+            jpeg_size_bytes=reference.jpeg_size_bytes,
             jpeg_path=resource.jpeg_path,
         )
 
     def _validated_manifest(
-        self, investigation_id: str
+        self,
+        investigation_id: str,
+        *,
+        allow_schema_two: bool = False,
     ) -> tuple[ConfirmationManifest, ReferenceFrameResourceMetadata]:
         """Load and revalidate one manifest against its immutable frame resource."""
         manifest = self.repository.load(investigation_id)
         try:
             resource = self.repository.resolve_resource_for_manifest(manifest)
             _validate_loaded_manifest(manifest, resource)
+            if manifest.schema_version == CONFIRMATION_SCHEMA_VERSION:
+                expected = compute_jpeg_integrity(
+                    resource.jpeg_path,
+                    resource.width,
+                    resource.height,
+                    self.jpeg_decoder,
+                )
+                reference = manifest.confirmation.reference_frame
+                if (
+                    reference.jpeg_sha256 != expected.sha256
+                    or reference.jpeg_size_bytes != expected.size_bytes
+                ):
+                    raise ConfirmedInputInvalidError
+            elif not allow_schema_two:
+                raise LegacyInvestigationError
         except (
             ConfirmationArtifactError,
             ConfirmationImageDimensionMismatchError,
@@ -137,6 +191,7 @@ class InvestigationConfirmationService:
         anchor: ReferenceFrameRequest,
         candidate_offset: int,
         request: ConfirmationRequest,
+        integrity: JpegIntegrity,
     ) -> ConfirmationManifest:
         reference = ConfirmationReferenceFrame(
             resource_id=resource.resource_id,
@@ -148,6 +203,8 @@ class InvestigationConfirmationService:
             frame_selection_policy=resource.request.frame_selection_policy,
             width=resource.width,
             height=resource.height,
+            jpeg_sha256=integrity.sha256,
+            jpeg_size_bytes=integrity.size_bytes,
         )
         timing = ConfirmationTiming(
             decoded_local_pts_seconds=resource.decoded_local_pts_seconds,
@@ -157,7 +214,9 @@ class InvestigationConfirmationService:
             warnings=resource.warnings,
         )
         investigation_id = investigation_id_for(
-            resource.request.channel_id, anchor.requested_time_utc
+            resource.request.channel_id,
+            anchor.requested_time_utc,
+            schema_version=3,
         )
         return ConfirmationManifest(
             schema_version=CONFIRMATION_SCHEMA_VERSION,
@@ -196,7 +255,11 @@ def _validate_roi(request: ConfirmationRequest, width: int, height: int) -> None
 def _validate_loaded_manifest(
     manifest: ConfirmationManifest, resource: ReferenceFrameResourceMetadata
 ) -> None:
-    expected_id = investigation_id_for(resource.request.channel_id, manifest.anchor_time_utc)
+    expected_id = investigation_id_for(
+        resource.request.channel_id,
+        manifest.anchor_time_utc,
+        schema_version=manifest.schema_version,
+    )
     if (
         manifest.investigation_id != expected_id
         or manifest.source_timezone != resource.request.source_timezone
@@ -214,6 +277,37 @@ def _validate_loaded_manifest(
     roi = manifest.confirmation.roi
     if roi.x + roi.width > resource.width or roi.y + roi.height > resource.height:
         raise ConfirmationInvalidRoiError
+
+
+def _schema_three_manifest(
+    legacy: ConfirmationManifest,
+    resource: ReferenceFrameResourceMetadata,
+    integrity: JpegIntegrity,
+    now_utc: Callable[[], datetime],
+) -> ConfirmationManifest:
+    reference = legacy.confirmation.reference_frame.model_copy(
+        update={"jpeg_sha256": integrity.sha256, "jpeg_size_bytes": integrity.size_bytes}
+    )
+    confirmation = legacy.confirmation.model_copy(update={"reference_frame": reference})
+    investigation_id = investigation_id_for(
+        legacy.confirmation.channel_id,
+        legacy.anchor_time_utc,
+        schema_version=3,
+    )
+    if resource.request.channel_id != legacy.confirmation.channel_id:
+        raise ConfirmationCandidateMismatchError
+    return ConfirmationManifest(
+        schema_version=3,
+        investigation_id=investigation_id,
+        investigation_kind=legacy.investigation_kind,
+        scenario_id=legacy.scenario_id,
+        status=legacy.status,
+        anchor_time_utc=legacy.anchor_time_utc,
+        source_timezone=legacy.source_timezone,
+        confirmed_at_utc=_canonical_now(now_utc),
+        artifact_directory_relative=artifact_relative_path(investigation_id),
+        confirmation=confirmation,
+    )
 
 
 def _canonical_now(now_utc: Callable[[], datetime]) -> datetime:

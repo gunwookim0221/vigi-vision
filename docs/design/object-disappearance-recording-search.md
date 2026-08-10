@@ -3,8 +3,8 @@
 ## Status and normative authority
 
 **Status: normative design for the current single-site Phase 7 MVP. No Phase 7
-runtime, transport, classifier, required Phase 6C schema 3 compatibility
-increment, or Phase 8 review-media generator is implemented.**
+runtime, transport, classifier, or Phase 8 review-media generator is implemented;
+the required Phase 6C schema 3 compatibility increment is complete.**
 
 This document is the current implementation and review contract for Phase 7.
 It is intentionally limited to one restaurant, one local application host, one
@@ -90,8 +90,8 @@ incompatible local times fail before run creation.
 
 ### Current and required Phase 6 handoff
 
-The implemented schema 2 `ConfirmedInvestigationInput` currently provides
-exactly:
+The schema 2 read-only display representation currently provides these persisted
+facts:
 
 ```text
 investigation_id
@@ -115,9 +115,8 @@ jpeg_path  # trusted internal path; never persisted or exposed
 ```
 
 Schema 2 does not bind the JPEG bytes to the confirmation. It is therefore not
-eligible for automatic Phase 7 search. Before Phase 7 search, Phase 6C must
-publish schema 3 confirmations and extend `ConfirmedInvestigationInput`
-with these server-owned fields:
+eligible for automatic Phase 7 search. Phase 6C publishes schema 3 confirmations
+and extends `ConfirmedInvestigationInput` with these server-owned fields:
 
 ```text
 jpeg_sha256       # lowercase SHA-256 computed at confirmation

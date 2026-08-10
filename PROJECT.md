@@ -167,18 +167,18 @@ image dedicated to source/mask/rectangle/tap evidence, adds explicit state
 semantics, and preserves reset/stale-response cleanup plus manual fallback;
 localization remains deferred to Phase 5-4C. Phase 6-1 approved the
 confirmation contract: one reviewed candidate and canonical source-pixel ROI
-currently publish an immutable schema 2 package under the existing investigation
-artifact root, reference the immutable frame resource, preserve truthful nullable
-absolute timing, and expose one strict loader boundary. Phase 6-2A now implements
+publish an immutable package under the existing investigation artifact root,
+reference the immutable frame resource, preserve truthful nullable absolute timing,
+and expose one strict loader boundary. Phase 6-2A now implements
 the typed backend persistence foundation,
 and Phase 6-2B exposes it through the existing safe FastAPI boundary. Phase
 6-2C now connects the existing reference-frame/ROI page to that boundary with
 inline Korean review, strict POST/GET confirmation, reopen restoration, and
 immutable read-only success state. Phase 7 now has a deliberately small
-single-site recording-search MVP design. Before search, Phase 6C adds the small
-schema 3 compatibility increment: confirmation-time JPEG SHA-256 and byte size,
-explicit read-only schema 2 reconfirmation into a new immutable identity, and
-mismatch-safe loading. Search uses
+single-site recording-search MVP design. Before search, the implemented Phase 6C
+schema 3 compatibility increment provides confirmation-time JPEG SHA-256 and byte
+size, explicit read-only schema 2 reconfirmation into a new immutable identity,
+and mismatch-safe loading. Search uses
 one unique run ID and directory
 per attempt, rejects concurrent starts with one local OS-backed lock, marks
 abandoned nonterminal runs `INTERRUPTED`, and requires an explicit new run
@@ -189,7 +189,7 @@ aligned-ROI luma-NCC comparator before whole-second binary narrowing. Its compac
 manifest persists the closed baseline/probe/alias union and full policy snapshot
 without inventing stable source identity. Advanced lease, fencing, takeover,
 resume, and crash-recovery analysis is preserved as non-normative future
-reference. No Phase 7 runtime, schema 3 update, classifier, transport, Phase 8
+reference. No Phase 7 runtime, classifier, transport, Phase 8
 review media, or Phase 9 result UI is implemented. Absolute source-time
 calibration remains deferred; Phase 4C-2
 provides transient frontend-only selection of one
@@ -218,7 +218,7 @@ capability.
    without changing recording or reference-frame
    ownership.
 6. Implement the scope-reviewed single-site object-disappearance MVP in bounded
-   slices: Phase 6C schema 3 compatibility, Phase 7A-1 local lifecycle, Phase
+   slices: build on completed Phase 6C schema 3 compatibility, then Phase 7A-1 local lifecycle, Phase
    7A-2 canonical multi-target acquisition, then Phase 7B-7E for the production
    three-state comparator;
    chronological coarse sampling and exhaustive support transitions; binary

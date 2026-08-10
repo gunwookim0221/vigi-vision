@@ -28,7 +28,12 @@ from vigi_vision.investigation_confirmation_claims import (
     ConfirmationClaim,
     ConfirmationClaimStore,
 )
+from vigi_vision.investigation_confirmation_integrity import (
+    JpegDecoder,
+    compute_jpeg_integrity,
+)
 from vigi_vision.investigation_confirmation_models import (
+    CONFIRMATION_SCHEMA_TWO,
     CONFIRMATION_SCHEMA_VERSION,
     ConfirmationArtifactError,
     ConfirmationConflictError,
@@ -70,9 +75,12 @@ class InvestigationConfirmationRepository:
     output_root: Path = field(repr=False)
     resource_store: ReferenceFrameResourceStore = field(repr=False)
     now_utc: Callable[[], datetime] = _utc_now
+    jpeg_decoder: JpegDecoder | None = field(default=None, repr=False)
 
     def publish(self, manifest: ConfirmationManifest) -> ConfirmationResult:
         """Create a confirmation or resolve an identical existing package."""
+        if manifest.schema_version != CONFIRMATION_SCHEMA_VERSION:
+            raise ConfirmationArtifactError
         final_directory = self._final_directory(manifest.investigation_id)
         ensure_root(self.output_root)
         if entry_exists(self.output_root, final_directory):
@@ -114,7 +122,8 @@ class InvestigationConfirmationRepository:
                 raise ConfirmationArtifactError from None
             if canonical_manifest_json(staged) != canonical_manifest_json(manifest):
                 raise ConfirmationArtifactError
-            _ = self.resolve_resource_for_manifest(manifest)
+            resource = self.resolve_resource_for_manifest(manifest)
+            self._validate_jpeg_integrity(manifest, resource)
             if not publish_directory_no_replace(staging_directory, final_directory):
                 return self._resolve_existing(final_directory, manifest)
             sync_directory(self.output_root)
@@ -127,8 +136,26 @@ class InvestigationConfirmationRepository:
             if staging_created:
                 remove_staging(self.output_root, staging_directory)
 
+    def _validate_jpeg_integrity(
+        self,
+        manifest: ConfirmationManifest,
+        resource: ReferenceFrameResourceMetadata,
+    ) -> None:
+        integrity = compute_jpeg_integrity(
+            resource.jpeg_path,
+            resource.width,
+            resource.height,
+            self.jpeg_decoder,
+        )
+        reference = manifest.confirmation.reference_frame
+        if (
+            reference.jpeg_sha256 != integrity.sha256
+            or reference.jpeg_size_bytes != integrity.size_bytes
+        ):
+            raise ConfirmationArtifactError
+
     def load(self, investigation_id: str) -> ConfirmationManifest:
-        """Load one strictly parsed schema 2 confirmation without mutation."""
+        """Load one strictly parsed schema 2 or 3 confirmation without mutation."""
         final_directory = self._final_directory(investigation_id)
         try:
             if not self.output_root.exists():
@@ -187,7 +214,10 @@ def _read_manifest(path: Path, investigation_id: str) -> ConfirmationManifest:
     schema = payload.get("schema_version")
     if schema is None or (type(schema) is int and schema == 1):
         raise LegacyInvestigationError
-    if type(schema) is not int or schema != CONFIRMATION_SCHEMA_VERSION:
+    if type(schema) is not int or schema not in (
+        CONFIRMATION_SCHEMA_TWO,
+        CONFIRMATION_SCHEMA_VERSION,
+    ):
         raise ConfirmationCorruptError
     try:
         manifest = ConfirmationManifest.model_validate_json(raw, strict=True)

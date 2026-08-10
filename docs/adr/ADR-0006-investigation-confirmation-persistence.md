@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted. Schema 2 is implemented; the schema 3 integrity extension required by
-Phase 7 is approved as the Phase 6C compatibility increment.
+Accepted. Schema 3 integrity and explicit schema 2 reconfirmation are implemented
+as the Phase 6C compatibility increment.
 
 ## Context
 
