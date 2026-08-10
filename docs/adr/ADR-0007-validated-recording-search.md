@@ -47,20 +47,32 @@ The search policy is deliberately small:
    identity and leaves schema 2 unchanged.
 2. Sample chronologically from the confirmed requested time to the search end
    at a persisted five-minute coarse interval, always including the search end.
-3. Extend the local decoder with one bounded continuous multi-target operation
-   that exposes segment/acquisition/session identity, PTS, ordinal, image digest,
-   and a session-scoped canonical frame ID without changing existing callers.
-4. Classify each canonical probe through the versioned production EfficientSAM-
+3. Phase 7A-2 first performs acquisition only: one bounded continuous multi-target
+   operation writes one strict `ProbeFrameRequestRecord` per requested target and
+   one immutable `CanonicalProbeFrameRecord` per distinct authoritative decoded
+   source frame. It exposes
+   the trusted segment identity, a decoder-proven physical replay origin, raw
+   source/container PTS and positive source time base, normalized decoded UTC,
+   replay-local time base/PTS, attempt-local ordinal, dimensions, image digest,
+   and a canonical frame ID derived from the exact stable segment/frame-position
+   tuple. The current Phase 7A-1 decoder does not provide this source-time
+   capability; A2 must add it at the decoder boundary and fail safely when it is
+   absent or unverifiable. No recording-session identifier is invented. A request
+   alias may reference the same canonical frame, but never counts as an
+   independent frame or observation.
+4. Phase 7B, separately, classifies each acquired canonical frame through the
+   versioned production EfficientSAM-
    Ti mask plus luma NCC over all pixels of the aligned source-pixel ROI as
    exactly `PRESENT`, `ABSENT`, or `INDETERMINATE`. Mask coverage is segmented
    pixels inside the clipped ROI divided by total clipped-ROI pixels; empty or
    zero-area input and coverage at least 95% are `INDETERMINATE`. Persist the
    model/checkpoint, complete calculation policy, thresholds, and acquisition
    policy.
-5. Confirm absence with three distinct canonical frames in increasing decoded
-   order at one-second requested-target cadence. Each alias must resolve to an
-   indexed canonical recording probe in the same manifest and never counts as
-   evidence.
+5. Confirm absence with three distinct canonical frames in increasing normalized
+   decoded UTC order at one-second requested-target cadence. Each later observation alias
+   must resolve to an indexed canonical recording observation in the same
+   manifest and never counts as evidence; an A2 request alias is not evidence at
+   all.
 6. Find the first supported `PRESENT -> confirmed ABSENT` bracket using the
    exhaustive support transition table. The uncertainty counter counts
    consecutive unusable coarse targets: one event at most per target, zero for
@@ -75,19 +87,60 @@ The search policy is deliberately small:
    target acquisition remains `FAILED`.
 9. Persist the candidate interval and a separate Phase 8 handoff request.
 
-The compact run manifest stores only schema 3 Phase 6 facts, the complete policy
-snapshot, the closed baseline/probe/alias observation union, state, candidate
-interval, and fixed safe reasons. It does not invent a Phase 6-confirmed
-`source_identity` or persist internal paths.
+The compact run manifest stores schema 3 Phase 6 facts, the complete policy
+snapshot, and phase-appropriate strict indexes. Schema 1 remains the exact
+readable Phase 7A-1 form. Schema 2 is exclusively the Phase 7A-2 acquisition
+form: it indexes `acquisition_operation_ids`, `probe_request_ids`, and unique
+`canonical_frame_ids`, contains no observation, classifier, candidate, `FOUND`,
+`NOT_FOUND`, or Phase 8 fields, and rejects unsupported future versions. A v1
+load never infers A2 collections. The active A1 OS lock remains continuously
+held by the run handle; one per-run in-process A2 mutex serializes the complete
+v1 reload, v2 successor construction, and atomic replacement. Readers see either
+valid v1 or valid v2, never a partial promotion.
 
-Strict loading validates the union relationships. PRESENT and ABSENT probes
-require finite policy-valid metrics and no failure reason; INDETERMINATE probes
-require only the fixed current unavailable/insufficient-evidence reason set.
-Aliases resolve only to indexed canonical probes in the same manifest. `FOUND`
-must resolve to a later ABSENT upper bound after a canonical PRESENT lower bound
-and exactly three distinct same-session ordered ABSENT support probes; aliases
-and the baseline cannot fill those evidence positions. Any mismatch invalidates
-the manifest rather than presenting `FOUND`.
+Strict A2 loading validates every request/frame/JPEG relationship, ownership,
+the durable operation-record index, stable canonical identity, source/replay
+PTS/time-base/ordinal provenance, and digest/size/dimension/path check. It rejects future observation/classifier/result fields and
+any foreign or incomplete child. Later Phase 7B records belong to a future
+manifest version and require a successful request/frame pair; acquisition
+failures remain failed requests and cannot become observations. The future
+classifier/search contract requires finite policy-valid PRESENT/ABSENT metrics,
+safe INDETERMINATE reasons, and exactly three distinct ordered ABSENT frames for
+`FOUND`; those rules are not accepted by the A2 loader.
+
+All A2 child-record, index, and manifest mutations use that same per-run mutex
+beneath the continuously held A1 OS lock. The caller must own the active run
+handle, revalidate handle/state/operation/OS-lock ownership, reload the latest
+manifest, and retain the mutex through bounded decode, validation, staging,
+publication, and the atomic manifest commit. Owner B therefore reloads A's
+committed result and reuses its frame identity when the trusted segment and
+normalized decoded UTC match; it may add only its own request relationship.
+There is no lost-update or silent merge path. The one canonical identity tuple
+is `(investigation_id, search_run_id, channel_id, source_segment_id,
+decoded_frame_utc)`, serialized as compact UTF-8 JSON in that order and hashed
+with SHA-256 as `frame-<digest>`. Replay-local PTS, time base, attempt-local
+ordinal, requested time, acquisition ID, operation ID, invocation token, JPEG
+digest, and dimensions are provenance or operational metadata, not identity
+inputs. Ambiguous duplicate normalized positions fail safely. Frame publication
+operation ownership and request operation ownership are distinct; both operation
+IDs must resolve to immutable server-created `AcquisitionOperationRecord` values
+through the same run's ordered operation index, but they need not be equal. The
+normalized UTC uses the physical replay origin plus raw source PTS and positive
+source time base, rounded once to six fractional digits with ties-to-even; if
+that mapping cannot be proven or overlapping acquisitions disagree, acquisition
+fails rather than substituting segment start, extraction start, or requested time.
+
+Each operation is admitted as one closed immutable
+`AcquisitionOperationRecord` at `operations/{operation_id}.json` with fixed
+`record_type`, operation ID, investigation ID, run ID,
+`operation_kind=recording_probe_acquisition_v1`, `state=ADMITTED`, and a
+server-generated `admitted_at_utc`. The ordered unique manifest index is
+updated only by atomic replacement beneath the same lock and mutex; frame and
+request records cannot reference an operation before that index commit. Strict
+reopening requires one indexed record per ID and matching back-references, and
+rejects missing, foreign, duplicate, malformed, orphaned, or merely inserted
+operation IDs. Schema 1 to schema 2 promotion commits empty A2 indexes first;
+operation admission is the next atomic successor, followed by child publication.
 
 Phase 7 stops before review-media generation. Phase 8 creates boundary images,
 timeline evidence, and review video. Phase 9 leaves the final decision to the
