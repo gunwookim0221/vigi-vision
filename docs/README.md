@@ -29,8 +29,9 @@ documentation route is added, removed, or relocated.
   [design/object-disappearance-recording-search.md](design/object-disappearance-recording-search.md)
   for the current normative Phase 7 single-site MVP: one active local run,
   interruption and explicit restart, the required Phase 6 schema 3 integrity
-  handoff, canonical multi-target decoding, the production three-state
-  classifier, deterministic coarse/binary search, compact persistence, and the
+  handoff, and the implemented Phase 7A-1 local lifecycle/API boundary. Later
+  canonical multi-target decoding, the production three-state classifier,
+  deterministic coarse/binary search, compact persistence, and the
   Phase 8 request boundary.
   Read
   [design/reference-frame-service.md](design/reference-frame-service.md)

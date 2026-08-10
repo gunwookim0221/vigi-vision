@@ -188,7 +188,9 @@ or glass effects are used.
   now defines the required Phase 6 schema 3 JPEG integrity gate, one local active
   run, canonical multi-target decoding, the production EfficientSAM-Ti plus
   aligned-ROI comparison policy, deterministic coarse/binary search, and a Phase
-  8 handoff. Its runtime and the Phase 8/9 review UI remain later work.
+  8 handoff. The Phase 7A-1 validated local lifecycle/API runtime is implemented;
+  acquisition, classifier/search execution, and the Phase 8/9 review UI remain
+  later work.
   Advanced recovery analysis is retained only as
   [non-normative future reference](docs/future/recording-search-resilience.md).
 - Tap-assisted selection and the Phase 5-3C transient silhouette preview are

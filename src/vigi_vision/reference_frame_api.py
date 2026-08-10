@@ -42,6 +42,9 @@ from vigi_vision.investigation_confirmation_repository import InvestigationConfi
 from vigi_vision.investigation_confirmation_service import InvestigationConfirmationService
 from vigi_vision.nvr import SdkNvrGateway
 from vigi_vision.recording import RecordingPlanner
+from vigi_vision.recording_search_api import install_recording_search_routes
+from vigi_vision.recording_search_repository import RecordingSearchRepository
+from vigi_vision.recording_search_service import RecordingSearchService
 from vigi_vision.reference_frame_api_errors import (
     domain_error,
     safe_error_response,
@@ -84,6 +87,7 @@ from vigi_vision.video import resolve_ffprobe
 
 _ARTIFACT_ROOT: Final = Path("artifacts/reference-frames")
 _CONFIRMATION_ARTIFACT_ROOT: Final = Path("artifacts/investigations")
+_RECORDING_SEARCH_ARTIFACT_ROOT: Final = Path("artifacts/investigation-searches")
 _IMAGE_HEADERS: Final = {
     "Cache-Control": "private, max-age=3600, immutable",
     "Content-Disposition": 'inline; filename="reference-frame.jpg"',
@@ -115,6 +119,7 @@ class ReferenceFrameApiDependencies:
     confirmation_service: InvestigationConfirmationExecutionBoundary | None = field(
         default=None, repr=False
     )
+    recording_search_service: RecordingSearchService | None = field(default=None, repr=False)
 
 
 @final
@@ -139,6 +144,7 @@ def create_reference_frame_app(  # noqa: PLR0913 — each argument is an indepen
     suggestion_service: RoiSuggestionExecutionBoundary | None = None,
     channel_inventory: ChannelInventoryBoundary | None = None,
     confirmation_service: InvestigationConfirmationExecutionBoundary | None = None,
+    recording_search_service: RecordingSearchService | None = None,
 ) -> FastAPI:
     """Create an injectable local API application without reading configuration in handlers."""
     dependencies = ReferenceFrameApiDependencies(
@@ -148,6 +154,7 @@ def create_reference_frame_app(  # noqa: PLR0913 — each argument is an indepen
         suggestion_service=suggestion_service,
         channel_inventory=channel_inventory,
         confirmation_service=confirmation_service,
+        recording_search_service=recording_search_service,
     )
     app = FastAPI(
         title="VIGI Vision Reference Frame API",
@@ -241,8 +248,13 @@ def create_reference_frame_app(  # noqa: PLR0913 — each argument is an indepen
     install_investigation_confirmation_routes(
         app, dependencies.confirmation_service, dependencies.limiter
     )
+    install_recording_search_routes(
+        app, dependencies.recording_search_service, dependencies.limiter
+    )
     if isinstance(suggestion_service, AssistedRoiSuggestionService):
         app.router.add_event_handler("shutdown", suggestion_service.close)
+    if recording_search_service is not None:
+        app.router.add_event_handler("shutdown", recording_search_service.close)
     return app
 
 
@@ -401,6 +413,13 @@ def create_reference_frame_app_from_environment() -> FastAPI:
             jpeg_decoder=jpeg_decoder,
         )
         channel_inventory = SdkNvrGateway(connection)
+        recording_search_service = RecordingSearchService(
+            confirmation_service=confirmation_service,
+            repository=RecordingSearchRepository(_RECORDING_SEARCH_ARTIFACT_ROOT),
+            channel_inventory=channel_inventory,
+            artifact_root=Path("artifacts"),
+            jpeg_decoder=jpeg_decoder,
+        )
         service = ReferenceFrameService(
             planner=planner,
             replay_extractor=ReplayExtractor(
@@ -428,6 +447,7 @@ def create_reference_frame_app_from_environment() -> FastAPI:
             suggestion_service=suggestion_service,
             channel_inventory=channel_inventory,
             confirmation_service=confirmation_service,
+            recording_search_service=recording_search_service,
         )
     except ReferenceFrameApiStartupError:
         raise
