@@ -4,6 +4,7 @@
   const status = document.querySelector("#confirmation-status");
   const error = document.querySelector("#confirmation-error");
   const action = document.querySelector("#confirmation-action");
+  const reconfirmAction = document.querySelector("#confirmation-reconfirm-action");
   const result = document.querySelector("#confirmation-result");
   const resultId = document.querySelector("#confirmation-id");
   const resultTime = document.querySelector("#confirmation-confirmed-at");
@@ -17,7 +18,7 @@
   const ALLOWED_PROVENANCE = new Set(["manual", "assisted", "assisted_then_adjusted"]);
   const ALLOWED_TIMING_PRECISION = new Set(["measured_clip_relative", "estimated", "unavailable", "indeterminate"]);
   const RESOURCE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,191}$/;
-  const INVESTIGATION_ID_PATTERN = /^object-disappearance-ch[1-9][0-9]*-[0-9]{8}T[0-9]{6}Z$/;
+  const INVESTIGATION_ID_PATTERN = /^object-disappearance-(?:v3-)?ch[1-9][0-9]*-[0-9]{8}T[0-9]{6}Z$/;
   const RESPONSE_KEYS = Object.freeze([
     "investigation_id",
     "outcome",
@@ -63,6 +64,7 @@
   let locked = false;
   let controller = null;
   let activeSubmission = null;
+  let reconfirming = false;
 
   function safeCode(payload) {
     const code = payload?.error?.code;
@@ -154,6 +156,13 @@
     const anchor = utcFromLocal(request.reference_time, request.source_timezone);
     return anchor === null || !validPositive(channelId)
       ? null
+      : `object-disappearance-v3-ch${channelId}-${anchor.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z")}`;
+  }
+
+  function legacyInvestigationId(channelId, request) {
+    const anchor = utcFromLocal(request.reference_time, request.source_timezone);
+    return anchor === null || !validPositive(channelId)
+      ? null
       : `object-disappearance-ch${channelId}-${anchor.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z")}`;
   }
 
@@ -190,7 +199,10 @@
       return null;
     }
     const id = investigationId(channelId, request);
-    return id === null ? null : { candidate, frame, request, channelId, id };
+    const legacyId = legacyInvestigationId(channelId, request);
+    return id === null || legacyId === null
+      ? null
+      : { candidate, frame, request, channelId, id, legacyId };
   }
 
   function draft() {
@@ -223,6 +235,7 @@
     const snapshot = value.snapshot;
     return Object.freeze({
       investigationId: value.id,
+      legacyInvestigationId: value.legacyId,
       channelId: value.channelId,
       resourceId: value.frame.resource_id,
       referenceTime: value.request.reference_time,
@@ -247,7 +260,8 @@
   function responseMatchesSubmission(payload, submitted) {
     const confirmation = payload?.confirmation;
     const returnedRoi = confirmation?.roi;
-    return payload?.investigation_id === submitted.investigationId
+    return (payload?.investigation_id === submitted.investigationId
+        || payload?.investigation_id === submitted.legacyInvestigationId)
       && confirmation?.channel_id === submitted.channelId
       && confirmation?.candidate_offset_seconds === submitted.candidateOffsetSeconds
       && confirmation?.reference_frame_resource_id === submitted.resourceId
@@ -278,14 +292,15 @@
     const confirmation = payload?.confirmation;
     const returnedFrame = value.frame;
     const returnedRoi = confirmation?.roi;
+    const expectedId = payload?.schema_version === 2 ? value.legacyId : value.id;
     return hasExactKeys(payload, RESPONSE_KEYS)
       && typeof payload.investigation_id === "string"
       && INVESTIGATION_ID_PATTERN.test(payload.investigation_id)
-      && payload.investigation_id === value.id
+      && payload.investigation_id === expectedId
       && (payload.outcome === "created" || payload.outcome === "reused")
-      && payload.status === "confirmed" && payload.schema_version === 2
+      && payload.status === "confirmed" && (payload.schema_version === 2 || payload.schema_version === 3)
       && validUtcTimestamp(payload.confirmed_at_utc)
-      && safeArtifactPath(payload.artifact_directory_relative, value.id) !== null
+      && safeArtifactPath(payload.artifact_directory_relative, expectedId) !== null
       && hasExactKeys(confirmation, CONFIRMATION_KEYS)
       && confirmation.channel_id === value.channelId
       && confirmation.candidate_offset_seconds === value.candidate.offset_seconds
@@ -329,6 +344,11 @@
     error.hidden = true;
     error.textContent = "";
     action.disabled = true;
+    reconfirmAction.hidden = payload.schema_version !== 2;
+    reconfirmAction.disabled = payload.schema_version !== 2;
+    if (payload.schema_version === 2) {
+      setStatus("기록 검색을 시작하려면 이 확인을 다시 승인해야 합니다.", "warning");
+    }
   }
 
   function reviewText(value) {
@@ -381,27 +401,34 @@
   }
 
   function safeFailure(code, message = ERROR_MESSAGES[code] ?? ERROR_MESSAGES.confirmation_unavailable) {
+    const keepLegacyConfirmation = locked && currentResult?.schema_version === 2;
     phase = code === "confirmation_conflict" ? "conflict" : "error";
     setStatus(message, "error");
     error.hidden = false;
     error.textContent = message;
     error.focus?.({ preventScroll: true });
     action.disabled = draft() === null || activeSubmission !== null || assistedPending();
-    result.hidden = true;
+    result.hidden = !keepLegacyConfirmation;
+    reconfirmAction.hidden = !keepLegacyConfirmation;
+    reconfirmAction.disabled = !keepLegacyConfirmation;
   }
 
-  async function loadExisting(value, version, conflictRefresh = false) {
+  async function loadExisting(value, version, conflictRefresh = false, requestedId = value.id) {
     controller?.abort();
     controller = typeof AbortController === "function" ? new AbortController() : null;
     phase = "loading";
     setStatus("기존 확인 상태를 확인하는 중입니다…", "loading");
     render(value);
     try {
-      const response = await fetch(`/api/v1/investigation-confirmations/${encodeURIComponent(value.id)}`, { signal: controller?.signal });
+      const response = await fetch(`/api/v1/investigation-confirmations/${encodeURIComponent(requestedId)}`, { signal: controller?.signal });
       const payload = await safeJson(response);
       if (version !== operationVersion || currentKey !== keyFor(value)) return;
       if (locked) return;
       if (response.status === 404) {
+        if (!conflictRefresh && requestedId === value.id && value.legacyId !== value.id) {
+          void loadExisting(value, version, false, value.legacyId);
+          return;
+        }
         if (conflictRefresh) {
           safeFailure("confirmation_conflict");
           return;
@@ -532,7 +559,47 @@
     }
   }
 
+  async function reconfirm(event) {
+    event.preventDefault();
+    if (!locked || currentResult?.schema_version !== 2 || activeSubmission !== null || reconfirming) return;
+    const value = lookup();
+    if (value === null || currentResult.investigation_id !== value.legacyId) return;
+    const version = operationVersion;
+    reconfirming = true;
+    reconfirmAction.disabled = true;
+    setStatus("기록 검색용 확인을 저장하는 중입니다…", "loading");
+    try {
+      const response = await fetch(
+        `/api/v1/investigation-confirmations/${encodeURIComponent(value.legacyId)}/reconfirm-for-recording-search`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: "{}",
+        },
+      );
+      const payload = await safeJson(response);
+      if (version !== operationVersion || currentKey !== keyFor(value)) {
+        reconfirming = false;
+        return;
+      }
+      reconfirming = false;
+      if (!response.ok || !validResponse(payload, value) || payload.schema_version !== 3) {
+        safeFailure(safeCode(payload));
+        return;
+      }
+      applyConfirmed(payload, value);
+    } catch (caught) {
+      if (version !== operationVersion || caught?.name === "AbortError") {
+        reconfirming = false;
+        return;
+      }
+      reconfirming = false;
+      safeFailure("confirmation_unavailable");
+    }
+  }
+
   action.addEventListener("click", confirm);
-  window.vigiVisionReferenceFrameConfirmation = Object.freeze({ getState: () => ({ phase, locked, submitting: activeSubmission !== null, investigationId: currentResult?.investigation_id ?? null }), refresh });
+  reconfirmAction.addEventListener("click", reconfirm);
+  window.vigiVisionReferenceFrameConfirmation = Object.freeze({ getState: () => ({ phase, locked, submitting: activeSubmission !== null || reconfirming, investigationId: currentResult?.investigation_id ?? null }), refresh });
   void refresh();
 })();

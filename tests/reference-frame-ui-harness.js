@@ -235,6 +235,7 @@ function createHarness(
     ["#confirmation-status", new FakeElement("p")],
     ["#confirmation-error", new FakeElement("p")],
     ["#confirmation-action", new FakeElement("button")],
+    ["#confirmation-reconfirm-action", new FakeElement("button")],
     ["#confirmation-result", new FakeElement("div")],
     ["#confirmation-id", new FakeElement("dd")],
     ["#confirmation-confirmed-at", new FakeElement("dd")],
@@ -264,6 +265,8 @@ function createHarness(
   elements.get("#roi-summary").hidden = true;
   elements.get("#confirmation-panel").hidden = true;
   elements.get("#confirmation-result").hidden = true;
+  elements.get("#confirmation-reconfirm-action").hidden = true;
+  elements.get("#confirmation-reconfirm-action").disabled = true;
   elements.get("#confirmation-error").hidden = true;
   elements.get("#roi-status").textContent = "Select a candidate first.";
   elements.get("#roi-status").dataset.state = "disabled";
@@ -373,6 +376,7 @@ function createHarness(
     confirmationStatus: elements.get("#confirmation-status"),
     confirmationError: elements.get("#confirmation-error"),
     confirmationAction: elements.get("#confirmation-action"),
+    confirmationReconfirmAction: elements.get("#confirmation-reconfirm-action"),
     confirmationResult: elements.get("#confirmation-result"),
     confirmationId: elements.get("#confirmation-id"),
     confirmationConfirmedAt: elements.get("#confirmation-confirmed-at"),

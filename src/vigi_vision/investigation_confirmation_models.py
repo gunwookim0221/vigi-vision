@@ -14,7 +14,8 @@ from typing_extensions import override
 from vigi_vision.durable_io import CanonicalUtc
 from vigi_vision.reference_frame_models import FrameSelectionPolicy, TimingPrecisionStatus
 
-CONFIRMATION_SCHEMA_VERSION: Final = 2
+CONFIRMATION_SCHEMA_VERSION: Final = 3
+CONFIRMATION_SCHEMA_TWO: Final = 2
 CONFIRMATION_KIND: Final = "object_disappearance"
 CONFIRMATION_SCENARIO: Final = "object-disappearance"
 MINIMUM_ROI_SIZE: Final = 4
@@ -22,7 +23,7 @@ MINIMUM_CANDIDATE_OFFSET: Final = -300
 MAXIMUM_CANDIDATE_OFFSET: Final = 300
 _RESOURCE_ID_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,191}$")
 _INVESTIGATION_ID_PATTERN: Final = re.compile(
-    r"^object-disappearance-ch[1-9][0-9]*-[0-9]{8}T[0-9]{6}Z$"
+    r"^object-disappearance-(?:v3-)?ch[1-9][0-9]*-[0-9]{8}T[0-9]{6}Z$"
 )
 _ARTIFACT_RELATIVE_ROOT: Final = "artifacts/investigations"
 
@@ -207,6 +208,8 @@ class ConfirmationReferenceFrame(BaseModel):
     frame_selection_policy: FrameSelectionPolicy
     width: StrictInt = Field(gt=0)
     height: StrictInt = Field(gt=0)
+    jpeg_sha256: StrictStr | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    jpeg_size_bytes: StrictInt | None = Field(default=None, gt=0)
 
 
 class ConfirmationTiming(BaseModel):
@@ -222,7 +225,7 @@ class ConfirmationTiming(BaseModel):
 
 
 class ConfirmationRecord(BaseModel):
-    """Trusted confirmation facts nested inside the schema 2 manifest."""
+    """Trusted confirmation facts nested inside the schema 2 or 3 manifest."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -237,11 +240,11 @@ class ConfirmationRecord(BaseModel):
 
 
 class ConfirmationManifest(BaseModel):
-    """Immutable schema 2 confirmation manifest persisted under investigations."""
+    """Immutable schema 2 or 3 confirmation manifest persisted under investigations."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: Literal[2]
+    schema_version: Literal[2, 3]
     investigation_id: StrictStr
     investigation_kind: Literal["object_disappearance"]
     scenario_id: Literal["object-disappearance"]
@@ -264,6 +267,18 @@ class ConfirmationManifest(BaseModel):
         _require_utc_whole_second(self.confirmation.reference_frame.requested_time_utc)
         if self.confirmation.timing.estimated_source_time_utc is not None:
             _require_utc_whole_second(self.confirmation.timing.estimated_source_time_utc)
+        integrity = (
+            self.confirmation.reference_frame.jpeg_sha256,
+            self.confirmation.reference_frame.jpeg_size_bytes,
+        )
+        if self.schema_version == CONFIRMATION_SCHEMA_VERSION and (
+            integrity[0] is None or integrity[1] is None
+        ):
+            raise ValueError
+        if self.schema_version == CONFIRMATION_SCHEMA_TWO and any(
+            value is not None for value in integrity
+        ):
+            raise ValueError
         return self
 
     def material_json(self) -> str:
@@ -304,6 +319,8 @@ class ConfirmedInvestigationInput:
     source_width: int
     source_height: int
     roi: ConfirmationRoi
+    jpeg_sha256: str
+    jpeg_size_bytes: int
     jpeg_path: Path = field(repr=False)
 
 
@@ -317,12 +334,19 @@ def is_investigation_id(value: str) -> bool:
     return _INVESTIGATION_ID_PATTERN.fullmatch(value) is not None
 
 
-def investigation_id_for(channel_id: int, anchor_time_utc: datetime) -> str:
+def investigation_id_for(
+    channel_id: int,
+    anchor_time_utc: datetime,
+    *,
+    schema_version: Literal[2, 3] = 3,
+) -> str:
     """Return the deterministic credential-free object-disappearance identity."""
     if type(channel_id) is not int or channel_id <= 0:
         raise ConfirmationRequestError
     _require_utc_whole_second(anchor_time_utc)
-    return f"object-disappearance-ch{channel_id}-{anchor_time_utc.strftime('%Y%m%dT%H%M%SZ')}"
+    prefix = "" if schema_version == CONFIRMATION_SCHEMA_TWO else "v3-"
+    timestamp = anchor_time_utc.strftime("%Y%m%dT%H%M%SZ")
+    return f"object-disappearance-{prefix}ch{channel_id}-{timestamp}"
 
 
 def canonical_manifest_json(manifest: ConfirmationManifest) -> str:

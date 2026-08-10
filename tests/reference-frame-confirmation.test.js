@@ -40,6 +40,15 @@ function confirmationResponse(overrides = {}) {
   return response;
 }
 
+function schemaThreeConfirmationResponse(overrides = {}) {
+  return confirmationResponse({
+    ...overrides,
+    investigation_id: "object-disappearance-v3-ch1-20260720T033418Z",
+    schema_version: 3,
+    artifact_directory_relative: "artifacts/investigations/object-disappearance-v3-ch1-20260720T033418Z",
+  });
+}
+
 async function selectedHarness(fetchImplementation, channelResponse) {
   const harness = createHarness(fetchImplementation, channelResponse, { confirmation: true });
   applyReferenceTime(harness);
@@ -639,7 +648,7 @@ test("review text includes identity, timing, source dimensions, ROI, and provena
   });
   commitRoi(harness);
   await settle();
-  assert.match(harness.confirmationReview.textContent, /object-disappearance-ch1/);
+  assert.match(harness.confirmationReview.textContent, /object-disappearance-v3-ch1/);
   assert.match(harness.confirmationReview.textContent, /resource--10/);
   assert.match(harness.confirmationReview.textContent, /2026-07-20T03:34:08Z/);
   assert.match(harness.confirmationReview.textContent, /2560 × 1440/);
@@ -663,6 +672,77 @@ test("an existing confirmation restores the server ROI through GET without local
   assert.equal(harness.window.vigiVisionReferenceFrameRoi.getState().provenance, "manual");
   assert.equal(harness.confirmationAction.disabled, true);
   assert.equal(harness.confirmationId.textContent, "object-disappearance-ch1-20260720T033418Z");
+});
+
+test("a schema 2 confirmation exposes an explicit recording-search reconfirm action", async () => {
+  const requests = [];
+  const harness = await selectedHarness((url, options) => {
+    requests.push({ url, options });
+    if (url.endsWith("/reconfirm-for-recording-search")) {
+      return Promise.resolve({ ok: true, status: 201, json: async () => schemaThreeConfirmationResponse({ outcome: "created" }) });
+    }
+    if (url.startsWith("/api/v1/investigation-confirmations/")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => confirmationResponse() });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => candidateSet([candidate(-10)]) });
+  });
+  await settle();
+
+  assert.equal(harness.window.vigiVisionReferenceFrameConfirmation.getState().phase, "confirmed");
+  assert.equal(harness.confirmationReconfirmAction.hidden, false);
+  assert.equal(harness.confirmationReconfirmAction.disabled, false);
+  harness.confirmationReconfirmAction.listeners.click({ preventDefault() {} });
+  await settle();
+
+  const reconfirmRequest = requests.find((entry) => entry.url.endsWith("/reconfirm-for-recording-search"));
+  assert.ok(reconfirmRequest);
+  assert.equal(reconfirmRequest.options.method, "POST");
+  assert.equal(reconfirmRequest.options.body, "{}");
+  assert.equal(harness.window.vigiVisionReferenceFrameConfirmation.getState().investigationId, "object-disappearance-v3-ch1-20260720T033418Z");
+  assert.equal(harness.confirmationReconfirmAction.hidden, true);
+  assert.equal(harness.confirmationReconfirmAction.disabled, true);
+});
+
+test("a failed schema 2 reconfirm keeps the legacy result and safe retry action", async () => {
+  const harness = await selectedHarness((url) => {
+    if (url.endsWith("/reconfirm-for-recording-search")) {
+      return Promise.resolve({ ok: false, status: 500, json: async () => ({ error: { code: "artifact_failure", message: "C:\\\\private" } }) });
+    }
+    if (url.startsWith("/api/v1/investigation-confirmations/")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => confirmationResponse() });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => candidateSet([candidate(-10)]) });
+  });
+  await settle();
+  harness.confirmationReconfirmAction.listeners.click({ preventDefault() {} });
+  await settle();
+
+  assert.equal(harness.window.vigiVisionReferenceFrameConfirmation.getState().phase, "error");
+  assert.equal(harness.confirmationResult.hidden, false);
+  assert.equal(harness.confirmationReconfirmAction.hidden, false);
+  assert.equal(harness.confirmationReconfirmAction.disabled, false);
+  assert.doesNotMatch(harness.confirmationError.textContent, /private|C:/i);
+});
+
+test("repeated schema 2 reconfirm clicks produce one request", async () => {
+  const requests = [];
+  const pending = deferred();
+  const harness = await selectedHarness((url) => {
+    if (url.endsWith("/reconfirm-for-recording-search")) {
+      requests.push(url);
+      return pending.promise;
+    }
+    if (url.startsWith("/api/v1/investigation-confirmations/")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => confirmationResponse() });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => candidateSet([candidate(-10)]) });
+  });
+  await settle();
+  harness.confirmationReconfirmAction.listeners.click({ preventDefault() {} });
+  harness.confirmationReconfirmAction.listeners.click({ preventDefault() {} });
+  assert.equal(requests.length, 1);
+  pending.resolve({ ok: true, status: 201, json: async () => schemaThreeConfirmationResponse() });
+  await settle();
 });
 
 test("confirmation conflict stays safe and never displays server details", async () => {

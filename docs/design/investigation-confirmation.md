@@ -2,9 +2,8 @@
 
 ## Status and scope
 
-**Status: schema 2 Phase 6-2A/2B/2C is implemented. The schema 3 baseline-
-integrity extension and explicit legacy reconfirmation required by Phase 7 are
-approved here as the Phase 6C compatibility increment.**
+**Status: Phase 6-2A/2B/2C and the Phase 6C schema 3 integrity/reconfirmation
+compatibility increment are implemented.**
 
 This document defines the boundary where a user-reviewed reference frame and
 ROI stop being transient browser state and become one immutable, durable input
@@ -117,8 +116,9 @@ copy the JPEG, modify its manifest, or persist the transient mask. This keeps
 reference-frame ownership and lifecycle unchanged while giving Phase 7 a
 stable, validated lookup key.
 
-Existing unversioned multi-camera manifests are legacy schema 1. The implemented
-confirmation shape is schema 2. Phase 6C adds schema 3 without rewriting either:
+Existing unversioned multi-camera manifests are legacy schema 1. Existing schema 2
+confirmations remain readable. Phase 6C publishes new confirmations as schema 3
+without rewriting either:
 its deterministic directory namespace includes `v3`, so explicit reconfirmation
 publishes a new immutable package and leaves the old package readable.
 
@@ -300,9 +300,8 @@ POST /api/v1/investigation-confirmations
 ```
 
 The endpoint and client request shape do not change for ordinary schema 3
-confirmation. The current runtime still publishes schema 2; after Phase 6C, new and
-explicitly reconfirmed submissions resolve under the `v3` identity namespace
-and return schema 3.
+confirmation. New submissions resolve under the `v3` identity namespace and return
+schema 3.
 
 Phase 6C also adds one compatibility action for an existing schema 2 package:
 
@@ -622,7 +621,7 @@ unvalidated JSON. A narrow repository/loader boundary should expose one method:
 load_confirmed(investigation_id) -> ConfirmedInvestigationInput
 ```
 
-The implemented schema 2 typed output contains exactly:
+The schema 2 read-only display representation contains these persisted facts:
 
 ```text
 investigation_id
@@ -645,18 +644,17 @@ roi
 jpeg_path
 ```
 
-Phase 6C must add schema 3 parsing and these two server-owned fields to the typed
-output before recording search can run:
+The implemented `ConfirmedInvestigationInput` loader is schema 3 only and includes
+these two server-owned fields before recording search can run:
 
 ```text
 jpeg_sha256
 jpeg_size_bytes
 ```
 
-The current Python dataclass does not contain those fields; this is an explicit
-Phase 6 models/repository/service update, not a documentation alias for current
-behavior. Phase 7 requires schema 3 and returns `reconfirmation_required` for a
-schema 2 package.
+The schema 2 read path remains available for display and explicit reconfirmation;
+Phase 7 requires schema 3 and returns `reconfirmation_required` for a schema 2
+package.
 
 The loader confines lookup to `artifacts/investigations/`, rejects path
 indirection and invalid or legacy manifests, strictly parses the confirmation,

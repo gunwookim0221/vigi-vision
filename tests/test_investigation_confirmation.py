@@ -1,3 +1,4 @@
+import base64
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -38,7 +39,9 @@ from vigi_vision.reference_frame_models import (
 )
 from vigi_vision.reference_frame_resources import ReferenceFrameResourceStore
 
-_JPEG_BYTES = b"\xff\xd8\xff\xe0confirmation-frame\xff\xd9"
+_JPEG_BYTES = base64.b64decode(
+    "/9j/4AAQSkZJRgABAgAAAQABAAD//gAQTGF2YzYyLjI4LjEwMgD/2wBDAAgEBAQEBAUFBQUFBQYGBgYGBgYGBgYHBwcICAgHBwcGBgcHCAgICAkJCQgICAgJCQoKCgwMCwsODg4RERT/xABLAAEBAAAAAAAAAAAAAAAAAAAACAEBAAAAAAAAAAAAAAAAAAAAABABAAAAAAAAAAAAAAAAAAAAABEBAAAAAAAAAAAAAAAAAAAAAP/AABEIAtAFAAMBIgACEQADEQD/2gAMAwEAAhEDEQA/AJ/AB//Z"
+)
 _NOW = datetime(2026, 8, 2, 4, 5, 6, tzinfo=timezone.utc)
 
 
@@ -274,7 +277,7 @@ class Context:
     @property
     def investigation_id(self) -> str:
         token = self.confirmation_anchor_time_utc.strftime("%Y%m%dT%H%M%SZ")
-        return f"object-disappearance-ch{self.channel_id}-{token}"
+        return f"object-disappearance-v3-ch{self.channel_id}-{token}"
 
 
 def _context(

@@ -37,6 +37,7 @@ from vigi_vision.investigation_confirmation_api import (
     InvestigationConfirmationExecutionBoundary,
     install_investigation_confirmation_routes,
 )
+from vigi_vision.investigation_confirmation_integrity import FfmpegJpegDecoder
 from vigi_vision.investigation_confirmation_repository import InvestigationConfirmationRepository
 from vigi_vision.investigation_confirmation_service import InvestigationConfirmationService
 from vigi_vision.nvr import SdkNvrGateway
@@ -390,10 +391,15 @@ def create_reference_frame_app_from_environment() -> FastAPI:
         ffprobe = resolve_ffprobe(ffmpeg)
         artifacts = ReferenceFrameArtifactStore(_ARTIFACT_ROOT)
         resources = ReferenceFrameResourceStore(_ARTIFACT_ROOT)
+        jpeg_decoder = FfmpegJpegDecoder(ffmpeg)
         confirmation_repository = InvestigationConfirmationRepository(
-            _CONFIRMATION_ARTIFACT_ROOT, resources
+            _CONFIRMATION_ARTIFACT_ROOT, resources, jpeg_decoder=jpeg_decoder
         )
-        confirmation_service = InvestigationConfirmationService(resources, confirmation_repository)
+        confirmation_service = InvestigationConfirmationService(
+            resources,
+            confirmation_repository,
+            jpeg_decoder=jpeg_decoder,
+        )
         channel_inventory = SdkNvrGateway(connection)
         service = ReferenceFrameService(
             planner=planner,

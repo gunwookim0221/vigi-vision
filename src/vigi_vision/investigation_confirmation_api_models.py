@@ -70,6 +70,12 @@ class InvestigationConfirmationCreateBody(BaseModel):
         )
 
 
+class InvestigationConfirmationReconfirmBody(BaseModel):
+    """Explicit schema 2 reconfirmation decision with no client-owned facts."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True)
+
+
 class InvestigationConfirmationTimingResponse(BaseModel):
     """Safe timing evidence copied from the trusted reference-frame manifest."""
 
@@ -108,14 +114,14 @@ class InvestigationConfirmationSummaryResponse(BaseModel):
 
 
 class InvestigationConfirmationResponse(BaseModel):
-    """Public immutable schema 2 confirmation representation."""
+    """Public immutable schema 2 or 3 confirmation representation."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     investigation_id: StrictStr
     outcome: ConfirmationOutcome
     status: Literal["confirmed"]
-    schema_version: Literal[2]
+    schema_version: Literal[2, 3]
     confirmed_at_utc: datetime
     artifact_directory_relative: StrictStr
     confirmation: InvestigationConfirmationSummaryResponse
