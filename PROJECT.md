@@ -189,11 +189,12 @@ aligned-ROI luma-NCC comparator before whole-second binary narrowing. Its compac
 manifest persists the closed baseline/probe/alias union and full policy snapshot
 without inventing stable source identity. Advanced lease, fencing, takeover,
 resume, and crash-recovery analysis is preserved as non-normative future
-reference. Phase 7A-1 now implements only the validated local run lifecycle,
+reference. Phase 7A-1 now implements the validated local run lifecycle,
 strict baseline gate, isolated artifact repository, duplicate/interruption
-handling, and safe start/status HTTP routes. Recording acquisition, the
-classifier, search orchestration, Phase 8 review media, and Phase 9 result UI
-remain unimplemented. Absolute source-time
+handling, and safe start/status HTTP routes. Phase 7A-2 now implements
+acquisition-only schema-2 request/frame persistence, authoritative provenance,
+and strict reopen validation. The classifier, search orchestration, Phase 8
+review media, and Phase 9 result UI remain unimplemented. Absolute source-time
 calibration remains deferred; Phase 4C-2
 provides transient frontend-only selection of one
 successful candidate, and Phase 5-1/5-2 provide the transient source-space

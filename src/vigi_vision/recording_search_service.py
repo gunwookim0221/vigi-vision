@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from secrets import token_hex
@@ -17,6 +18,12 @@ from vigi_vision.investigation_confirmation_models import (
     ConfirmedInvestigationInput,
     LegacyInvestigationError,
 )
+from vigi_vision.recording_search_a2_decoder import RecordingProbeBatchDecoder  # noqa: TC001
+from vigi_vision.recording_search_a2_models import (  # noqa: TC001
+    ProbeFrameRequestRecord,
+    RecordingSearchManifestV2,
+)
+from vigi_vision.recording_search_a2_service import acquire_targets
 from vigi_vision.recording_search_lock import LocalInvestigationLock
 from vigi_vision.recording_search_models import (
     Phase8HandoffStatus,
@@ -30,12 +37,17 @@ from vigi_vision.recording_search_models import (
     default_policy,
 )
 from vigi_vision.reference_frame_models import ReferenceFrameError, parse_reference_frame_request
+from vigi_vision.reference_frame_service import (  # noqa: TC001
+    RecordingSegmentPlanningBoundary,
+    ReplayExtractionBoundary,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Generator
     from pathlib import Path
 
     from vigi_vision.investigation_confirmation_integrity import JpegDecoder
+    from vigi_vision.recording_search_a2_support import A2HandleBoundary
     from vigi_vision.recording_search_repository import RecordingSearchRepository
 
 
@@ -84,17 +96,31 @@ class StaticPolicyAvailability:
 class RecordingSearchStartResult:
     """Result and authoritative manifest of a start attempt."""
 
-    manifest: RecordingSearchManifest
+    manifest: RecordingSearchManifest | RecordingSearchManifestV2
     outcome: RecordingSearchOutcome
     baseline_bytes: bytes = field(repr=False)
     run_handle: RecordingSearchRunHandle | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveRun:
+    run_id: str
+    os_lock: LocalInvestigationLock = field(repr=False)
+    mutation_lock: RLock = field(repr=False)
 
 
 @final
 class RecordingSearchRunHandle:
     """Process-owned handle for the active investigation lock."""
 
-    __slots__ = ("_closed", "_service", "baseline_bytes", "investigation_id", "search_run_id")
+    __slots__ = (
+        "_closed",
+        "_mutation_lock",
+        "_service",
+        "baseline_bytes",
+        "investigation_id",
+        "search_run_id",
+    )
 
     def __init__(
         self,
@@ -102,17 +128,19 @@ class RecordingSearchRunHandle:
         investigation_id: str,
         search_run_id: str,
         baseline_bytes: bytes,
+        mutation_lock: RLock,
     ) -> None:
         """Retain the active lock and invocation-owned baseline bytes."""
         self._service = service
         self.investigation_id = investigation_id
         self.search_run_id = search_run_id
         self.baseline_bytes = baseline_bytes
+        self._mutation_lock = mutation_lock
         self._closed = False
 
     def mark_terminal(
         self, state: RecordingSearchState, failure_reason: str
-    ) -> RecordingSearchManifest:
+    ) -> RecordingSearchManifest | RecordingSearchManifestV2:
         """Persist a supported terminal state and release the lock."""
         if self._closed:
             raise RecordingSearchBaselineError
@@ -124,6 +152,11 @@ class RecordingSearchRunHandle:
         if not self._closed:
             self._closed = True
             self._service.release_handle(self)
+
+    @property
+    def closed(self) -> bool:
+        """Return whether this handle has released its active ownership."""
+        return self._closed
 
 
 @dataclass(slots=True)
@@ -141,10 +174,51 @@ class RecordingSearchService:
     )
     lock_timeout_seconds: float = field(default=0.5, repr=False)
     id_factory: Callable[[], str] = field(default=_new_run_id, repr=False)
-    _active: dict[str, tuple[str, LocalInvestigationLock]] = field(
-        default_factory=dict, init=False, repr=False
+    operation_id_factory: Callable[[], str] = field(
+        default=lambda: f"acquisition-op-{token_hex(8)}", repr=False
     )
+    probe_request_id_factory: Callable[[], str] = field(
+        default=lambda: f"probe-request-{token_hex(8)}", repr=False
+    )
+    recording_planner: RecordingSegmentPlanningBoundary | None = field(default=None, repr=False)
+    replay_extractor: ReplayExtractionBoundary | None = field(default=None, repr=False)
+    batch_decoder: RecordingProbeBatchDecoder | None = field(default=None, repr=False)
+    _active: dict[str, _ActiveRun] = field(default_factory=dict, init=False, repr=False)
     _guard: RLock = field(default_factory=RLock, init=False, repr=False)
+
+    def acquire_targets(
+        self, handle: RecordingSearchRunHandle, requested_times: tuple[datetime, ...]
+    ) -> tuple[ProbeFrameRequestRecord, ...]:
+        """Acquire ordered recording probes through the Phase 7A-2 boundary."""
+        return acquire_targets(self, handle, requested_times)
+
+    @contextmanager
+    def a2_mutation(self, handle: A2HandleBoundary) -> Generator[None, None, None]:
+        """Hold the active handle guard and shared A2 mutation mutex."""
+        with self._guard:
+            active = self._active.get(handle.investigation_id)
+            if (
+                handle.closed
+                or active is None
+                or active.run_id != handle.search_run_id
+                or not active.os_lock.held
+            ):
+                raise RecordingSearchBaselineError
+            with active.mutation_lock:
+                yield
+
+    def _active_for_handle(self, handle: RecordingSearchRunHandle) -> _ActiveRun:
+        """Validate active ownership before an A2 mutation acquires its mutex."""
+        with self._guard:
+            active = self._active.get(handle.investigation_id)
+            if (
+                handle.closed
+                or active is None
+                or active.run_id != handle.search_run_id
+                or not active.os_lock.held
+            ):
+                raise RecordingSearchBaselineError
+            return active
 
     def start(self, request: RecordingSearchRequest) -> RecordingSearchStartResult:
         """Validate the baseline and create one active run."""
@@ -152,7 +226,7 @@ class RecordingSearchService:
         with self._guard:
             active = self._active.get(request.investigation_id)
             if active is not None:
-                manifest = self.repository.load(request.investigation_id, active[0])
+                manifest = self.repository.load(request.investigation_id, active.run_id)
                 return RecordingSearchStartResult(
                     manifest=manifest,
                     outcome=RecordingSearchOutcome.ALREADY_RUNNING,
@@ -200,13 +274,15 @@ class RecordingSearchService:
                 running = self.repository.transition(
                     request.investigation_id, run_id, RecordingSearchState.RUNNING
                 )
+                mutation_lock = RLock()
                 handle = RecordingSearchRunHandle(
                     self,
                     request.investigation_id,
                     run_id,
                     bytes(baseline[1]),
+                    mutation_lock,
                 )
-                self._active[request.investigation_id] = (run_id, lock)
+                self._active[request.investigation_id] = _ActiveRun(run_id, lock, mutation_lock)
                 return RecordingSearchStartResult(
                     manifest=running,
                     outcome=RecordingSearchOutcome.STARTED,
@@ -217,12 +293,14 @@ class RecordingSearchService:
                 lock.release()
                 raise
 
-    def status(self, investigation_id: str, search_run_id: str) -> RecordingSearchManifest:
+    def status(
+        self, investigation_id: str, search_run_id: str
+    ) -> RecordingSearchManifest | RecordingSearchManifestV2:
         """Return persisted status and reconcile an unowned active run."""
         with self._guard:
             active = self._active.get(investigation_id)
             if active is not None:
-                if active[0] != search_run_id:
+                if active.run_id != search_run_id:
                     return self.repository.load(investigation_id, search_run_id)
                 return self.repository.load(investigation_id, search_run_id)
             lock = LocalInvestigationLock(self.repository.lock_path(investigation_id))
@@ -246,39 +324,41 @@ class RecordingSearchService:
         with self._guard:
             active = tuple(self._active.values())
             self._active.clear()
-            for _, lock in active:
-                lock.release()
+            for item in active:
+                item.os_lock.release()
 
     def mark_terminal_for_handle(
         self,
         handle: RecordingSearchRunHandle,
         state: RecordingSearchState,
         failure_reason: str,
-    ) -> RecordingSearchManifest:
+    ) -> RecordingSearchManifest | RecordingSearchManifestV2:
         """Persist a terminal state for a process-owned handle."""
         with self._guard:
             active = self._active.get(handle.investigation_id)
-            if active is None or active[0] != handle.search_run_id:
+            if active is None or active.run_id != handle.search_run_id:
                 raise RecordingSearchBaselineError
-            try:
-                return self.repository.transition(
-                    handle.investigation_id,
-                    handle.search_run_id,
-                    state,
-                    failure_reason,
-                )
-            finally:
-                _ = self._active.pop(handle.investigation_id, None)
-                active[1].release()
+            with active.mutation_lock:
+                try:
+                    return self.repository.transition(
+                        handle.investigation_id,
+                        handle.search_run_id,
+                        state,
+                        failure_reason,
+                    )
+                finally:
+                    _ = self._active.pop(handle.investigation_id, None)
+                    active.os_lock.release()
 
     def release_handle(self, handle: RecordingSearchRunHandle) -> None:
         """Release a process-owned handle without publishing completion."""
         with self._guard:
             active = self._active.get(handle.investigation_id)
-            if active is None or active[0] != handle.search_run_id:
+            if active is None or active.run_id != handle.search_run_id:
                 return
-            _ = self._active.pop(handle.investigation_id, None)
-            active[1].release()
+            with active.mutation_lock:
+                _ = self._active.pop(handle.investigation_id, None)
+                active.os_lock.release()
 
     def _validate_baseline(
         self, request: RecordingSearchRequest

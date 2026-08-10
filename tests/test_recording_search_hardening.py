@@ -11,6 +11,7 @@ from tests.test_investigation_confirmation import build_context, build_request
 from typing_extensions import override
 
 from vigi_vision.channel_selection import Channel
+from vigi_vision.recording_search_a2_models import RecordingSearchManifestV2
 from vigi_vision.recording_search_models import (
     RecordingSearchArtifactError,
     RecordingSearchManifest,
@@ -56,7 +57,9 @@ def request(investigation_id: str) -> RecordingSearchRequest:
 class _FailBeforeManifestRepository(RecordingSearchRepository):
     @override
     def _write_manifest_to_directory(
-        self, manifest: RecordingSearchManifest, directory: Path
+        self,
+        manifest: RecordingSearchManifest | RecordingSearchManifestV2,
+        directory: Path,
     ) -> NoReturn:
         _ = manifest, directory
         raise RecordingSearchArtifactError
@@ -289,6 +292,7 @@ def test_existing_final_destination_is_never_overwritten(tmp_path: Path) -> None
     repository = service.repository
     service.close()
     manifest = repository.load(investigation_id, run_id)
+    assert isinstance(manifest, RecordingSearchManifest)
     with pytest.raises(RecordingSearchArtifactError):
         _ = repository.create(manifest)
     assert repository.load(investigation_id, run_id) == manifest
