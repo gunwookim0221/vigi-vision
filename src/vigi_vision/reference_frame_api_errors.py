@@ -77,6 +77,7 @@ _CONFIRMATION_INVALID_MESSAGE: Final = "The investigation confirmation request i
 _CONFIRMATION_NOT_FOUND_MESSAGE: Final = "The confirmed investigation was not found."
 _METHOD_NOT_ALLOWED_MESSAGE: Final = "The requested HTTP method is not allowed."
 _CONFIRMATION_API_PREFIX: Final = "/api/v1/investigation-confirmations"
+_RECORDING_SEARCH_API_PREFIX: Final = "/api/v1/recording-searches"
 
 
 @final
@@ -321,6 +322,10 @@ async def safe_error_response(request: Request, error: Exception) -> JSONRespons
                     "invalid_confirmation",
                     _CONFIRMATION_INVALID_MESSAGE,
                 ).response()
+            if request.url.path == _RECORDING_SEARCH_API_PREFIX or request.url.path.startswith(
+                f"{_RECORDING_SEARCH_API_PREFIX}/"
+            ):
+                return _recording_search_validation_error(error).response()
             return _validation_error(error).response()
         case _:
             return domain_error(error).response()
@@ -358,3 +363,19 @@ def _validation_error(error: RequestValidationError) -> ReferenceFrameApiError:
     status_code = _BAD_REQUEST if malformed_json else _UNPROCESSABLE_CONTENT
     code = "malformed_json" if malformed_json else "invalid_request"
     return ReferenceFrameApiError(status_code, code, _INVALID_REQUEST_MESSAGE)
+
+
+def _recording_search_validation_error(error: RequestValidationError) -> ReferenceFrameApiError:
+    issues: Sequence[ErrorDetails] = error.errors()
+    malformed_json = "json_invalid" in {issue["type"] for issue in issues}
+    if malformed_json:
+        return ReferenceFrameApiError(
+            _BAD_REQUEST,
+            "invalid_request",
+            "The recording-search request is invalid.",
+        )
+    return ReferenceFrameApiError(
+        _UNPROCESSABLE_CONTENT,
+        "invalid_request",
+        "The recording-search request is invalid.",
+    )

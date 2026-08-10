@@ -2,9 +2,12 @@
 
 ## Status and normative authority
 
-**Status: normative design for the current single-site Phase 7 MVP. No Phase 7
-runtime, transport, classifier, or Phase 8 review-media generator is implemented;
-the required Phase 6C schema 3 compatibility increment is complete.**
+**Status: normative design for the current single-site Phase 7 MVP. Phase 7A-1
+implements only the validated local run lifecycle, baseline gate, isolated
+repository, duplicate/interruption handling, and safe start/status API. Recording
+acquisition, classifier, search orchestration, and Phase 8 review-media generation
+remain unimplemented; the required Phase 6C schema 3 compatibility increment is
+complete.**
 
 This document is the current implementation and review contract for Phase 7.
 It is intentionally limited to one restaurant, one local application host, one
@@ -215,6 +218,26 @@ execution:
 Frontend double-click suppression is helpful but not authoritative. The lock
 and service result make duplicate starts deterministic across tabs or two local
 users.
+
+### Phase 7A-1 HTTP boundary
+
+The existing local FastAPI application exposes only the lifecycle boundary in this
+slice:
+
+- `POST /api/v1/recording-searches` accepts `investigation_id`,
+  `search_end_time_text`, and `source_timezone`; all baseline facts are loaded
+  server-side.
+- `GET /api/v1/recording-searches/{investigation_id}/{search_run_id}` returns
+  the strict persisted lifecycle manifest and performs the documented interruption
+  inspection.
+
+Both routes use the existing credential-safe error envelope. They expose no
+filesystem paths, authenticated URLs, subprocess details, or recording-search
+results; acquisition and classification remain later slices. The Phase 7A-1
+repository accepts only `PENDING`, `RUNNING`, `FAILED`, and `INTERRUPTED`
+manifests with fixed safe reason codes. Observation IDs, aliases, candidate
+intervals, Phase 8 handoff fields, and later terminal states are rejected until
+their implementing slices exist.
 
 ### Interruption and explicit restart
 
@@ -801,7 +824,8 @@ stages; the public state model remains unchanged.
 - **Tests:** every baseline gate, duplicate start, lock-held status, interrupted
   nonterminal run, new-run isolation, paths, cleanup, and redaction.
 - **Complete:** one valid schema 3 baseline starts one isolated `RUNNING` run;
-  invalid input or abandoned state fails without creating search evidence.
+  invalid input or abandoned state fails without creating search evidence, and
+  the safe start/status boundary exposes only lifecycle facts.
 
 ### Phase 7A-2: bounded multi-target acquisition
 

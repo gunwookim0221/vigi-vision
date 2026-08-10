@@ -4,8 +4,9 @@
 
 **Status: approved object-disappearance direction; Phases 2-6 implement
 reference-frame retrieval, candidate review, source-space ROI selection, and
-immutable confirmation. Phase 7 now has a deliberately small single-site MVP
-design; its runtime and the Phase 8/9 review workflow remain unimplemented.**
+immutable confirmation. Phase 7A-1 now implements only its validated local run
+lifecycle and safe start/status boundary; recording search and the Phase 8/9
+review workflow remain unimplemented.**
 
 This document defines the first bounded use case for VIGI Vision's longer-term
 Event Discovery direction: a user investigates one selected object on one NVR
@@ -95,7 +96,7 @@ object-presence or disappearance classification.
 
 The repository does **not** currently provide:
 
-- a Phase 7 regional presence classifier or recording-search runtime;
+- a Phase 7 regional presence classifier or recording-search execution runtime;
 - coarse-to-binary recording-search orchestration, run manifests, or
   disappearance outcomes;
 - Phase 8 boundary images, evidence timeline, or review clip; or
@@ -212,10 +213,11 @@ The intended user-facing result contains:
 - versioned comparison evidence and explicit limitations; and
 - an explicit review-required indication.
 
-The Phase 7 design now defines one run ID and directory, a compact run manifest,
-minimal baseline/recording observation evidence, deterministic outcomes, and a
-separate Phase 8 handoff request. A public HTTP/API contract is still not
-selected. Artifacts retain the repository's
+Phase 7A-1 now defines and implements one run ID and directory, a compact
+lifecycle manifest, strict baseline validation, duplicate/interruption handling,
+and a safe start/status HTTP boundary. Recording observations, deterministic
+outcomes, and a separate Phase 8 handoff remain later slices. Artifacts retain
+the repository's
 credential-free principles: no usernames, passwords, hosts, authenticated
 RTSP/replay URLs, ffmpeg arguments, raw subprocess diagnostics, or absolute
 paths enter manifests or user-facing output.
@@ -272,12 +274,13 @@ version after Phase 7E evidence.
 1. **Phases 1-5 (implemented foundation):** bounded scope, durable
    reference-frame resources and candidates, source-space ROI review, and
    assisted/manual editing.
-2. **Phase 6 (schema 2 implemented; schema 3 compatibility assigned to Phase
-   6C):** strict immutable confirmation publication, explicit legacy
-   reconfirmation, and digest-bound typed Phase 7 loading.
-3. **Phase 7 (MVP design complete; runtime unimplemented):** single-host run
-   lifecycle, interruption/new-run isolation, truthful baseline/recording
-   provenance, production three-state classifier, five-minute coarse sampling,
+2. **Phase 6 (schema 2 and schema 3 compatibility implemented):** strict
+   immutable confirmation publication, explicit legacy reconfirmation, and
+   digest-bound typed Phase 7 loading.
+3. **Phase 7 (A-1 implemented; later slices unimplemented):** single-host run
+   lifecycle, interruption/new-run isolation, and truthful baseline provenance;
+   later slices add recording provenance, production three-state classifier,
+   five-minute coarse sampling,
    one-second binary narrowing, compact persistence, and Phase 8 handoff.
 4. **Phase 8 (future):** boundary images, evidence timeline, and review video.
 5. **Phase 9 (future):** user-facing review and final human decision.
