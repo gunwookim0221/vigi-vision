@@ -189,8 +189,11 @@ or glass effects are used.
   run, canonical multi-target decoding, the production EfficientSAM-Ti plus
   aligned-ROI comparison policy, deterministic coarse/binary search, and a Phase
   8 handoff. The Phase 7A-1 validated local lifecycle/API runtime is implemented;
-  acquisition, classifier/search execution, and the Phase 8/9 review UI remain
-  later work.
+  Phase 7A-2 acquisition is implemented, and the
+  [Phase 7B classifier contract](docs/design/object-presence-classification.md)
+  now defines the internal active-handle-owned, single-read-byte,
+  three-state/schema-3 boundary without adding UI.
+  Classifier/search execution and the Phase 8/9 review UI remain later work.
   Advanced recovery analysis is retained only as
   [non-normative future reference](docs/future/recording-search-resilience.md).
 - Tap-assisted selection and the Phase 5-3C transient silhouette preview are

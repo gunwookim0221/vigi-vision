@@ -615,13 +615,14 @@ candidate or ROI editing and does not introduce general version management.
 ## Phase 7 handoff
 
 Phase 7 consumes a confirmed domain object, not browser state, API models, or
-unvalidated JSON. A narrow repository/loader boundary should expose one method:
+unvalidated JSON. The narrow repository/loader boundary exposes one method:
 
 ```text
 load_confirmed(investigation_id) -> ConfirmedInvestigationInput
 ```
 
-The schema 2 read-only display representation contains these persisted facts:
+The schema 2 read-only typed representation contains these persisted facts plus
+the final trusted internal path resolved by the loader:
 
 ```text
 investigation_id
@@ -690,6 +691,10 @@ timezone field.
 The consuming single-host run, observation, search, and Phase 8 handoff contract
 is defined in
 [Phase 7 Object-Disappearance Recording Search MVP](object-disappearance-recording-search.md).
+The exact Phase 7B rule for turning the active run handle's immutable baseline
+bytes and one single-read immutable recording probe into a three-state
+observation is in
+[Phase 7B Recording-Probe Object-Presence Classification](object-presence-classification.md).
 
 ## Backward compatibility
 

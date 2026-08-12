@@ -56,18 +56,23 @@ The search policy is deliberately small:
    replay-local time base/PTS, attempt-local ordinal, dimensions, image digest,
    and a canonical frame ID derived from the exact stable segment/frame-position
    tuple. The current Phase 7A-1 decoder does not provide this source-time
-   capability; A2 must add it at the decoder boundary and fail safely when it is
-   absent or unverifiable. No recording-session identifier is invented. A request
+   capability; the implemented A2 decoder boundary fails safely when it is absent
+   or unverifiable. No recording-session identifier is invented. A request
    alias may reference the same canonical frame, but never counts as an
    independent frame or observation.
 4. Phase 7B, separately, classifies each acquired canonical frame through the
-   versioned production EfficientSAM-
-   Ti mask plus luma NCC over all pixels of the aligned source-pixel ROI as
-   exactly `PRESENT`, `ABSENT`, or `INDETERMINATE`. Mask coverage is segmented
-   pixels inside the clipped ROI divided by total clipped-ROI pixels; empty or
-   zero-area input and coverage at least 95% are `INDETERMINATE`. Persist the
-   model/checkpoint, complete calculation policy, thresholds, and acquisition
-   policy.
+   versioned production EfficientSAM-Ti mask plus luma NCC over all pixels of
+   the aligned source-pixel ROI as exactly `PRESENT`, `ABSENT`, or
+   `INDETERMINATE`. Mask coverage is segmented pixels inside the clipped ROI
+   divided by total clipped-ROI pixels; empty or zero-area input and coverage at
+   least 95% are `INDETERMINATE`. Persist the model/checkpoint, complete
+   calculation policy, thresholds, and acquisition policy. Visual uncertainty
+   may publish `INDETERMINATE`; only successfully decoded and evaluated visual
+   evidence may do so. Unsupported media, decode/RGB/preprocessing failure,
+   corrupt input, classifier/runtime failure, invalid output, ownership loss,
+   and persistence failure publish no RawComparison or observation and never
+   masquerade as a visual state. The linked Phase 7B matrix requires the
+   `effective_comparison_area` field and closes its overlap/area failure rows.
 5. Confirm absence with three distinct canonical frames in increasing normalized
    decoded UTC order at one-second requested-target cadence. Each later observation alias
    must resolve to an indexed canonical recording observation in the same
@@ -81,10 +86,12 @@ The search policy is deliberately small:
    invalid order cannot confirm absence and increments the target once.
 7. Narrow that bracket with deterministic whole-second binary midpoints until
    the persisted stopping resolution is reached.
-8. Treat missing recording, per-target acquisition/decode failure, geometry
-   mismatch, corruption, and classifier failure as one coarse-target uncertainty
-   event, never `ABSENT`. Unexpected storage or persistence failure outside
-   target acquisition remains `FAILED`.
+8. Treat missing recording, per-target acquisition/decode failure, a valid
+   visual `INDETERMINATE`, or classifier operational failure as one coarse-target
+   uncertainty event, never `ABSENT`; an operational classifier failure has no
+   fabricated observation. Invalid baseline geometry, corrupt immutable input,
+   manifest corruption, and unexpected storage or persistence failure remain
+   fixed operational failures, not visual uncertainty.
 9. Persist the candidate interval and a separate Phase 8 handoff request.
 
 The compact run manifest stores schema 3 Phase 6 facts, the complete policy
@@ -98,21 +105,38 @@ held by the run handle; one per-run in-process A2 mutex serializes the complete
 v1 reload, v2 successor construction, and atomic replacement. Readers see either
 valid v1 or valid v2, never a partial promotion.
 
+Phase 7B promotes one valid active v2 manifest to schema 3 only as part of the
+same successful classification publication transaction, beneath the same
+continuously held OS lock and handle-owned mutation mutex. Before timed
+classifier success, the active `RecordingSearchRunHandle.baseline_bytes` is the
+only baseline byte source and no Phase 7B operation, observation, alias, or
+schema-3 child is authoritative. Schema 3 preserves all A2 fields and indexes,
+adds one immutable confirmed-baseline record and ordered
+classification-operation, canonical-observation, and alias indexes, and still
+excludes terminal search and Phase 8 fields. Its atomic manifest replacement is
+the sole promotion and observation publication commit point.
+
 Strict A2 loading validates every request/frame/JPEG relationship, ownership,
 the durable operation-record index, stable canonical identity, source/replay
-PTS/time-base/ordinal provenance, and digest/size/dimension/path check. It rejects future observation/classifier/result fields and
-any foreign or incomplete child. Later Phase 7B records belong to a future
-manifest version and require a successful request/frame pair; acquisition
-failures remain failed requests and cannot become observations. The future
-classifier/search contract requires finite policy-valid PRESENT/ABSENT metrics,
-safe INDETERMINATE reasons, and exactly three distinct ordered ABSENT frames for
-`FOUND`; those rules are not accepted by the A2 loader.
+PTS/time-base/ordinal provenance, and digest/size/dimension/path check. It
+rejects future observation/classifier/result fields and any foreign or
+incomplete child. Phase 7B schema-3 records require a successful request/frame
+pair; acquisition failures remain failed requests and cannot become
+observations. The later integrated search contract requires finite policy-valid
+PRESENT/ABSENT metrics, safe INDETERMINATE reasons, and exactly three distinct
+ordered ABSENT frames for `FOUND`; those rules are not accepted by the A2 or
+Phase 7B loader.
 
 All A2 child-record, index, and manifest mutations use that same per-run mutex
-beneath the continuously held A1 OS lock. The caller must own the active run
-handle, revalidate handle/state/operation/OS-lock ownership, reload the latest
-manifest, and retain the mutex through bounded decode, validation, staging,
-publication, and the atomic manifest commit. Owner B therefore reloads A's
+beneath the continuously held A1 OS lock. Phase 7B uses the mutex to validate
+and snapshot the handle-owned baseline/probe bytes without admitting a durable
+operation, releases the mutex while the existing bounded classifier worker
+runs, and reacquires it for complete prepublication revalidation. A cancelled
+worker may continue briefly, but its revoked attempt token can never publish or
+mutate authoritative state. Only a timely result that passes handle/state/
+operation-input/OS-lock ownership checks may prepare the operation and any
+schema-3 successor, stage owned children, publish without overwrite, and commit
+the atomic manifest replacement. Owner B therefore reloads A's
 committed result and reuses its frame identity when the trusted segment and
 normalized decoded UTC match; it may add only its own request relationship.
 There is no lost-update or silent merge path. The one canonical identity tuple
@@ -149,6 +173,8 @@ user. No phase identifies people, infers ownership, or declares theft.
 The normative field, lifecycle, search, persistence, and implementation-slice
 contract is in
 [Phase 7 Object-Disappearance Recording Search MVP](../design/object-disappearance-recording-search.md).
+The exact Phase 7B classifier and schema-3 observation contract is in
+[Phase 7B Recording-Probe Object-Presence Classification](../design/object-presence-classification.md).
 
 ## Deferred resilience analysis
 

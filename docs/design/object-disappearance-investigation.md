@@ -4,10 +4,12 @@
 
 **Status: approved object-disappearance direction; Phases 2-6 implement
 reference-frame retrieval, candidate review, source-space ROI selection, and
-immutable confirmation. Phase 7A-1 now implements its validated local run
-lifecycle and safe start/status boundary. Phase 7A-2 now implements its
-acquisition-only schema-2 request/frame persistence and strict reopen boundary;
-classifier/search and the Phase 8/9 review workflow remain unimplemented.**
+immutable confirmation. Phase 7A-1 implements its validated local run lifecycle
+and safe start/status boundary. Phase 7A-2 implements its acquisition-only
+schema-2 request/frame persistence and strict reopen boundary. The Phase 7B
+single-probe classification and schema-3 observation contract are complete in
+design but remain unimplemented; search orchestration and the Phase 8/9 review
+workflow also remain unimplemented.**
 
 This document defines the first bounded use case for VIGI Vision's longer-term
 Event Discovery direction: a user investigates one selected object on one NVR
@@ -85,9 +87,10 @@ yet perform disappearance investigation:
   clip, and write a credential-free manifest. That anchor snapshot is tied to
   the existing fixed multi-camera investigation package, not a user-selected
   object workflow.
-- [Investigation confirmation](investigation-confirmation.md) currently publishes
-  schema 2. Phase 6C must add the approved immutable schema 3 JPEG digest/size
-  binding and strict typed loader; only that schema 3 boundary may start search.
+- [Investigation confirmation](investigation-confirmation.md) publishes immutable
+  schema 3 confirmations with JPEG digest/size binding and a strict typed
+  loader. Existing schema 2 packages remain readable but require explicit
+  Phase 6C reconfirmation before search.
 
 Existing OpenAI profile analysis and business reports remain separate from
 this proposed workflow. They must not be treated as an implementation of
@@ -97,9 +100,8 @@ object-presence or disappearance classification.
 
 The repository does **not** currently provide:
 
-- a Phase 7 regional presence classifier or recording-search execution runtime;
-- coarse-to-binary recording-search orchestration, run manifests, or
-  disappearance outcomes;
+- a Phase 7 regional presence-classifier runtime;
+- coarse-to-binary recording-search orchestration or disappearance outcomes;
 - Phase 8 boundary images, evidence timeline, or review clip; or
 - an operator transport or review surface for recording-search results.
 
@@ -162,7 +164,8 @@ validated channel and times
   -> reference-frame retrieval
   -> ROI selection and confirmation
   -> Phase 7A-2 recording acquisition
-  -> Phase 7B observations and candidate interval
+  -> Phase 7B single-probe observations
+  -> Phase 7C/7D candidate interval
   -> Phase 8 review images and video
   -> Phase 9 user decision
 ```
@@ -201,9 +204,19 @@ The initial design uses three states:
 The initial production policy is `efficient-sam-ti-roi-ncc-v1`: EfficientSAM-
 Ti supplies masks, while a local aligned-ROI comparator maps persisted mask-IoU
 and luma-NCC thresholds deterministically to the three states. EfficientSAM does
-not establish object identity by itself. Phase 7E must validate this conservative
-policy on representative NVR frames before deployment; unsupported or uncertain
-evidence remains `INDETERMINATE`. `MOVED` and `OCCLUDED` remain future states.
+not establish object identity by itself. The exact input, geometry, error,
+identity, persistence, and state contract is in
+[Phase 7B Recording-Probe Object-Presence Classification](object-presence-classification.md).
+Phase 7E must validate this conservative policy on representative NVR frames
+before deployment. Unsupported media, media-type mismatch, decode failure,
+invalid decoded structure, unsupported channel layout, deterministic
+RGB-normalization failure, and preprocessing input failure are operational
+`invalid_media_input` failures: they publish no `RawComparison`, visual
+observation, alias, Phase 7B operation, schema-3 promotion, or authoritative
+manifest mutation, and they never produce `PRESENT`, `ABSENT`, or
+`INDETERMINATE`. Only successfully decoded and evaluated visual evidence that
+reaches a closed quality, comparability, or policy-gap outcome may be
+`INDETERMINATE`. `MOVED` and `OCCLUDED` remain future states.
 
 ## Intended artifacts and evidence
 
@@ -270,12 +283,12 @@ absence result. Later slices add the production three-state classifier,
 chronological coarse sampling, deterministic binary narrowing, and a separate
 Phase 8 request. Existing single-target callers remain unchanged. Requested time
 never substitutes for stable authoritative decoded-frame provenance. Phase 7A-2
-must add a decoder-boundary source-time capability that retains the physical
-replay origin, raw source/container PTS, positive source time base, replay-local
-PTS/time base, and attempt-local ordinal; the current Phase 7A-1 direct decoder
-does not provide those absolute source-time facts. Missing or irreproducible
-mapping fails as `missing_provenance` before publication. A public transport or
-new frontend is not part of Phase 7.
+now provides the decoder-boundary source-time capability that retains the
+physical replay origin, raw source/container PTS, positive source time base,
+replay-local PTS/time base, and attempt-local ordinal; the current Phase 7A-1
+direct decoder remains unchanged and does not provide those absolute source-time
+facts. Missing or irreproducible mapping fails as `missing_provenance` before
+publication. A public transport or new frontend is not part of Phase 7.
 
 The selected comparator uses the existing verified EfficientSAM-Ti point-mask
 path plus aligned source-ROI mask IoU and mean-centered luma correlation. Its
@@ -291,13 +304,14 @@ version after Phase 7E evidence.
 2. **Phase 6 (schema 2 and schema 3 compatibility implemented):** strict
    immutable confirmation publication, explicit legacy reconfirmation, and
    digest-bound typed Phase 7 loading.
-3. **Phase 7 (A-1 and A-2 implemented):** single-host run lifecycle,
+3. **Phase 7 (A-1 and A-2 implemented; 7B designed):** single-host run lifecycle,
    interruption/new-run isolation, truthful baseline provenance, and
    acquisition-only request/frame records with canonical frame identities,
-   run-relative JPEG publication, and strict acquisition indexes. Later slices
-   add recording observations, production
-   three-state classification, five-minute coarse sampling, one-second binary
-   narrowing, compact persistence, and Phase 8 handoff.
+   run-relative JPEG publication, and strict acquisition indexes. Phase 7B now
+   defines immutable schema-3 observations and production three-state
+   classification; later implementation and slices add the runtime, five-minute
+   coarse sampling, one-second binary narrowing, terminal persistence, and
+   Phase 8 handoff.
 4. **Phase 8 (future):** boundary images, evidence timeline, and review video.
 5. **Phase 9 (future):** user-facing review and final human decision.
 6. **Later work:** object relocation, automatic detection, broader event types,
@@ -321,8 +335,10 @@ evidence, that:
 - manifests and user-visible output contain no credentials; and
 - existing recording, replay, sampling, and analysis workflows are unaffected.
 
-Algorithm-specific accuracy thresholds remain open until representative
-footage, annotation rules, and evaluation data exist.
+The current versioned classifier thresholds are provisional operating values,
+not accuracy claims. Phase 7E must validate them against representative footage,
+annotation rules, and evaluation data before deployment; any tuning creates a
+new policy version.
 
 ## Known risks and open questions
 
