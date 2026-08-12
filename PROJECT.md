@@ -193,8 +193,15 @@ reference. Phase 7A-1 now implements the validated local run lifecycle,
 strict baseline gate, isolated artifact repository, duplicate/interruption
 handling, and safe start/status HTTP routes. Phase 7A-2 now implements
 acquisition-only schema-2 request/frame persistence, authoritative provenance,
-and strict reopen validation. The classifier, search orchestration, Phase 8
-review media, and Phase 9 result UI remain unimplemented. Absolute source-time
+and strict reopen validation. Phase 7B now has a concrete normative design for
+active-handle-owned classification, single-read baseline/probe byte integrity,
+source-pixel comparison, the three-state EfficientSAM-Ti plus aligned-ROI
+policy, a closed RawComparison reason/field matrix including effective
+comparison area, immutable schema-3
+observations, idempotent publication, bounded timeout with non-authoritative
+late workers, and lock-safe reopening. Its runtime, search
+orchestration, Phase 8 review media, and Phase 9 result UI remain unimplemented.
+Absolute source-time
 calibration remains deferred; Phase 4C-2
 provides transient frontend-only selection of one
 successful candidate, and Phase 5-1/5-2 provide the transient source-space
@@ -222,9 +229,10 @@ capability.
    without changing recording or reference-frame
    ownership.
 6. Implement the scope-reviewed single-site object-disappearance MVP in bounded
-   slices: build on completed Phase 6C schema 3 compatibility, then Phase 7A-1 local lifecycle, Phase
-   7A-2 canonical multi-target acquisition, then Phase 7B-7E for the production
-   three-state comparator;
+   slices: build on completed Phase 6C schema 3 compatibility, Phase 7A-1 local
+   lifecycle, and Phase 7A-2 canonical multi-target acquisition; implement the
+   now-designed Phase 7B production three-state comparator and schema-3
+   observations, then Phase 7C-7E for
    chronological coarse sampling and exhaustive support transitions; binary
    narrowing, terminal persistence, and Phase 8 handoff; then real-NVR
    validation. Preserve published Phase 6 package immutability, reject duplicate

@@ -6,9 +6,10 @@
 implements the validated local run lifecycle, baseline gate, isolated repository,
 duplicate/interruption handling, and safe start/status API. Phase 7A-2 implements
 acquisition-only schema-2 request/frame persistence, strict provenance, and
-reopen validation. Classifier, search orchestration, and Phase 8 review-media
-generation remain unimplemented; the required Phase 6C schema 3 compatibility
-increment is complete.**
+reopen validation. The Phase 7B single-probe classifier and schema-3 observation
+contract are complete in design but remain unimplemented. Search orchestration
+and Phase 8 review-media generation also remain unimplemented; the required
+Phase 6C schema 3 compatibility increment is complete.**
 
 This document is the current implementation and review contract for Phase 7.
 It is intentionally limited to one restaurant, one local application host, one
@@ -62,7 +63,7 @@ The implementation composes existing services instead of copying them:
 | `RecordingPlanner` and `ReplayExtractor` | Plan and extract bounded temporary replay media. | Classification or durable search state. |
 | Existing reference-frame decoder boundary | Continue serving existing single-target callers unchanged. | Multi-target identity or transition reasoning. |
 | New Phase 7 batch decoder extension | Resolve one bounded target set in one decode session and return frame identity, order, timing, and digest facts. | Classification or search decisions. |
-| New `ObjectObservationClassifier` production adapter | Combine EfficientSAM-Ti masks with a deterministic aligned-ROI appearance comparison and return one typed observation. | Search order, filesystem, or media acquisition. |
+| New `ObjectObservationClassifier` production adapter | Combine EfficientSAM-Ti masks with a deterministic aligned-ROI appearance comparison under the [Phase 7B classification contract](object-presence-classification.md). | Search order, recording acquisition, or interval reasoning. |
 | New `RecordingSearchService` | Own run lifecycle and compose acquisition, classification, search, persistence, and handoff. | HTTP/CLI parsing or Phase 8 media generation. |
 
 The generic `sample-recording` command is neither subprocess nor search engine.
@@ -115,7 +116,7 @@ warnings
 source_width
 source_height
 roi
-jpeg_path  # trusted internal path; never persisted or exposed
+jpeg_path  # trusted start-time input only; read into handle.baseline_bytes and never persisted or exposed
 ```
 
 Schema 2 does not bind the JPEG bytes to the confirmation. It is therefore not
@@ -157,12 +158,20 @@ that physical-camera continuity cannot be guaranteed automatically.
 Before creating an acquisition frame or later recording observation, Phase 7
 must:
 
-1. call the Phase 6 `load_confirmed()` boundary and require schema 3;
-2. use only its already confined `jpeg_path`, authoritative SHA-256, byte size,
-   resource ID, dimensions, and ROI;
-3. read the file once into invocation-owned immutable bytes, recompute SHA-256
-   and byte size, fully decode those exact bytes, and require decoded dimensions
-   to equal the confirmed dimensions;
+1. call the Phase 6 `load_confirmed()` boundary during run start and require
+   schema 3;
+2. pass its confined resource metadata, authoritative SHA-256, byte size,
+   dimensions, and ROI through the existing Phase 7A-1 baseline gate, which
+   captures the validated bytes in `RecordingSearchRunHandle.baseline_bytes`;
+3. use that active handle as the only baseline byte source. Phase 7B adds a
+   narrow in-memory baseline validator that receives those exact bytes plus the
+   immutable schema-3 metadata, bounds size, hashes and validates JPEG structure
+   and dimensions, decodes the bytes, and returns the decoded RGB value; it does
+   not call the general path helper and reopen the baseline path. For a probe,
+   use a narrow Phase 7A read-side validation extension that reads the
+   run-relative JPEG once, verifies digest/size and dimensions, decodes those
+   exact bytes, and returns the bytes with the admitted request/frame and
+   immutable provenance. Phase 7B must not reopen either path for classification;
 4. reject a missing, ambiguous, outside-root, indirect, corrupt, size-mismatched,
    digest-mismatched, or out-of-bounds baseline;
 5. verify the channel is currently usable for recording search, without
@@ -171,9 +180,14 @@ must:
 7. verify the selected classifier, checkpoint, comparison, and acquisition
    policy versions are available.
 
-A failed baseline gate ends with `FAILED` and `baseline_validation_failed`. It
-creates no baseline `PRESENT`, probe `ABSENT`, or terminal `FOUND`. It does not
-require the historical recording segment used to create the reference JPEG.
+A failed baseline gate before schema-3 promotion publishes no schema-3 failure
+record, baseline observation, probe `ABSENT`, or terminal `FOUND`; schema 2/A2
+remains authoritative and the safe result is `baseline_corrupt` or an equivalent
+closed operational category. It does not require the historical recording
+segment used to create the reference JPEG. If strict reopening later detects
+that a committed schema-3 baseline no longer matches its digest/size or
+resource identity, reopening fails closed as corruption and does not mutate the
+stored lifecycle state.
 
 ## Single-host run lifecycle
 
@@ -188,7 +202,7 @@ artifacts/investigation-searches/
   {investigation_id}/
     {search_run_id}/
       manifest.json
-      observations/            # future classifier version, not schema 2
+      observations/            # Phase 7B schema 3, not schema 2
       evidence/
       phase8-request.json  # only after FOUND; created separately
 ```
@@ -569,7 +583,10 @@ dimensions, or identity.
 
 ### Baseline and later observation records
 
-The complete later-phase record union is deliberately separate from acquisition:
+The [Phase 7B recording-probe classification design](object-presence-classification.md)
+owns the exact field, identity, publication, and strict-reopen contract. This
+section is the search-level summary. The later-phase record union remains
+deliberately separate from acquisition:
 
 ```text
 ObservationRecord =
@@ -599,8 +616,10 @@ schema 3 integrity validation, persist it at `S` and initialize `last_present =
 S`; never compare the JPEG with itself or require its historical segment.
 
 `RecordingProbeObservationRecord` is created by Phase 7B from one acquired
-canonical frame. It contains the frame reference and classifier evidence, not a
-second copy of acquisition provenance:
+canonical frame. Conceptually it contains the frame reference and classifier
+evidence, not a second copy of acquisition provenance; the exact record also
+binds its run, baseline, classification operation, policy, and publication
+facts as defined by the Phase 7B design:
 
 ```text
 record_type: recording_probe
@@ -609,7 +628,7 @@ canonical_frame_id
 probe_request_id
 primary_requested_time_utc
 state: PRESENT | ABSENT | INDETERMINATE
-reason_code: null | insufficient_visual_evidence
+reason_code: null | closed visual-uncertainty reason
 classifier_evidence:
   classifier_policy_version
   mask_iou | null
@@ -623,25 +642,43 @@ operation records listed by the owning run, and the request must reference the i
 by the historical operation. The request's frame ID must equal the observation's
 frame ID; and `primary_requested_time_utc` must exactly equal the request's
 authoritative requested time. Repeated acquisition fields are never independently
-trusted. Strict validation permits only these state/evidence
-combinations:
+trusted. Strict validation permits only these state/evidence combinations at
+the search level:
 
 | State | Metrics | `reason_code` |
 | --- | --- | --- |
 | `PRESENT` | Both metrics are finite and satisfy the persisted PRESENT thresholds. | `null` |
 | `ABSENT` | Both metrics are finite and satisfy the persisted ABSENT thresholds. | `null` |
-| `INDETERMINATE` | Either or both metrics may be finite or null diagnostic facts, but they cannot satisfy a terminal mapping. | Exactly `insufficient_visual_evidence` |
+| `INDETERMINATE` | Bounded evidence is structurally valid but visual input, mask, comparison area, variance, or finite measurements cannot support a terminal mapping. | Exactly one closed Phase 7B visual-uncertainty reason. |
 
-Acquisition gaps, replay failures, decoder failures, and missing provenance remain
-`FAILED` `ProbeFrameRequestRecord` outcomes and never produce a
-`RecordingProbeObservationRecord`. `insufficient_visual_evidence` covers only
-classifier failure, invalid or empty geometry/mask, zero variance, non-finite
-comparison, insufficient distinct frames, and invalid decoded order. No other
-frame-backed probe reason code is valid in the MVP. If Phase 7B later needs
-non-observation accounting for a failed target, that is a separate future record,
-not this frame-backed variant.
+Acquisition gaps, replay failures, decoder failures, missing provenance, corrupt
+input, classifier/runtime failure, invalid classifier output, ownership loss,
+and persistence failure never produce a `RecordingProbeObservationRecord`.
+Only a successfully completed visual comparison may publish one of the three
+states. Phase 7C may account for an operationally failed target at search level,
+but it must not fabricate a frame-backed `INDETERMINATE` observation.
 
-The later `TargetAliasRecord` has this exact shape:
+The Phase 7B `RawComparison` matrix is closed: every key is present, including
+`effective_comparison_area`; fields not valid for the selected reason are null,
+and the outer `reason_code` is null for `PRESENT`/`ABSENT`, exactly
+`insufficient_visual_evidence` for a comparable policy gap, or exactly equal to
+the inner unusable reason. Evaluation is ordered: exact bytes/media, decode and
+RGB normalization, ROI geometry, mask/domain validation, aligned comparison
+domain, mask IoU and overlap-gate validation, effective comparison area, luma normalization,
+variance/NCC preconditions, finite NCC, then policy. The versioned policy snapshot
+includes the finite `[0, 1]` `minimum_mask_overlap_for_comparison` gate: a finite
+IoU that fails it yields `insufficient_mask_overlap` with later
+fields null; a passing IoU with an invalid effective area yields
+`insufficient_comparison_area` with NCC null. Unknown reasons, partial
+pre-failure measurements, non-finite/out-of-domain values, and inner/outer
+mismatches fail strict reopen and publish no observation. Unsupported media,
+media-type mismatch, failed decode, invalid decoded structure, unsupported
+channel layout, RGB normalization failure, or preprocessing failure is
+operational `invalid_media_input`: it creates no RawComparison, observation,
+alias, operation, or schema-3 promotion.
+
+The later `TargetAliasRecord` has this conceptual search shape; Phase 7B adds
+the exact run/channel/publication ownership fields:
 
 ```text
 TargetAliasRecord
@@ -720,31 +757,42 @@ another frame or observation, do not update bounds, count as support, or
 increment the coarse-target uncertainty counter. Phase 7B accepts a strictly
 validated schema 2 acquisition state and validates the successful request/frame
 pair before classification. A2 rejects any observation, classifier,
-candidate-interval, `FOUND`, or `NOT_FOUND` field; after classification, a later
-schema/version contract owns observation persistence. Phase 7B does not reject a
-valid A2 result merely because classification is a later operation.
+candidate-interval, `FOUND`, or `NOT_FOUND` field; Phase 7B schema 3 owns
+observation persistence. Phase 7B does not reject a valid A2 result merely
+because classification is a later operation.
 
 ### Production classifier policy
 
-Phase 7B owns production policy `efficient-sam-ti-roi-ncc-v1`. EfficientSAM-
-Ti supplies category-agnostic masks only; it does not establish object identity
-or correspondence. The production adapter therefore reuses the verified lazy
+The exact classifier, evidence, numeric, error, identity, and publication rules
+are in the
+[Phase 7B recording-probe classification design](object-presence-classification.md).
+Phase 7B owns production policy `efficient-sam-ti-roi-ncc-v1`. EfficientSAM-Ti
+supplies category-agnostic masks only; it does not establish object identity or
+correspondence. The production adapter therefore reuses the verified lazy
 predictor and adds one local NumPy/Pillow aligned-ROI comparator:
 
-1. Input is the verified baseline JPEG, confirmed source-pixel ROI, one decoded
-   probe JPEG, and equal source dimensions.
+1. Input is the verified `handle.baseline_bytes`, confirmed source-pixel ROI,
+   one decoded probe JPEG returned by the Phase 7A single-read extension, and
+   equal source dimensions. Hashing, decode, preprocessing, and comparison use
+   those exact byte sequences; a path is never reopened for classification.
 2. Use the deterministic ROI-center point `x + floor((width - 1) / 2), y +
    floor((height - 1) / 2)` on both images. Run the existing EfficientSAM-Ti
    point-prompt mask path and clip each validated mask to the confirmed ROI.
 3. For each image, compute mask coverage as the number of segmented mask pixels
    inside that clipped ROI divided by the total pixels of the clipped ROI. A
    missing, empty, or clipped-to-zero ROI, or coverage greater than or equal to
-   95%, is `INDETERMINATE` with `insufficient_visual_evidence` before comparison.
-4. Compute `mask_iou` for the two clipped masks. Compute `roi_luma_ncc` as
+   95%, is `INDETERMINATE` with the matching closed visual reason before
+   comparison.
+4. Compute `mask_iou` for the two clipped masks and apply the required
+   versioned minimum-overlap gate. Compute the finite integral
+   `effective_comparison_area`; if either gate fails, persist only the fields
+   allowed by the closed RawComparison matrix. Compute `roi_luma_ncc` as
    mean-centered normalized cross-correlation over **all pixels** of the aligned
    source-pixel ROI in the two grayscale images; masks do not select NCC pixels.
-   An ROI or either clipped mask with fewer than 64 pixels, zero luma variance,
-   non-finite values, invalid masks, or unequal geometry is `INDETERMINATE`.
+   A valid ROI or clipped mask below the minimum, zero luma variance, or a
+   structurally valid but unusable mask is `INDETERMINATE`. Non-finite or
+   contract-invalid classifier output, corrupt bytes, and unequal stored
+   geometry publish no observation.
 5. Return `PRESENT` only when `mask_iou >= 0.50` and `roi_luma_ncc >= 0.60`.
 6. Return `ABSENT` only when both masks are valid, `mask_iou <= 0.10`, and
    `roi_luma_ncc <= 0.20`.
@@ -757,10 +805,23 @@ measurements and state mapping.
 
 The policy snapshot persists the classifier version, EfficientSAM source commit,
 checkpoint SHA-256, center-point rule, 95% mask-coverage rejection, minimum
-pixel count, and all four thresholds. Timeout, unavailable runtime/checkpoint,
-segmentation failure, corrupt image, obstruction, or comparison failure never
-becomes `ABSENT`; unavailable production composition before probes is `FAILED`,
-while per-probe unusable evidence is `INDETERMINATE`.
+pixel counts, the versioned `minimum_mask_overlap_for_comparison` gate, metric
+quantization, and all four outcome thresholds. A visually unusable
+but authentic frame may become `INDETERMINATE`. Timeout, unavailable runtime or
+checkpoint, invalid classifier output, corrupt evidence, ownership loss, and
+persistence failure publish no observation and never become `ABSENT`.
+
+The classification service validates ownership and snapshots these inputs under
+the active `RecordingSearchRunHandle` mutation mutex, but writes no operation,
+observation, alias, or schema-3 child before classifier success. It releases
+that mutex while the bounded predictor/comparator worker runs, and reacquires it
+for complete prepublication revalidation. Timeout, cancellation, abandonment,
+invalid output, and other operational failure revoke the in-memory attempt and
+publish nothing; a schema-2/A2 tree remains byte-for-byte unchanged when the
+call began there. Only a still-valid active handle with a timely, revalidated
+result may atomically publish the operation, observation/alias, and any schema-3
+successor. The exact ownership, timeout, response matrix, and strict-reopen
+rules are normative in the [Phase 7B classification design](object-presence-classification.md).
 
 Deterministic doubles implement the same narrow `ObjectObservationClassifier`
 protocol for policy tests but never replace production composition. Phase 7B is
@@ -842,8 +903,14 @@ if recording/replay/acquisition/decode operation failed:
 canonical, aliases = canonicalize(support)
 persist aliases without counting them
 
-if classifier failed or any canonical result is INDETERMINATE:
-  persist t as INDETERMINATE with insufficient_visual_evidence
+if classifier execution failed:
+  record one search-level target uncertainty with the fixed operational reason
+  publish no RecordingProbeObservationRecord for the failed classification
+  increment consecutive_unusable_coarse_targets once
+  finish INDETERMINATE if the limit is reached; otherwise resume after t + 2s
+
+if any canonical observation is INDETERMINATE:
+  retain the committed observation and its closed visual reason
   increment consecutive_unusable_coarse_targets once
   finish INDETERMINATE if the limit is reached; otherwise resume after t + 2s
 
@@ -920,8 +987,10 @@ ends `INDETERMINATE` and Phase 9 remains authoritative.
 | Supported bracket narrowed to the stopping resolution | `FOUND` | `candidate_interval_found` |
 | Complete usable coarse scan with no bracket | `NOT_FOUND` | `no_transition_in_window` |
 | Required gap or replay/acquisition/decode failure for a coarse target | Count one unusable coarse target; terminal `INDETERMINATE` at the configured limit or when the scan ends with unresolved evidence | Search-level `recording_unavailable` (not a frame-backed observation reason) |
-| Classifier failure, invalid evidence, missing canonical PRESENT lower probe, insufficient distinct frames, or invalid order for a coarse target | Count one unusable coarse target; terminal `INDETERMINATE` at the configured limit or when the scan ends with unresolved evidence | `insufficient_visual_evidence` |
-| Confirmed JPEG or Phase 6 input fails integrity validation | `FAILED` | `baseline_validation_failed` |
+| Classifier operational failure | Publish no probe observation; count one unusable coarse target and end `INDETERMINATE` at the configured limit or when the scan ends unresolved | Fixed search-level classifier operational reason. |
+| Valid visual `INDETERMINATE`, missing canonical PRESENT lower probe, insufficient distinct frames, or invalid order for a coarse target | Count one unusable coarse target; terminal `INDETERMINATE` at the configured limit or when the scan ends unresolved | Closed visual reason or search-level `insufficient_visual_evidence`, never `ABSENT`. |
+| Confirmed JPEG or Phase 6 input fails integrity validation before schema-3 promotion | No schema-3 promotion, observation, or `FOUND`; authoritative schema 2/A2 remains unchanged | `baseline_corrupt` (repair or human intervention required) |
+| Strict reopen finds a committed schema-3 baseline digest/resource mismatch | No lifecycle mutation or visual outcome; existing committed evidence remains immutable but the run is not operational | `manifest_corrupt`/`baseline_corrupt` |
 | Process/PC exits during a nonterminal run | `INTERRUPTED` | `run_interrupted` |
 | Unexpected storage or persistence failure outside a coarse-target acquisition | `FAILED` | fixed stage-safe reason |
 
@@ -969,6 +1038,7 @@ RecordingSearchManifestV2
     prompt_rule
     maximum_roi_mask_coverage_ratio
     minimum_roi_pixels, minimum_clipped_mask_pixels
+    minimum_mask_overlap_for_comparison
     present_mask_iou_minimum, present_luma_ncc_minimum
     absent_mask_iou_maximum, absent_luma_ncc_maximum
     policy_version
@@ -980,12 +1050,19 @@ RecordingSearchManifestV2
 
 The v2 shape contains no observation, classifier, candidate, result, or Phase 8
 field. Its `failure_reason` is a closed acquisition/storage reason only. Later
-classifier/search persistence is reserved for a future recording-search manifest
-version; no future version number or terminal shape is accepted by A2 today.
+classifier/search persistence is rejected by the v2 loader. Phase 7B promotes a
+strict active v2 manifest to `schema_version: 3`, preserves every A2 field and
+index, adds one baseline observation plus ordered classification-operation,
+canonical-observation, and alias indexes, and still excludes terminal search and
+Phase 8 fields. Its exact shape and atomic promotion rules are defined in the
+[Phase 7B classification design](object-presence-classification.md). A2 itself
+continues to accept no future version or terminal shape.
 
 The following is the complete shape of a valid A2 `RUNNING` manifest. The frame
 and request records are stored separately and are reachable only through these
-indexes:
+indexes. The Phase 7B overlap value is `null` here because deployment has not
+chosen it; a schema-3 policy must replace it with a finite decimal in `[0, 1]`
+before classification is enabled.
 
 ```json
 {
@@ -1026,6 +1103,7 @@ indexes:
     "maximum_roi_mask_coverage_ratio": 0.95,
     "minimum_roi_pixels": 64,
     "minimum_clipped_mask_pixels": 64,
+    "minimum_mask_overlap_for_comparison": null,
     "present_mask_iou_minimum": 0.5,
     "present_luma_ncc_minimum": 0.6,
     "absent_mask_iou_maximum": 0.1,
@@ -1065,14 +1143,14 @@ PTS/ordinal/time base, or a path that is absolute, traversing, linked, or outsid
 the run root.
 
 Observation records are immutable strict JSON below `observations/` and are only
-created by Phase 7B under a future recording-search manifest version. The
+created by Phase 7B under schema 3. The
 observation index and later alias index are distinct from the A2 frame and request
 indexes. Every record rejects unknown, duplicate, missing, or cross-variant
 fields. A later observation must reference an indexed canonical frame and its
 successful request; it cannot be reconstructed from requested time alone.
 
-The following relationships are reserved for that future classifier/search
-manifest and are not accepted by the A2 loader:
+The following terminal relationships remain reserved for the later integrated
+search manifest and are not accepted by the A2 or Phase 7B loaders:
 
 | Manifest state | Required candidate/evidence relationship |
 | --- | --- |
@@ -1300,8 +1378,10 @@ stages; the public state model remains unchanged.
 - **Outputs:** one immutable `ProbeFrameRequestRecord` per requested target,
   zero or more immutable `CanonicalProbeFrameRecord` values, ordered
   `probe_request_ids`, unique `canonical_frame_ids`, and validated run-owned
-  JPEG/frame artifacts. A2 emits no observation, classifier state, candidate,
-  alias-observation, or Phase 8 result.
+  JPEG/frame artifacts. Its narrow Phase 7B read-side extension can return one
+  admitted request/frame plus the exact validated probe JPEG bytes and immutable
+  frame metadata without changing existing callers. A2 emits no observation,
+  classifier state, candidate, alias-observation, or Phase 8 result.
 - **Tests:** one request-to-one-frame mapping, ordered selection, distinct versus
   aliased targets, stable segment/window timestamp provenance, cross-run rejection,
   missing PTS/ordinal or dimensions, gaps, timeouts, JPEG digest/size recheck,
@@ -1315,19 +1395,24 @@ stages; the public state model remains unchanged.
 
 - **Inputs:** verified baseline JPEG and ROI, decoded probe image and dimensions,
   EfficientSAM-Ti production predictor, aligned-ROI luma-NCC policy, ROI-relative
-  mask-coverage rule, and thresholds.
-- **Outputs:** the closed baseline/probe/alias record union; every canonical
-  probe has exactly one state, fixed reason, and bounded classifier evidence.
+  mask-coverage rule, thresholds, and one strict successful Phase 7A-2
+  request/frame pair.
+- **Outputs:** schema-3 baseline/classification-operation/observation/alias
+  persistence; every completed canonical probe has exactly one state, closed
+  reason, and bounded classifier evidence.
 - **Files:** production classifier protocol/adapter and composition, aligned-ROI
-  comparator, observation models, focused tests, and deterministic doubles.
-- **Exclude:** run orchestration, targets, binary search, storage ownership,
-  Phase 8.
+  comparator, observation models, schema-3 repository/service extension,
+  focused tests, and deterministic doubles.
+- **Exclude:** target selection, coarse orchestration, binary search, terminal
+  search results, public transport, UI/CLI, and Phase 8.
 - **Tests:** real predictor/comparator integration fixture; every IoU/NCC
   threshold boundary; baseline geometry; three states; timeout, unavailable,
   invalid-mask and zero-variance mapping; deterministic-double parity.
-- **Complete/document:** production composition exists and records its policy;
-  no infrastructure or uncertain comparison becomes `ABSENT`; probe records
-  retain mandatory acquisition/frame provenance.
+- **Complete/document:** production composition and atomic schema-3 publication
+  exist; no infrastructure, corrupt input, or uncertain comparison becomes
+  `ABSENT`; probe records retain mandatory acquisition/frame provenance by
+  immutable reference. See the
+  [exact Phase 7B contract](object-presence-classification.md).
 
 ### Phase 7C: coarse sampling
 
