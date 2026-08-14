@@ -8,7 +8,7 @@ import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, NoReturn, Protocol, cast, final
+from typing import TYPE_CHECKING, Literal, NoReturn, Protocol, cast, final
 
 from typing_extensions import Self, override
 
@@ -28,6 +28,9 @@ from vigi_vision.assisted_roi_service import (
     RoiSuggestionNoValidSuggestionError,
     RoiSuggestionUnavailableError,
 )
+
+if TYPE_CHECKING:
+    from vigi_vision.object_presence_models import DecodedRgbImage
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 _ARTIFACT_ROOT_NAMES = frozenset({"artifacts", "reference-frames"})
@@ -111,6 +114,8 @@ class _Image(Protocol):
 class _ImageModule(Protocol):
     def open(self, path: Path) -> _Image: ...
 
+    def frombytes(self, mode: str, size: tuple[int, int], data: bytes) -> _Image: ...
+
 
 class _ToTensor(Protocol):
     def __call__(self, image: _Image) -> _Tensor: ...
@@ -146,21 +151,32 @@ class LazyEfficientSamPredictor(RoiPredictor):
                 model, torch, device, image_module, to_tensor = self._runtime()
                 image = _read_image(image_module, image_path, size)
                 image_tensor = to_tensor(image).unsqueeze(0).to(device)
-                input_points = torch.tensor(
-                    [[[[point.x, point.y]]]], dtype=torch.int64, device=device
-                )
-                input_labels = torch.tensor([[[1]]], dtype=torch.int64, device=device)
-                with torch.inference_mode():
-                    logits, scores = model(image_tensor, input_points, input_labels)
-                candidates = candidates_from_output(logits, scores, size)
-                selected = select_valid_mask_candidate(candidates, point, size)
-                if not isinstance(selected, ValidatedMaskCandidate):
-                    _raise_no_valid_suggestion()
-                try:
-                    preview = mask_to_preview(selected.mask, size)
-                except ValueError:
-                    _raise_no_valid_suggestion()
-                return RoiPrediction(selected.bbox, preview)
+                return _predict_image(model, torch, device, image_tensor, point, size)
+        except (RoiSuggestionNoValidSuggestionError, RoiSuggestionUnavailableError):
+            raise
+        except (
+            ImportError,
+            ModuleNotFoundError,
+            OSError,
+            ValueError,
+            RuntimeError,
+            TypeError,
+        ) as error:
+            if self._model is None:
+                self._unavailable = True
+                raise RoiSuggestionUnavailableError from error
+            raise RoiSuggestionInferenceError from error
+
+    def predict_from_rgb(
+        self, image: DecodedRgbImage, point: Point, size: ImageSize
+    ) -> RoiPrediction:
+        """Predict from an already decoded RGB value without reopening a path."""
+        try:
+            with self._lock:
+                model, torch, device, image_module, to_tensor = self._runtime()
+                image_value = _image_from_rgb(image_module, image)
+                image_tensor = to_tensor(image_value).unsqueeze(0).to(device)
+                return _predict_image(model, torch, device, image_tensor, point, size)
         except (RoiSuggestionNoValidSuggestionError, RoiSuggestionUnavailableError):
             raise
         except (
@@ -275,6 +291,34 @@ def _read_image(image_module: _ImageModule, path: Path, size: ImageSize) -> _Ima
     return image
 
 
+def _image_from_rgb(image_module: _ImageModule, image: DecodedRgbImage) -> _Image:
+    payload = bytes(channel for row in image.pixels for pixel in row for channel in pixel)
+    return image_module.frombytes("RGB", (image.width, image.height), payload)
+
+
+def _predict_image(  # noqa: PLR0913 - adapter keeps the model boundary explicit.
+    model: _Model,
+    torch: _TorchModule,
+    device: str,
+    image_tensor: _Tensor,
+    point: Point,
+    size: ImageSize,
+) -> RoiPrediction:
+    input_points = torch.tensor([[[[point.x, point.y]]]], dtype=torch.int64, device=device)
+    input_labels = torch.tensor([[[1]]], dtype=torch.int64, device=device)
+    with torch.inference_mode():
+        logits, scores = model(image_tensor, input_points, input_labels)
+    candidates = candidates_from_output(logits, scores, size)
+    selected = select_valid_mask_candidate(candidates, point, size)
+    if not isinstance(selected, ValidatedMaskCandidate):
+        _raise_no_valid_suggestion()
+    try:
+        preview = mask_to_preview(selected.mask, size)
+    except ValueError:
+        _raise_no_valid_suggestion()
+    return RoiPrediction(selected.bbox, preview)
+
+
 def candidates_from_output(
     logits: _Tensor, scores: _Tensor, size: ImageSize
 ) -> tuple[MaskCandidate, ...]:
@@ -316,7 +360,7 @@ def _mask_from_values(raw: object, size: ImageSize) -> tuple[tuple[bool, ...], .
             raise ValueError
         row: list[bool] = []
         for value in raw_row:
-            if not isinstance(value, (int, float)):
+            if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
                 raise TypeError
             row.append(float(value) >= 0.0)
         rows.append(tuple(row))

@@ -29,10 +29,11 @@ documentation route is added, removed, or relocated.
   [design/object-disappearance-recording-search.md](design/object-disappearance-recording-search.md)
   for the current normative Phase 7 single-site MVP: one active local run,
   interruption and explicit restart, the required Phase 6 schema 3 integrity
-  handoff, the implemented Phase 7A-1 local lifecycle/API and Phase 7A-2
-  canonical multi-target acquisition boundaries, and the planned classifier,
-  deterministic coarse/binary search, compact persistence, and Phase 8 request
-  boundary. Read
+  handoff, the implemented Phase 7A-1 local lifecycle/API, Phase 7A-2 canonical
+  multi-target acquisition boundaries, and the implemented Phase 7B single-probe
+  classifier/schema-3 observation boundary. Deterministic coarse/binary search,
+  terminal disappearance persistence, and the Phase 8 request boundary remain
+  planned. Read
   [design/object-presence-classification.md](design/object-presence-classification.md)
   for the normative Phase 7B single-probe input, geometry, classifier, outcome,
   schema-3 observation, publication, idempotency, and strict-reopen contract.

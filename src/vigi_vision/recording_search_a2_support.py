@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
     from vigi_vision.recording_search_a2_decoder import RecordingProbeBatchDecoder
+    from vigi_vision.recording_search_b2_models import RecordingSearchManifestV3
     from vigi_vision.recording_search_models import RecordingSearchManifest, RecordingSearchState
     from vigi_vision.reference_frame_service import (
         RecordingSegmentPlanningBoundary,
@@ -63,10 +64,12 @@ class A2RepositoryBoundary(Protocol):
         """Return one confined run path."""
         ...
 
-    def load(
-        self, investigation_id: str, search_run_id: str
-    ) -> RecordingSearchManifest | RecordingSearchManifestV2:
+    def load(self, investigation_id: str, search_run_id: str) -> object:
         """Strictly reload a persisted manifest."""
+        ...
+
+    def load_for_probe_admission(self, investigation_id: str, search_run_id: str) -> object:
+        """Load a manifest while deferring indexed JPEG payload validation."""
         ...
 
     def promote_schema2(self, manifest: RecordingSearchManifestV2) -> RecordingSearchManifestV2:
@@ -74,17 +77,19 @@ class A2RepositoryBoundary(Protocol):
         ...
 
     def admit_operation(
-        self, manifest: RecordingSearchManifestV2, operation: AcquisitionOperationRecord
-    ) -> RecordingSearchManifestV2:
+        self,
+        manifest: RecordingSearchManifestV2 | RecordingSearchManifestV3,
+        operation: AcquisitionOperationRecord,
+    ) -> RecordingSearchManifestV2 | RecordingSearchManifestV3:
         """Admit one acquisition operation."""
         ...
 
     def publish_a2_bundle(
         self,
-        manifest: RecordingSearchManifestV2,
+        manifest: RecordingSearchManifestV2 | RecordingSearchManifestV3,
         request_records: tuple[ProbeFrameRequestRecord, ...],
         frame_records: tuple[tuple[CanonicalProbeFrameRecord, bytes], ...],
-    ) -> RecordingSearchManifestV2:
+    ) -> RecordingSearchManifestV2 | RecordingSearchManifestV3:
         """Publish one immutable acquisition bundle."""
         ...
 
@@ -92,8 +97,15 @@ class A2RepositoryBoundary(Protocol):
 class A2HandleBoundary(Protocol):
     """Active handle identity used by the mutation boundary."""
 
-    investigation_id: str
-    search_run_id: str
+    @property
+    def investigation_id(self) -> str:
+        """Return the immutable investigation binding."""
+        ...
+
+    @property
+    def search_run_id(self) -> str:
+        """Return the immutable search-run binding."""
+        ...
 
     @property
     def closed(self) -> bool:

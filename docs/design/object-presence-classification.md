@@ -2,8 +2,24 @@
 
 ## Status and authority
 
-**Status: normative Phase 7B design, ready for initial review. Runtime code and
-tests are not implemented.**
+**Status: normative Phase 7B design and implemented internal runtime. Phase
+7B-1 through Phase 7B-4 now provide pure classification, schema-3 persistence,
+authoritative byte admission, bounded execution, prepublication revalidation,
+and atomic observation publication.**
+
+Phase 7B-1 currently provides immutable in-memory values, the versioned policy
+and identity, deterministic preprocessing/geometry, the closed `RawComparison`
+matrix, mask/area/luma/NCC gates, and conservative three-state mapping with
+hermetic tests. Phase 7B-2 adds strict schema-3 records, deterministic indexes,
+atomic successor publication, idempotent duplicate handling, and strict
+reopening. Phase 7B-3 adds bounded single-read probe admission, exact
+handle-owned baseline bytes, in-memory RGB media validation/decoding, the
+production lazy EfficientSAM-Ti adapter, and synchronous non-authoritative
+classification preparation. Phase 7B-4 adds handle-owned invocation authority,
+bounded execution outside the mutation mutex, permanent timeout/abandonment
+revocation, mutex-scoped current-state revalidation, canonical duplicate reuse,
+and atomic schema-3 publication. Phase 7C chronological coarse sampling remains
+the next implementation slice.
 
 This document owns the single-probe classification, observation identity,
 schema-3 publication, and strict-reopen contract for Phase 7B. The broader

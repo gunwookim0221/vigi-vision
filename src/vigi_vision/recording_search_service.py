@@ -19,11 +19,18 @@ from vigi_vision.investigation_confirmation_models import (
     LegacyInvestigationError,
 )
 from vigi_vision.recording_search_a2_decoder import RecordingProbeBatchDecoder  # noqa: TC001
-from vigi_vision.recording_search_a2_models import (  # noqa: TC001
+from vigi_vision.recording_search_a2_models import (
     ProbeFrameRequestRecord,
     RecordingSearchManifestV2,
 )
 from vigi_vision.recording_search_a2_service import acquire_targets
+from vigi_vision.recording_search_b2_models import RecordingSearchManifestV3
+from vigi_vision.recording_search_b4_authority import ClassificationAttemptSlot
+from vigi_vision.recording_search_b4_models import (
+    ClassificationOperationalError,
+    ClassificationOperationalReason,
+    PublishedClassificationResult,
+)
 from vigi_vision.recording_search_lock import LocalInvestigationLock
 from vigi_vision.recording_search_models import (
     Phase8HandoffStatus,
@@ -48,6 +55,8 @@ if TYPE_CHECKING:
 
     from vigi_vision.investigation_confirmation_integrity import JpegDecoder
     from vigi_vision.recording_search_a2_support import A2HandleBoundary
+    from vigi_vision.recording_search_b3_models import ClassifyRecordingProbeRequest
+    from vigi_vision.recording_search_b4_service import ObservationClassificationService
     from vigi_vision.recording_search_repository import RecordingSearchRepository
 
 
@@ -57,6 +66,16 @@ def _new_run_id() -> str:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(microsecond=0)
+
+
+def _status_manifest(
+    value: RecordingSearchManifest | RecordingSearchManifestV2 | RecordingSearchManifestV3,
+) -> RecordingSearchManifest | RecordingSearchManifestV2:
+    match value:
+        case RecordingSearchManifestV3():
+            return value.as_status_manifest()
+        case RecordingSearchManifest() | RecordingSearchManifestV2():
+            return value
 
 
 class ConfirmationLoader(Protocol):
@@ -114,12 +133,13 @@ class RecordingSearchRunHandle:
     """Process-owned handle for the active investigation lock."""
 
     __slots__ = (
+        "_baseline_bytes",
+        "_classification_attempts",
         "_closed",
+        "_investigation_id",
         "_mutation_lock",
+        "_search_run_id",
         "_service",
-        "baseline_bytes",
-        "investigation_id",
-        "search_run_id",
     )
 
     def __init__(
@@ -132,11 +152,32 @@ class RecordingSearchRunHandle:
     ) -> None:
         """Retain the active lock and invocation-owned baseline bytes."""
         self._service = service
-        self.investigation_id = investigation_id
-        self.search_run_id = search_run_id
-        self.baseline_bytes = baseline_bytes
+        self._investigation_id = investigation_id
+        self._search_run_id = search_run_id
+        self._baseline_bytes = bytes(baseline_bytes)
+        self._classification_attempts = ClassificationAttemptSlot()
         self._mutation_lock = mutation_lock
         self._closed = False
+
+    @property
+    def investigation_id(self) -> str:
+        """Return the immutable investigation binding owned by this handle."""
+        return self._investigation_id
+
+    @property
+    def search_run_id(self) -> str:
+        """Return the immutable search-run binding owned by this handle."""
+        return self._search_run_id
+
+    @property
+    def baseline_bytes(self) -> bytes:
+        """Return the immutable baseline bytes captured for this handle."""
+        return self._baseline_bytes
+
+    @property
+    def classification_attempts(self) -> ClassificationAttemptSlot:
+        """Return the invocation-local attempt marker for this active handle."""
+        return self._classification_attempts
 
     def mark_terminal(
         self, state: RecordingSearchState, failure_reason: str
@@ -183,6 +224,9 @@ class RecordingSearchService:
     recording_planner: RecordingSegmentPlanningBoundary | None = field(default=None, repr=False)
     replay_extractor: ReplayExtractionBoundary | None = field(default=None, repr=False)
     batch_decoder: RecordingProbeBatchDecoder | None = field(default=None, repr=False)
+    classification_service: ObservationClassificationService | None = field(
+        default=None, repr=False
+    )
     _active: dict[str, _ActiveRun] = field(default_factory=dict, init=False, repr=False)
     _guard: RLock = field(default_factory=RLock, init=False, repr=False)
 
@@ -191,6 +235,19 @@ class RecordingSearchService:
     ) -> tuple[ProbeFrameRequestRecord, ...]:
         """Acquire ordered recording probes through the Phase 7A-2 boundary."""
         return acquire_targets(self, handle, requested_times)
+
+    def classify(
+        self,
+        handle: RecordingSearchRunHandle,
+        request: ClassifyRecordingProbeRequest,
+    ) -> PublishedClassificationResult:
+        """Run the sole authoritative Phase 7B classification operation."""
+        service = self.classification_service
+        if service is None:
+            raise ClassificationOperationalError(
+                ClassificationOperationalReason.CLASSIFIER_UNAVAILABLE
+            )
+        return service.classify(handle, request)
 
     @contextmanager
     def a2_mutation(self, handle: A2HandleBoundary) -> Generator[None, None, None]:
@@ -226,7 +283,9 @@ class RecordingSearchService:
         with self._guard:
             active = self._active.get(request.investigation_id)
             if active is not None:
-                manifest = self.repository.load(request.investigation_id, active.run_id)
+                manifest = _status_manifest(
+                    self.repository.load(request.investigation_id, active.run_id)
+                )
                 return RecordingSearchStartResult(
                     manifest=manifest,
                     outcome=RecordingSearchOutcome.ALREADY_RUNNING,
@@ -239,7 +298,7 @@ class RecordingSearchService:
                     if existing is None:
                         _raise_baseline()
                     return RecordingSearchStartResult(
-                        manifest=existing,
+                        manifest=_status_manifest(existing),
                         outcome=RecordingSearchOutcome.ALREADY_RUNNING,
                         baseline_bytes=bytes(baseline[1]),
                     )
@@ -271,8 +330,10 @@ class RecordingSearchService:
                     phase8_failure_reason=None,
                 )
                 _ = self.repository.create(manifest)
-                running = self.repository.transition(
-                    request.investigation_id, run_id, RecordingSearchState.RUNNING
+                running = _status_manifest(
+                    self.repository.transition(
+                        request.investigation_id, run_id, RecordingSearchState.RUNNING
+                    )
                 )
                 mutation_lock = RLock()
                 handle = RecordingSearchRunHandle(
@@ -301,19 +362,22 @@ class RecordingSearchService:
             active = self._active.get(investigation_id)
             if active is not None:
                 if active.run_id != search_run_id:
-                    return self.repository.load(investigation_id, search_run_id)
-                return self.repository.load(investigation_id, search_run_id)
+                    return _status_manifest(self.repository.load(investigation_id, search_run_id))
+                return _status_manifest(self.repository.load(investigation_id, search_run_id))
             lock = LocalInvestigationLock(self.repository.lock_path(investigation_id))
             try:
                 if not lock.try_acquire(self.lock_timeout_seconds):
-                    return self.repository.load(investigation_id, search_run_id)
-                manifest = self.repository.load(investigation_id, search_run_id)
+                    return _status_manifest(self.repository.load(investigation_id, search_run_id))
+                persisted = self.repository.load(investigation_id, search_run_id)
+                manifest = _status_manifest(persisted)
                 if manifest.state in (RecordingSearchState.PENDING, RecordingSearchState.RUNNING):
-                    return self.repository.transition(
-                        investigation_id,
-                        search_run_id,
-                        RecordingSearchState.INTERRUPTED,
-                        "process_lock_released",
+                    return _status_manifest(
+                        self.repository.transition(
+                            investigation_id,
+                            search_run_id,
+                            RecordingSearchState.INTERRUPTED,
+                            "process_lock_released",
+                        )
                     )
                 return manifest
             finally:
@@ -321,6 +385,8 @@ class RecordingSearchService:
 
     def close(self) -> None:
         """Release all locks owned by this process instance."""
+        if self.classification_service is not None:
+            self.classification_service.close()
         with self._guard:
             active = tuple(self._active.values())
             self._active.clear()
@@ -340,11 +406,13 @@ class RecordingSearchService:
                 raise RecordingSearchBaselineError
             with active.mutation_lock:
                 try:
-                    return self.repository.transition(
-                        handle.investigation_id,
-                        handle.search_run_id,
-                        state,
-                        failure_reason,
+                    return _status_manifest(
+                        self.repository.transition(
+                            handle.investigation_id,
+                            handle.search_run_id,
+                            state,
+                            failure_reason,
+                        )
                     )
                 finally:
                     _ = self._active.pop(handle.investigation_id, None)

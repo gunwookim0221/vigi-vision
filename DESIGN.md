@@ -191,9 +191,12 @@ or glass effects are used.
   8 handoff. The Phase 7A-1 validated local lifecycle/API runtime is implemented;
   Phase 7A-2 acquisition is implemented, and the
   [Phase 7B classifier contract](docs/design/object-presence-classification.md)
-  now defines the internal active-handle-owned, single-read-byte,
-  three-state/schema-3 boundary without adding UI.
-  Classifier/search execution and the Phase 8/9 review UI remain later work.
+  now has production single-probe classification: pure comparison, strict
+  schema-3 persistence, single-read byte admission, bounded execution,
+  timeout/abandonment authority revocation, current-state revalidation, strict
+  reopening, and atomic observation publication without adding transport or UI.
+  Phase 7C chronological coarse sampling, Phase 7D narrowing, Phase 7E
+  validation, and the Phase 8/9 review workflow remain later work.
   Advanced recovery analysis is retained only as
   [non-normative future reference](docs/future/recording-search-resilience.md).
 - Tap-assisted selection and the Phase 5-3C transient silhouette preview are

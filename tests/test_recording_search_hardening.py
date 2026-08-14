@@ -12,6 +12,7 @@ from typing_extensions import override
 
 from vigi_vision.channel_selection import Channel
 from vigi_vision.recording_search_a2_models import RecordingSearchManifestV2
+from vigi_vision.recording_search_b2_models import RecordingSearchManifestV3
 from vigi_vision.recording_search_models import (
     RecordingSearchArtifactError,
     RecordingSearchManifest,
@@ -58,7 +59,7 @@ class _FailBeforeManifestRepository(RecordingSearchRepository):
     @override
     def _write_manifest_to_directory(
         self,
-        manifest: RecordingSearchManifest | RecordingSearchManifestV2,
+        manifest: RecordingSearchManifest | RecordingSearchManifestV2 | RecordingSearchManifestV3,
         directory: Path,
     ) -> NoReturn:
         _ = manifest, directory
