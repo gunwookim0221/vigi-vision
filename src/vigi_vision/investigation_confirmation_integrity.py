@@ -103,6 +103,19 @@ def compute_jpeg_integrity(
     except (OSError, ValueError):
         raise ConfirmationArtifactError from None
     _validate_jpeg_bytes(raw, width, height)
+    return compute_jpeg_integrity_from_bytes(raw, width, height)
+
+
+def compute_jpeg_integrity_from_bytes(
+    raw: bytes,
+    width: int,
+    height: int,
+    max_bytes: int = 256 * 1024 * 1024,
+) -> JpegIntegrity:
+    """Validate and hash one exact bounded in-memory JPEG payload."""
+    if type(max_bytes) is not int or max_bytes <= 0 or len(raw) > max_bytes:
+        raise ConfirmationArtifactError
+    _validate_jpeg_bytes(raw, width, height)
     return JpegIntegrity(hashlib.sha256(raw).hexdigest(), len(raw))
 
 

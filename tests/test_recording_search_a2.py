@@ -215,13 +215,17 @@ def _service(
     resolved = _ServiceOptions() if options is None else options
     context = confirmation_fixture.build_context(tmp_path / "confirmation")
     _ = context.service.confirm(confirmation_fixture.build_request(context.resource_id))
+    repository = (
+        RecordingSearchRepository(
+            tmp_path / "searches",
+            confirmation_loader=context.service,
+        )
+        if resolved.repository is None
+        else resolved.repository
+    )
     service = RecordingSearchService(
         confirmation_service=context.service,
-        repository=(
-            RecordingSearchRepository(tmp_path / "searches")
-            if resolved.repository is None
-            else resolved.repository
-        ),
+        repository=repository,
         channel_inventory=_Inventory(),
         artifact_root=tmp_path,
         now_utc=lambda: _NOW,
@@ -1058,3 +1062,6 @@ def test_acquisition_rejects_non_utc_or_out_of_policy_targets(tmp_path: Path) ->
     with pytest.raises(RecordingSearchBaselineError):
         _ = service.acquire_targets(started.run_handle, (naive,))
     started.run_handle.release()
+
+
+successful_a2_run = _successful_a2_run

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from secrets import token_hex
 from typing import Final, Protocol, final
 
 import anyio
@@ -19,6 +20,7 @@ from vigi_vision.assisted_roi_api_models import (
 )
 from vigi_vision.assisted_roi_composition import build_assisted_roi_service
 from vigi_vision.assisted_roi_geometry import Point
+from vigi_vision.assisted_roi_predictor import LazyEfficientSamPredictor
 from vigi_vision.assisted_roi_service import (
     AssistedRoiSuggestionService,
     RoiSuggestionExecutionBoundary,
@@ -41,8 +43,14 @@ from vigi_vision.investigation_confirmation_integrity import FfmpegJpegDecoder
 from vigi_vision.investigation_confirmation_repository import InvestigationConfirmationRepository
 from vigi_vision.investigation_confirmation_service import InvestigationConfirmationService
 from vigi_vision.nvr import SdkNvrGateway
+from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
 from vigi_vision.recording import RecordingPlanner
 from vigi_vision.recording_search_api import install_recording_search_routes
+from vigi_vision.recording_search_b3_masks import LimitedRgbMaskPredictor
+from vigi_vision.recording_search_b3_media import InMemoryRgbDecoder
+from vigi_vision.recording_search_b3_service import RecordingSearchClassificationService
+from vigi_vision.recording_search_b4_executor import ThreadedSnapshotClassificationExecutor
+from vigi_vision.recording_search_b4_service import ObservationClassificationService
 from vigi_vision.recording_search_repository import RecordingSearchRepository
 from vigi_vision.recording_search_service import RecordingSearchService
 from vigi_vision.reference_frame_api_errors import (
@@ -413,12 +421,44 @@ def create_reference_frame_app_from_environment() -> FastAPI:
             jpeg_decoder=jpeg_decoder,
         )
         channel_inventory = SdkNvrGateway(connection)
+        suggestion_service = build_assisted_roi_service(assisted_settings, resources)
+        mask_predictor = None
+        if isinstance(suggestion_service, AssistedRoiSuggestionService) and isinstance(
+            suggestion_service.predictor, LazyEfficientSamPredictor
+        ):
+            mask_predictor = LimitedRgbMaskPredictor(suggestion_service)
         recording_search_service = RecordingSearchService(
             confirmation_service=confirmation_service,
-            repository=RecordingSearchRepository(_RECORDING_SEARCH_ARTIFACT_ROOT),
+            repository=RecordingSearchRepository(
+                _RECORDING_SEARCH_ARTIFACT_ROOT,
+                confirmation_loader=confirmation_service,
+            ),
             channel_inventory=channel_inventory,
             artifact_root=Path("artifacts"),
             jpeg_decoder=jpeg_decoder,
+        )
+        classification_preparer = RecordingSearchClassificationService(
+            host=recording_search_service,
+            media_decoder=InMemoryRgbDecoder(ffmpeg),
+            mask_predictor=mask_predictor,
+            policy=ObjectPresenceDecisionPolicy(minimum_mask_overlap_for_comparison=0.1),
+        )
+        recording_search_service.classification_service = ObservationClassificationService(
+            host=recording_search_service,
+            preparer=classification_preparer,
+            executor=ThreadedSnapshotClassificationExecutor(
+                classification_preparer.classify_snapshot,
+                max_workers=2,
+                max_queue_size=2,
+            ),
+            timeout_seconds=(
+                suggestion_service.timeout_seconds
+                if isinstance(suggestion_service, AssistedRoiSuggestionService)
+                else 30.0
+            ),
+            now_utc=recording_search_service.repository.now_utc,
+            attempt_id_factory=lambda: f"classification-attempt-{token_hex(8)}",
+            operation_id_factory=lambda: f"classification-op-{token_hex(8)}",
         )
         service = ReferenceFrameService(
             planner=planner,
@@ -440,7 +480,6 @@ def create_reference_frame_app_from_environment() -> FastAPI:
             channel_inventory=channel_inventory,
             completed_resources=resources,
         )
-        suggestion_service = build_assisted_roi_service(assisted_settings, resources)
         return create_reference_frame_app(
             service,
             resources,

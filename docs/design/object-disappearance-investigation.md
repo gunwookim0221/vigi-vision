@@ -6,10 +6,13 @@
 reference-frame retrieval, candidate review, source-space ROI selection, and
 immutable confirmation. Phase 7A-1 implements its validated local run lifecycle
 and safe start/status boundary. Phase 7A-2 implements its acquisition-only
-schema-2 request/frame persistence and strict reopen boundary. The Phase 7B
-single-probe classification and schema-3 observation contract are complete in
-design but remain unimplemented; search orchestration and the Phase 8/9 review
-workflow also remain unimplemented.**
+schema-2 request/frame persistence and strict reopen boundary. Phase 7B
+implements bounded single-probe classification and immutable schema-3
+observation persistence and strict reopening. Phase 7C chronological coarse
+sampling is the next unimplemented slice; Phase 7D narrowing and terminal
+persistence remain unimplemented, and Phase 7E real-NVR policy validation is
+pending. Phase 8 and Phase 9 remain unimplemented. Phase 7B alone is not a
+completed disappearance-search workflow.**
 
 This document defines the first bounded use case for VIGI Vision's longer-term
 Event Discovery direction: a user investigates one selected object on one NVR
@@ -100,10 +103,15 @@ object-presence or disappearance classification.
 
 The repository does **not** currently provide:
 
-- a Phase 7 regional presence-classifier runtime;
-- coarse-to-binary recording-search orchestration or disappearance outcomes;
+- chronological coarse-to-binary recording-search orchestration or disappearance outcomes;
 - Phase 8 boundary images, evidence timeline, or review clip; or
 - an operator transport or review surface for recording-search results.
+
+Phase 7B now provides a bounded single-probe classifier, deterministic outcomes,
+schema-3 observation publication, and strict reopening. Those outcomes describe
+one admitted probe only; they are not chronological disappearance-search
+conclusions. The provisional thresholds are policy inputs for deterministic
+processing, not accuracy claims.
 
 The existing Phase 5 browser and Phase 6 backend already provide transient ROI
 editing, strict confirmation, durable canonical source-pixel ROI storage, and
@@ -233,9 +241,10 @@ Phase 7A-1 now defines and implements one run ID and directory, a compact
 lifecycle manifest, strict baseline validation, duplicate/interruption handling,
 and a safe start/status HTTP boundary. The contract-defined Phase 7A-2 slice adds
 only bounded replay acquisition: immutable request records, canonical decoded
-frame records, run-relative JPEGs, and distinct frame/request indexes. It does
-not create observations or classify evidence. Recording observations,
-deterministic outcomes, and a separate Phase 8 handoff remain later slices.
+frame records, run-relative JPEGs, and distinct frame/request indexes. Phase 7B
+now adds one-admitted-probe recording observations, deterministic outcomes, and
+strict schema-3 publication/reopen. It does not create chronological search
+conclusions or the Phase 8 handoff; those remain later slices.
 Artifacts retain the repository's
 credential-free principles: no usernames, passwords, hosts, authenticated
 RTSP/replay URLs, ffmpeg arguments, raw subprocess diagnostics, or absolute
@@ -278,11 +287,12 @@ explicit new attempt uses a new ID without adopting old evidence.
 The runtime then adds the schema 3 integrity gate, truthful recording-probe
 provenance, and the bounded continuous multi-target acquisition contract. That
 acquisition slice writes one request record per requested target and one
-canonical frame record per distinct authoritative decoded source frame; it has no classifier state or
-absence result. Later slices add the production three-state classifier,
-chronological coarse sampling, deterministic binary narrowing, and a separate
-Phase 8 request. Existing single-target callers remain unchanged. Requested time
-never substitutes for stable authoritative decoded-frame provenance. Phase 7A-2
+canonical frame record per distinct authoritative decoded source frame. Phase
+7B adds bounded single-probe classification and immutable schema-3 observations;
+Phase 7C and Phase 7D later add chronological coarse sampling, deterministic
+binary narrowing, terminal persistence, and a separate Phase 8 request. Existing
+single-target callers remain unchanged. Requested time never substitutes for
+stable authoritative decoded-frame provenance. Phase 7A-2
 now provides the decoder-boundary source-time capability that retains the
 physical replay origin, raw source/container PTS, positive source time base,
 replay-local PTS/time base, and attempt-local ordinal; the current Phase 7A-1
@@ -304,14 +314,14 @@ version after Phase 7E evidence.
 2. **Phase 6 (schema 2 and schema 3 compatibility implemented):** strict
    immutable confirmation publication, explicit legacy reconfirmation, and
    digest-bound typed Phase 7 loading.
-3. **Phase 7 (A-1 and A-2 implemented; 7B designed):** single-host run lifecycle,
+3. **Phase 7 (A-1, A-2, and 7B implemented):** single-host run lifecycle,
    interruption/new-run isolation, truthful baseline provenance, and
    acquisition-only request/frame records with canonical frame identities,
-   run-relative JPEG publication, and strict acquisition indexes. Phase 7B now
-   defines immutable schema-3 observations and production three-state
-   classification; later implementation and slices add the runtime, five-minute
-   coarse sampling, one-second binary narrowing, terminal persistence, and
-   Phase 8 handoff.
+   run-relative JPEG publication, strict acquisition indexes, bounded
+   single-probe three-state classification, and immutable schema-3 observations.
+   Phase 7C next adds five-minute coarse sampling. Phase 7D remains responsible
+   for one-second binary narrowing, terminal persistence, and the Phase 8
+   handoff; Phase 7E real-NVR policy validation remains pending.
 4. **Phase 8 (future):** boundary images, evidence timeline, and review video.
 5. **Phase 9 (future):** user-facing review and final human decision.
 6. **Later work:** object relocation, automatic detection, broader event types,

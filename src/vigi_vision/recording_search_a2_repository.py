@@ -27,6 +27,7 @@ from vigi_vision.recording_search_a2_models import (
     RecordingSearchManifestV2,
     acquisition_id_for,
 )
+from vigi_vision.recording_search_b2_models import RecordingSearchManifestV3
 from vigi_vision.recording_search_models import (
     RecordingSearchArtifactError,
     RecordingSearchManifestCorruptError,
@@ -38,7 +39,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from datetime import datetime
 
-    from vigi_vision.recording_search_models import RecordingSearchManifest
 
 _MANIFEST_NAME: Final = "manifest.json"
 _OPERATION_DIR: Final = "operations"
@@ -71,10 +71,16 @@ class A2RepositoryBoundary(Protocol):
         """Atomically replace a schema-2 manifest."""
         ...
 
-    def load(
-        self, investigation_id: str, search_run_id: str
-    ) -> RecordingSearchManifest | RecordingSearchManifestV2:
+    def write_schema3_manifest(self, manifest: RecordingSearchManifestV3, directory: Path) -> None:
+        """Atomically replace a schema-3 manifest."""
+        ...
+
+    def load(self, investigation_id: str, search_run_id: str) -> object:
         """Strictly reload a persisted manifest."""
+        ...
+
+    def load_for_probe_admission(self, investigation_id: str, search_run_id: str) -> object:
+        """Strictly load a manifest without opening indexed JPEG payloads."""
         ...
 
     def promote_schema2(self, manifest: RecordingSearchManifestV2) -> RecordingSearchManifestV2:
@@ -82,17 +88,19 @@ class A2RepositoryBoundary(Protocol):
         ...
 
     def admit_operation(
-        self, manifest: RecordingSearchManifestV2, operation: AcquisitionOperationRecord
-    ) -> RecordingSearchManifestV2:
+        self,
+        manifest: RecordingSearchManifestV2 | RecordingSearchManifestV3,
+        operation: AcquisitionOperationRecord,
+    ) -> RecordingSearchManifestV2 | RecordingSearchManifestV3:
         """Admit one acquisition operation."""
         ...
 
     def publish_a2_bundle(
         self,
-        manifest: RecordingSearchManifestV2,
+        manifest: RecordingSearchManifestV2 | RecordingSearchManifestV3,
         request_records: tuple[ProbeFrameRequestRecord, ...],
         frame_records: tuple[tuple[CanonicalProbeFrameRecord, bytes], ...],
-    ) -> RecordingSearchManifestV2:
+    ) -> RecordingSearchManifestV2 | RecordingSearchManifestV3:
         """Publish one immutable acquisition bundle."""
         ...
 
@@ -154,7 +162,7 @@ def validate_schema2_tree(root: Path, run_path: Path, manifest: RecordingSearchM
             _raise_corrupt()
         operations = _read_operations(root, run_path, manifest)
         _recover_admission_residue(root, run_path, manifest, operations)
-        frames = _read_frames(root, run_path, manifest, operations)
+        frames = _read_frames(root, run_path, manifest, operations, validate_media=True)
         requests = _read_requests(root, run_path, manifest, operations, frames)
         _reject_orphan_files(run_path, manifest, operations, frames, requests)
     except RecordingSearchManifestCorruptError:
@@ -173,9 +181,55 @@ def read_schema2_children(
     """Return strictly validated indexed child records."""
     validate_schema2_tree(root, run_path, manifest)
     operations = _read_operations(root, run_path, manifest)
-    frames = _read_frames(root, run_path, manifest, operations)
+    frames = _read_frames(root, run_path, manifest, operations, validate_media=True)
     requests = _read_requests(root, run_path, manifest, operations, frames)
     return operations, frames, requests
+
+
+def read_schema2_children_for_probe_admission(
+    root: Path, run_path: Path, manifest: RecordingSearchManifestV2
+) -> tuple[
+    dict[str, AcquisitionOperationRecord],
+    dict[str, CanonicalProbeFrameRecord],
+    dict[str, ProbeFrameRequestRecord],
+]:
+    """Read indexed A2 records while deferring the selected JPEG byte read."""
+    validate_schema2_tree_structure(root, run_path, manifest)
+    operations = _read_operations(root, run_path, manifest)
+    frames = _read_frames(root, run_path, manifest, operations, validate_media=False)
+    requests = _read_requests(root, run_path, manifest, operations, frames)
+    _reject_orphan_files(run_path, manifest, operations, frames, requests)
+    return operations, frames, requests
+
+
+def validate_schema2_tree_structure(
+    root: Path, run_path: Path, manifest: RecordingSearchManifestV2
+) -> None:
+    """Validate the A2 tree and child identities without opening JPEG payloads."""
+    if not is_safe_contained_path(root, run_path, require_target=True) or run_path.is_symlink():
+        raise RecordingSearchManifestCorruptError
+    expected_directories = (
+        run_path / _OPERATION_DIR,
+        run_path / _FRAME_DIR,
+        run_path / _REQUEST_DIR,
+        run_path / _EVIDENCE_DIR,
+        run_path / _EVIDENCE_DIR / _FRAME_EVIDENCE_DIR,
+    )
+    try:
+        if any(
+            not is_safe_contained_path(root, path, require_target=True)
+            or path.is_symlink()
+            or not path.is_dir()
+            for path in expected_directories
+        ):
+            _raise_corrupt()
+        _ = _read_operations(root, run_path, manifest)
+        if any(path.name.startswith(_ADMISSION_STAGING_PREFIX) for path in run_path.iterdir()):
+            _raise_corrupt()
+    except RecordingSearchManifestCorruptError:
+        raise
+    except (OSError, ValueError, ValidationError, DurableJsonError):
+        raise RecordingSearchManifestCorruptError from None
 
 
 def promote_schema2(
@@ -194,9 +248,9 @@ def promote_schema2(
 
 def admit_operation(
     repository: A2RepositoryBoundary,
-    manifest: RecordingSearchManifestV2,
+    manifest: RecordingSearchManifestV2 | RecordingSearchManifestV3,
     operation: AcquisitionOperationRecord,
-) -> RecordingSearchManifestV2:
+) -> RecordingSearchManifestV2 | RecordingSearchManifestV3:
     """Atomically admit one operation as the next manifest successor."""
     if (
         operation.investigation_id != manifest.investigation_id
@@ -229,7 +283,7 @@ def admit_operation(
                 )
             }
         )
-        repository.write_schema2_manifest(updated, run_path)
+        _write_acquisition_manifest(repository, updated, run_path)
     except (RecordingSearchArtifactError, OSError, ValueError, ValidationError):
         _remove_owned_file(root, operation_path)
         _remove_owned_file(root, staging_marker)
@@ -237,17 +291,17 @@ def admit_operation(
         raise
     _remove_owned_directory(root, staging)
     loaded = repository.load(manifest.investigation_id, manifest.search_run_id)
-    if not isinstance(loaded, RecordingSearchManifestV2):
+    if not isinstance(loaded, type(manifest)):
         raise RecordingSearchManifestCorruptError
     return loaded
 
 
 def publish_a2_bundle(
     repository: A2RepositoryBoundary,
-    manifest: RecordingSearchManifestV2,
+    manifest: RecordingSearchManifestV2 | RecordingSearchManifestV3,
     request_records: tuple[ProbeFrameRequestRecord, ...],
     frame_records: tuple[tuple[CanonicalProbeFrameRecord, bytes], ...],
-) -> RecordingSearchManifestV2:
+) -> RecordingSearchManifestV2 | RecordingSearchManifestV3:
     """Publish immutable child records and one indexed manifest successor."""
     root = repository.root
     run_path = repository.run_path(manifest.investigation_id, manifest.search_run_id)
@@ -302,7 +356,7 @@ def publish_a2_bundle(
                 ),
             }
         )
-        repository.write_schema2_manifest(next_manifest, run_path)
+        _write_acquisition_manifest(repository, next_manifest, run_path)
         committed = True
     except (RecordingSearchArtifactError, OSError, ValueError, ValidationError):
         if not committed:
@@ -314,7 +368,7 @@ def publish_a2_bundle(
         if committed and staging_owned:
             _remove_owned_directory(root, staging)
     loaded = repository.load(manifest.investigation_id, manifest.search_run_id)
-    if not isinstance(loaded, RecordingSearchManifestV2):
+    if not isinstance(loaded, type(manifest)):
         raise RecordingSearchManifestCorruptError
     return loaded
 
@@ -354,7 +408,7 @@ def transition_schema2(
 
 
 def _validate_bundle_ownership(
-    manifest: RecordingSearchManifestV2,
+    manifest: RecordingSearchManifestV2 | RecordingSearchManifestV3,
     request_records: tuple[ProbeFrameRequestRecord, ...],
     frame_records: tuple[tuple[CanonicalProbeFrameRecord, bytes], ...],
 ) -> None:
@@ -389,6 +443,17 @@ def _validate_bundle_ownership(
             raise RecordingSearchArtifactError
 
 
+def _write_acquisition_manifest(
+    repository: A2RepositoryBoundary,
+    manifest: RecordingSearchManifestV2 | RecordingSearchManifestV3,
+    run_path: Path,
+) -> None:
+    if isinstance(manifest, RecordingSearchManifestV3):
+        repository.write_schema3_manifest(manifest, run_path)
+    else:
+        repository.write_schema2_manifest(manifest, run_path)
+
+
 def _read_operations(
     root: Path, run_path: Path, manifest: RecordingSearchManifestV2
 ) -> dict[str, AcquisitionOperationRecord]:
@@ -412,6 +477,8 @@ def _read_frames(
     run_path: Path,
     manifest: RecordingSearchManifestV2,
     operations: dict[str, AcquisitionOperationRecord],
+    *,
+    validate_media: bool,
 ) -> dict[str, CanonicalProbeFrameRecord]:
     records: dict[str, CanonicalProbeFrameRecord] = {}
     decoded_positions: set[tuple[str, int]] = set()
@@ -448,9 +515,13 @@ def _read_frames(
             or jpeg_path.is_symlink()
         ):
             raise RecordingSearchManifestCorruptError
-        integrity = compute_jpeg_integrity(jpeg_path, record.source_width, record.source_height)
-        if integrity.sha256 != record.jpeg_sha256 or integrity.size_bytes != record.jpeg_size_bytes:
-            raise RecordingSearchManifestCorruptError
+        if validate_media:
+            integrity = compute_jpeg_integrity(jpeg_path, record.source_width, record.source_height)
+            if (
+                integrity.sha256 != record.jpeg_sha256
+                or integrity.size_bytes != record.jpeg_size_bytes
+            ):
+                raise RecordingSearchManifestCorruptError
         records[frame_id] = record
     return records
 

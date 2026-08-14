@@ -5,11 +5,12 @@
 **Status: normative design for the current single-site Phase 7 MVP. Phase 7A-1
 implements the validated local run lifecycle, baseline gate, isolated repository,
 duplicate/interruption handling, and safe start/status API. Phase 7A-2 implements
-acquisition-only schema-2 request/frame persistence, strict provenance, and
-reopen validation. The Phase 7B single-probe classifier and schema-3 observation
-contract are complete in design but remain unimplemented. Search orchestration
-and Phase 8 review-media generation also remain unimplemented; the required
-Phase 6C schema 3 compatibility increment is complete.**
+acquisition-only request/frame persistence, strict provenance, and reopen
+validation. Phase 7B implements bounded production single-probe classification,
+timeout/abandonment authority revocation, strict revalidation, and atomic
+schema-3 observation publication. Phase 7C/7D search orchestration, Phase 7E
+real-NVR validation, and Phase 8 review-media generation remain unimplemented;
+the required Phase 6C schema 3 compatibility increment is complete.**
 
 This document is the current implementation and review contract for Phase 7.
 It is intentionally limited to one restaurant, one local application host, one
@@ -1408,10 +1409,14 @@ stages; the public state model remains unchanged.
 - **Tests:** real predictor/comparator integration fixture; every IoU/NCC
   threshold boundary; baseline geometry; three states; timeout, unavailable,
   invalid-mask and zero-variance mapping; deterministic-double parity.
-- **Complete/document:** production composition and atomic schema-3 publication
-  exist; no infrastructure, corrupt input, or uncertain comparison becomes
-  `ABSENT`; probe records retain mandatory acquisition/frame provenance by
-  immutable reference. See the
+- **Complete/document:** the pure classification foundation, atomic schema-3
+  persistence, bounded single-read byte admission, production classifier
+  composition, handle-owned invocation authority, bounded execution,
+  timeout/abandonment revocation, revalidation, and publication orchestration
+  are implemented.
+  No infrastructure, corrupt input, or uncertain comparison becomes `ABSENT`;
+  probe records retain mandatory acquisition/frame provenance by immutable
+  reference. See the
   [exact Phase 7B contract](object-presence-classification.md).
 
 ### Phase 7C: coarse sampling

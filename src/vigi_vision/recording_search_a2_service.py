@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
+from vigi_vision.durable_io import is_safe_contained_path
+from vigi_vision.investigation_confirmation_integrity import (
+    compute_jpeg_integrity_from_bytes,
+)
+from vigi_vision.investigation_confirmation_models import ConfirmationArtifactError
 from vigi_vision.recording_search_a2_models import (
     AcquisitionOperationRecord,
     CanonicalProbeFrameRecord,
@@ -12,7 +19,10 @@ from vigi_vision.recording_search_a2_models import (
     ProbeRequestStatus,
     RecordingSearchManifestV2,
 )
-from vigi_vision.recording_search_a2_repository import read_schema2_children
+from vigi_vision.recording_search_a2_repository import (
+    read_schema2_children,
+    read_schema2_children_for_probe_admission,
+)
 from vigi_vision.recording_search_a2_support import (
     A2HandleBoundary,
     A2ServiceBoundary,
@@ -21,9 +31,11 @@ from vigi_vision.recording_search_a2_support import (
     fractional_now,
     whole_text,
 )
+from vigi_vision.recording_search_b2_models import RecordingSearchManifestV3
 from vigi_vision.recording_search_models import (
     RecordingSearchArtifactError,
     RecordingSearchBaselineError,
+    RecordingSearchManifest,
     RecordingSearchManifestCorruptError,
     RecordingSearchState,
 )
@@ -35,6 +47,18 @@ class ValidatedAcquisitionOutput:
 
     request: ProbeFrameRequestRecord
     frame: CanonicalProbeFrameRecord
+
+
+@dataclass(frozen=True, slots=True)
+class AdmittedProbeFrame:
+    """One successful A2 frame with its exact single-read JPEG bytes."""
+
+    request: ProbeFrameRequestRecord
+    frame: CanonicalProbeFrameRecord
+    jpeg_bytes: bytes
+    jpeg_sha256: str
+    jpeg_size_bytes: int
+    jpeg_relative_path: str
 
 
 def validate_successful_request(
@@ -76,6 +100,83 @@ def validate_successful_request(
     return ValidatedAcquisitionOutput(request, frame)
 
 
+def admit_probe_frame_bytes(
+    service: A2ServiceBoundary,
+    investigation_id: str,
+    search_run_id: str,
+    probe_request_id: str,
+) -> AdmittedProbeFrame:
+    """Read and validate one indexed probe JPEG exactly once in memory."""
+    manifest = service.repository.load_for_probe_admission(investigation_id, search_run_id)
+    if isinstance(manifest, RecordingSearchManifestV3):
+        acquisition_manifest = manifest.as_schema2()
+    elif isinstance(manifest, RecordingSearchManifestV2):
+        acquisition_manifest = manifest
+    else:
+        raise RecordingSearchArtifactError
+    run_path = service.repository.run_path(investigation_id, search_run_id)
+    operations, frames, requests = read_schema2_children_for_probe_admission(
+        service.repository.root,
+        run_path,
+        acquisition_manifest,
+    )
+    request = requests.get(probe_request_id)
+    if (
+        request is None
+        or request.status is not ProbeRequestStatus.SUCCEEDED
+        or request.canonical_frame_id is None
+        or request.operation_id not in operations
+    ):
+        raise RecordingSearchArtifactError
+    frame = frames.get(request.canonical_frame_id)
+    if frame is None or frame.operation_id not in operations:
+        raise RecordingSearchArtifactError
+    if (
+        request.investigation_id != acquisition_manifest.investigation_id
+        or request.search_run_id != acquisition_manifest.search_run_id
+        or request.channel_id != acquisition_manifest.confirmation.channel_id
+        or frame.investigation_id != acquisition_manifest.investigation_id
+        or frame.search_run_id != acquisition_manifest.search_run_id
+        or frame.channel_id != request.channel_id
+    ):
+        raise RecordingSearchArtifactError
+    jpeg_path = run_path / Path(frame.jpeg_relative_path)
+    if (
+        not is_safe_contained_path(service.repository.root, jpeg_path, require_target=True)
+        or not jpeg_path.is_file()
+        or jpeg_path.is_symlink()
+    ):
+        raise RecordingSearchArtifactError
+    try:
+        with jpeg_path.open("rb") as stream:
+            raw = stream.read(256 * 1024 * 1024 + 1)
+    except OSError:
+        raise RecordingSearchArtifactError from None
+    try:
+        integrity = compute_jpeg_integrity_from_bytes(
+            raw,
+            frame.source_width,
+            frame.source_height,
+        )
+    except (ConfirmationArtifactError, ValueError):
+        raise RecordingSearchArtifactError from None
+    if (
+        integrity.sha256 != frame.jpeg_sha256
+        or integrity.size_bytes != frame.jpeg_size_bytes
+        or hashlib.sha256(raw).hexdigest() != frame.jpeg_sha256
+        or len(raw) != frame.jpeg_size_bytes
+    ):
+        raise RecordingSearchArtifactError
+    return AdmittedProbeFrame(
+        request=request,
+        frame=frame,
+        jpeg_bytes=raw,
+        jpeg_sha256=integrity.sha256,
+        jpeg_size_bytes=integrity.size_bytes,
+        jpeg_relative_path=frame.jpeg_relative_path,
+    )
+
+
 def acquire_targets(
     service: A2ServiceBoundary,
     handle: A2HandleBoundary,
@@ -83,24 +184,26 @@ def acquire_targets(
 ) -> tuple[ProbeFrameRequestRecord, ...]:
     """Acquire one ordered immutable request record for every target."""
     with service.a2_mutation(handle):
-        manifest = _ensure_schema2(service, handle)
+        manifest = _ensure_acquisition_manifest(service, handle)
+        acquisition = _schema2_view(manifest)
         run_path = service.repository.run_path(handle.investigation_id, handle.search_run_id)
         operations, frames, existing_requests = read_schema2_children(
             service.repository.root,
             run_path,
-            manifest,
+            acquisition,
         )
-        targets = _validate_targets(requested_times, manifest)
-        selected, pending = _select_existing(existing_requests, manifest, targets)
+        targets = _validate_targets(requested_times, acquisition)
+        selected, pending = _select_existing(existing_requests, acquisition, targets)
         if not pending:
-            return tuple(selected[_request_key(manifest, target)] for target in targets)
-        operation = _new_operation(service, manifest, operations)
+            return tuple(selected[_request_key(acquisition, target)] for target in targets)
+        operation = _new_operation(service, acquisition, operations)
         admitted = service.repository.admit_operation(manifest, operation)
+        admitted_acquisition = _schema2_view(admitted)
         try:
             produced, new_frames = acquire_new_targets(
                 AcquisitionBatch(
                     service,
-                    admitted,
+                    admitted_acquisition,
                     operation,
                     frames,
                     existing_requests,
@@ -116,27 +219,34 @@ def acquire_targets(
             _fail_active_run(handle)
             raise
         persisted = service.repository.load(handle.investigation_id, handle.search_run_id)
-        if not isinstance(persisted, RecordingSearchManifestV2):
+        if not isinstance(persisted, RecordingSearchManifestV2 | RecordingSearchManifestV3):
             raise RecordingSearchManifestCorruptError
+        persisted_acquisition = _schema2_view(persisted)
         _, _, persisted_requests = read_schema2_children(
             service.repository.root,
             run_path,
-            persisted,
+            persisted_acquisition,
         )
         for target in pending:
-            key = _request_key(admitted, target)
+            key = _request_key(admitted_acquisition, target)
             record = _latest_request(persisted_requests, key)
             if record is None:
                 _fail_active_run(handle)
                 raise RecordingSearchArtifactError
             selected[key] = record
-        return tuple(selected[_request_key(admitted, target)] for target in targets)
+        return tuple(selected[_request_key(admitted_acquisition, target)] for target in targets)
 
 
-def _ensure_schema2(
+def _ensure_acquisition_manifest(
     service: A2ServiceBoundary, handle: A2HandleBoundary
-) -> RecordingSearchManifestV2:
+) -> RecordingSearchManifestV2 | RecordingSearchManifestV3:
     current = service.repository.load(handle.investigation_id, handle.search_run_id)
+    if isinstance(current, RecordingSearchManifestV3):
+        if current.state != "RUNNING":
+            raise RecordingSearchBaselineError
+        return current
+    if not isinstance(current, RecordingSearchManifest | RecordingSearchManifestV2):
+        raise RecordingSearchManifestCorruptError
     if isinstance(current, RecordingSearchManifestV2):
         if current.state is not RecordingSearchState.RUNNING:
             raise RecordingSearchBaselineError
@@ -159,6 +269,12 @@ def _ensure_schema2(
         failure_reason=None,
     )
     return service.repository.promote_schema2(promoted)
+
+
+def _schema2_view(
+    manifest: RecordingSearchManifestV2 | RecordingSearchManifestV3,
+) -> RecordingSearchManifestV2:
+    return manifest.as_schema2() if isinstance(manifest, RecordingSearchManifestV3) else manifest
 
 
 def _validate_targets(
