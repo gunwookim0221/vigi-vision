@@ -8,9 +8,12 @@ duplicate/interruption handling, and safe start/status API. Phase 7A-2 implement
 acquisition-only request/frame persistence, strict provenance, and reopen
 validation. Phase 7B implements bounded production single-probe classification,
 timeout/abandonment authority revocation, strict revalidation, and atomic
-schema-3 observation publication. Phase 7C/7D search orchestration, Phase 7E
-real-NVR validation, and Phase 8 review-media generation remain unimplemented;
-the required Phase 6C schema 3 compatibility increment is complete.**
+schema-3 observation publication. Phase 7C-1 implements the deterministic
+chronological coarse target plan and sequential A2/B4 execution foundation;
+7C-2 implements the pure, non-persistent interpretation of that ordered
+evidence. Phase 7D narrowing, Phase 7E real-NVR validation, and Phase 8
+review-media generation remain unimplemented. The required Phase 6C
+schema 3 compatibility increment is complete.**
 
 This document is the current implementation and review contract for Phase 7.
 It is intentionally limited to one restaurant, one local application host, one
@@ -693,9 +696,9 @@ TargetAliasRecord
 `TargetAliasRecord` is a later classifier/search reference only. It points to an
 observation, never to an acquisition frame, and never supplies independent
 support. A2 aliases are represented only by additional acquired
-`ProbeFrameRequestRecord` values that reference an existing frame. Three such
+`ProbeFrameRequestRecord` values that reference an existing frame. Multiple such
 requests resolving to one frame therefore yield one `canonical_frame_id`, not
-three independent frames.
+multiple independent frames.
 
 In the remainder of this document, **request alias** means an acquired
 `ProbeFrameRequestRecord` with `alias_of_probe_request_id`; **observation alias**
@@ -743,9 +746,9 @@ decoder-attempt token is operational metadata only and is never included in
 `canonical_frame_id`. The canonical
 identity tuple and serialization are the closed rules above, so the same
 segment/frame position reuses the same frame ID across operations. Every rule
-that needs frame distinctness, including `[t, t+1s, t+2s]`, uses one batch
-operation and requires three different frame IDs with strictly increasing
-normalized decoded UTC values. Aliased requested targets cannot satisfy that
+that needs frame distinctness uses one batch operation and requires the
+configured number of different frame IDs with strictly increasing normalized
+decoded UTC values. Aliased requested targets cannot satisfy that
 rule. If authoritative provenance is not stable enough to decide equality,
 acquisition fails safely instead of guessing.
 The existing single-target reference-frame result remains
@@ -841,7 +844,7 @@ interval and persists the resolved value with every run:
 | Maximum requested span | 24 hours |
 | Coarse interval | 300 seconds |
 | Binary stopping resolution | 1 second |
-| Absence confirmation | 3 distinct frames |
+| Absence confirmation | `absence_confirmation_frames` distinct frames (default 3) |
 | Confirmation cadence | 1 second |
 | Maximum consecutive indeterminate coarse targets | 3 |
 | Classifier | `efficient-sam-ti-roi-ncc-v1` |
@@ -851,7 +854,10 @@ interval and persists the resolved value with every run:
 | Maximum ROI-relative mask coverage | 0.95 |
 
 Changing a value requires a new policy version. These are initial operating
-limits to validate against representative NVR footage, not accuracy claims.
+limits to validate against representative NVR footage, not accuracy claims. The
+positive support count is bounded by the finite whole-second slots in the
+validated search window; a support sequence that does not fit through `E` is
+not acquired.
 
 ### Coarse sampling
 
@@ -861,19 +867,20 @@ Let `S` be Phase 6 `requested_time_utc` and `E` the validated search end.
 2. Process targets chronologically with the baseline as initial lower bound.
 3. A distinct canonical `PRESENT` observation updates `last_present`; an alias
    never does.
-4. An `ABSENT` coarse target `t` is tentative until one continuous decode selects the
-   exact targets `[t, t + 1s, t + 2s]`. The fixed two-second support horizon may
-   extend past `E`, but cannot create a candidate target later than `E`.
+4. An `ABSENT` coarse target `t` is tentative until one bounded confirmation
+   batch selects the exact in-window targets `[t + i * cadence for i in
+   range(absence_confirmation_frames)]`. If the full sequence does not fit
+   through `E`, no support acquisition is attempted and the target remains
+   unresolved.
 5. Those values are requested targets, not promised decoded timestamps. The
-   operation must resolve them to three distinct canonical frame IDs with
-   strictly increasing normalized decoded UTC (using PTS/ordinal only as
-   same-attempt tie-break provenance), all classified `ABSENT`; only then is
-   `t` the first-absence upper bound and `[last_present, t]` a bracket.
+   batch must resolve them to `absence_confirmation_frames` distinct canonical
+   frame IDs with strictly increasing decoded UTC, PTS, and ordinal provenance, all classified `ABSENT`;
+   only then is `t` the first-absence upper bound and `[last_present, t]` a bracket.
 6. Aliases count once and cannot establish absence.
 7. `consecutive_unusable_coarse_targets` counts coarse targets, not decoded
    support frames. Each coarse target increments it at most once; aliases never
    increment it. A valid canonical PRESENT coarse result resets it to zero.
-   Reaching three ends the run as `INDETERMINATE`.
+  Reaching the configured maximum ends the run as `INDETERMINATE`.
 
 Tentative-absence handling uses this precedence and is exhaustive:
 
@@ -893,13 +900,18 @@ if primary classifier result is INDETERMINATE:
   increment consecutive_unusable_coarse_targets once
   finish INDETERMINATE if the limit is reached; otherwise continue
 
-# primary result is tentative ABSENT
-support = decode_and_classify_one_session([t, t + 1s, t + 2s])
+# primary result is tentative ABSENT. The executor may have acquired this
+# bounded confirmation batch before classification so all support frames share
+# one A2 decoder session; it classifies the primary first and uses the batch
+# only when the primary is ABSENT.
+support = classify_confirmation_batch(
+    [t + i * cadence for i in range(absence_confirmation_frames)]
+)
 
 if recording/replay/acquisition/decode operation failed:
   persist t as INDETERMINATE with recording_unavailable
   increment consecutive_unusable_coarse_targets once
-  finish INDETERMINATE if the limit is reached; otherwise resume after t + 2s
+  finish INDETERMINATE if the limit is reached; otherwise resume after the support window
 
 canonical, aliases = canonicalize(support)
 persist aliases without counting them
@@ -908,32 +920,32 @@ if classifier execution failed:
   record one search-level target uncertainty with the fixed operational reason
   publish no RecordingProbeObservationRecord for the failed classification
   increment consecutive_unusable_coarse_targets once
-  finish INDETERMINATE if the limit is reached; otherwise resume after t + 2s
+  finish INDETERMINATE if the limit is reached; otherwise resume after the support window
 
 if any canonical observation is INDETERMINATE:
   retain the committed observation and its closed visual reason
   increment consecutive_unusable_coarse_targets once
-  finish INDETERMINATE if the limit is reached; otherwise resume after t + 2s
+  finish INDETERMINATE if the limit is reached; otherwise resume after the support window
 
-if fewer than three distinct canonical frames exist
+if fewer than absence_confirmation_frames distinct canonical frames exist
    or normalized decoded UTC order is not strictly increasing:
   persist t as INDETERMINATE with insufficient_visual_evidence
   increment consecutive_unusable_coarse_targets once
-  finish INDETERMINATE if the limit is reached; otherwise resume after t + 2s
+  finish INDETERMINATE if the limit is reached; otherwise resume after the support window
 
 if any canonical observation is PRESENT:
   update last_present from the latest later canonical PRESENT primary target
   consecutive_unusable_coarse_targets = 0
-  resume at the first configured coarse target after t + 2s
+  resume at the first configured coarse target after the support window
 
-if canonical contains exactly three distinct ABSENT frames:
+if canonical contains exactly absence_confirmation_frames distinct ABSENT frames:
   if last_present is an indexed canonical PRESENT recording probe:
     consecutive_unusable_coarse_targets = 0
-    emit internal bracket [last_present, t] with all three support IDs
+    emit internal bracket [last_present, t] with all support IDs
   otherwise:
     persist t as INDETERMINATE with insufficient_visual_evidence
     increment consecutive_unusable_coarse_targets once
-    finish INDETERMINATE if the limit is reached; otherwise resume after t + 2s
+    finish INDETERMINATE if the limit is reached; otherwise resume after the support window
 ```
 
 One canonical frame is classified once, so aliases cannot disagree about its
@@ -959,7 +971,9 @@ while U - L > 1 second:
     continue
 
   if observation is ABSENT:
-    support = confirm_absence_at([M, M + 1s, M + 2s])
+    support = confirm_absence_at(
+      [M + i * cadence for i in range(absence_confirmation_frames)]
+    )
     if support succeeds:
       U = M
       continue
@@ -973,7 +987,7 @@ Each midpoint is a canonical whole-second UTC request. Midpoint ties use the
 earlier second through floor division. Binary search never widens the bracket,
 crosses a known recording gap, or treats an isolated `ABSENT` as an upper bound.
 It uses the same batch identity and support table. During narrowing, any support
-result other than three valid ordered ABSENT frames contradicts or cannot prove
+result other than the configured number of valid ordered ABSENT frames contradicts or cannot prove
 the current upper bound and ends `INDETERMINATE`; it does not resume a coarse
 scan or manufacture another persisted state.
 
@@ -1155,7 +1169,7 @@ search manifest and are not accepted by the A2 or Phase 7B loaders:
 
 | Manifest state | Required candidate/evidence relationship |
 | --- | --- |
-| `FOUND` | `candidate_interval` is present and `failure_reason` is null. Its lower-bound ID resolves to an indexed canonical `RecordingProbeObservationRecord` in `PRESENT`; its upper-bound ID resolves to a later indexed canonical probe in `ABSENT`; stored requested times exactly match those records. `absence_support_observation_ids` resolves to exactly three distinct indexed canonical `ABSENT` probes from one decode session in strictly increasing normalized decoded UTC, with PTS/ordinal only as same-session tie-break provenance, includes the upper-bound probe, and satisfies the persisted cadence/policy. No alias or baseline record can fill any evidence position. |
+| `FOUND` | `candidate_interval` is present and `failure_reason` is null. Its lower-bound ID resolves to an indexed canonical `RecordingProbeObservationRecord` in `PRESENT`; its upper-bound ID resolves to a later indexed canonical probe in `ABSENT`; stored requested times exactly match those records. `absence_support_observation_ids` resolves to exactly `absence_confirmation_frames` distinct indexed canonical `ABSENT` probes from one decode session in strictly increasing normalized decoded UTC, with PTS/ordinal only as same-session tie-break provenance, includes the upper-bound probe, and satisfies the persisted cadence/policy. No alias or baseline record can fill any evidence position. |
 | Every state other than `FOUND` | `candidate_interval` is null and no Phase 8 handoff is `READY`. State-specific fixed failure fields follow the state table above. |
 
 When that future contract exists, all resolved probes must belong to the same run manifest and match its
@@ -1296,7 +1310,7 @@ search persistence:
 | 11. A valid schema 2 acquisition run is reopened | The v2 loader validates the closed operation-record index, recomputes the canonical identity from persisted physical replay origin plus source PTS/time base, validates positive source/replay time bases and attempt-local PTS/ordinal scope, ownership, and every JPEG; it accepts a frame published by one admitted operation and referenced by a request from another admitted operation in the same run. |
 | 12. A schema 2 manifest contains observation/classifier/result data | The strict v2 parser rejects unknown fields or invalid state combinations; it never presents a result or silently upgrades the schema. |
 | 13. A later classifier receives a valid acquired frame/request pair | Phase 7B accepts one strict successful request and its indexed canonical frame when investigation, run, target, channel, segment/frame provenance, canonical ID, and two durable same-run operation records match; request and frame operation IDs may differ. Foreign, invented, or unindexed operations are rejected. A2 remains acquisition-only and does not persist an observation. |
-| 14. Three aliases reference one frame | Three request records resolve to one canonical frame; they cannot satisfy three-distinct-frame absence support or create three observations. |
+| 14. Multiple aliases reference one frame | Multiple request records resolve to one canonical frame; they cannot satisfy configured distinct-frame absence support or create multiple observations. |
 
 ## Phase 8 handoff
 
@@ -1421,22 +1435,67 @@ stages; the public state model remains unchanged.
 
 ### Phase 7C: coarse sampling
 
-- **Inputs:** `S`, `E`, policy, confirmed baseline, acquisition/classification.
-- **Outputs:** a typed internal bracket, `NOT_FOUND`, or `INDETERMINATE` plus
-  ordered canonical observations and aliases. A bracket is not a persisted
-  terminal result.
-- **Files:** pure coarse-policy or bounded orchestration component and focused
-  tests; integrated service wiring completes in 7D.
-- **Exclude:** binary narrowing, Phase 8, review media, recovery/resume.
-- **Tests:** anchored targets plus `E`, every tentative-absence table row,
-  ordering, alias collapse, one-event-per-coarse-target uncertainty accounting,
-  reset on canonical PRESENT, gaps, and
-  complete no-result behavior.
-- **Complete/document:** the component returns one deterministic bounded internal
-  result. In an integrated run, a bracket passes directly to 7D while the
-  manifest stays `RUNNING`; no standalone 7C execution is production-complete.
-  Interruption before terminal persistence follows the existing `INTERRUPTED`
-  rule, and partial 7C output is never `FOUND`.
+Phase 7C-1 is the execution foundation. Phase 7C-2 consumes its ordered result
+through a strict handle-bound snapshot of the existing A2/B4 records and returns
+only an internal typed bracket or safe non-candidate outcome. Neither slice
+publishes a terminal search state.
+
+- **Inputs:** the active run handle, its persisted policy snapshot, confirmed
+  baseline, and the existing A2/B4 service boundaries.
+- **Plan:** starting at `S = policy.search_start_utc`, request whole-second UTC
+  targets `S + interval`, `S + 2 * interval`, and so on while strictly before
+  `E = policy.search_end_utc`; append `E` exactly once. A window shorter than
+  one interval therefore has only `E`. The plan is strictly increasing,
+  duplicate-free, inclusive of `E`, and bounded by
+  `ceil((E - S) / interval)` targets and the policy maximum span.
+- **Execution:** process targets in chronological order. The executor uses the
+  existing Phase 7A-2 batch boundary to acquire a primary target and, when its
+  in-window confirmation sequence fits, the derived
+  `[t + i * cadence for i in range(absence_confirmation_frames)]`
+  support frames in one bounded decoder session. It classifies the primary first
+  through Phase 7B-4 and classifies that support batch only when the primary is
+  `ABSENT`; a support batch is never inferred from requested timestamps. The
+  executor never holds a second writer lock or performs its own media work;
+  authority, bounded timeout, late-result, byte-integrity, and publication rules
+  remain in A2/B4.
+- **Durable progress:** no new manifest schema is introduced. A2 request records
+  durably capture each attempted target, including safe failed-request reasons;
+  successful B4 observations and aliases extend the existing immutable schema-3
+  indexes. The Phase 6 schema-3 package has no separate confirmation identifier,
+  so its canonical `investigation_id` is the `phase6_confirmation_id` binding.
+  Each derived confirmation batch carries a canonical identity binding
+  the investigation and run, Phase 6 confirmation and baseline, immutable plan,
+  origin target, support count, and cadence. Repeating an active plan therefore reuses A2 requests and B4
+  canonical duplicates. A process interruption leaves the run governed by the
+  existing `INTERRUPTED` rule; a later run is an explicit new run, never an
+  implicit resume or takeover.
+- **Result:** a typed ordered sample result reports each target as successful or
+  a fixed safe operational category (`RECORDING_UNAVAILABLE`, acquisition
+  failure, timeout, classification failure, interruption, or unexpected
+  failure). A successful result retains the B4 visual state only as evidence;
+  it is not a disappearance outcome.
+- **Files:** `recording_search_c1_planner.py`,
+  `recording_search_c1_models.py`, `recording_search_c1_service.py`, and the
+  active-run delegation in `recording_search_service.py`.
+- **Tests:** boundary and exact-end targets, deterministic identity, ordering,
+  A2/B4 delegation, per-target failure isolation, timeout handling, active
+  handle interruption, and absence of 7C-2/7D terminal fields.
+- **Exclude:** binary narrowing, terminal persistence, Phase 8, review media,
+  and recovery/resume.
+
+Phase 7C-2 requires one preceding canonical `PRESENT` target and exactly the
+configured `absence_confirmation_frames` distinct canonical `ABSENT`
+observations for requested targets `[t + i * cadence for i in
+range(absence_confirmation_frames)]`. The requested times are not decoded timestamps: the support frames
+must share one decode session and have strictly increasing decoded UTC, PTS,
+and ordinal values. Aliases, decode gaps, operational failures, and
+`INDETERMINATE` outcomes cannot support absence. The interpreter emits the first
+supported `[last_present, first_absent_support_target]` bracket, or a typed
+`INCOMPLETE`, `INTERRUPTED`, `NO_CANDIDATE`, `INCONCLUSIVE`, or `CORRUPT` result;
+it performs no acquisition, classification, filesystem write, manifest mutation,
+or schema change. Missing support targets therefore remain inconclusive rather
+than being requested or inferred by 7C-2. Phase 7D owns binary narrowing and
+terminal persistence.
 
 ### Phase 7D: binary narrowing and persistence
 

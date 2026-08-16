@@ -31,13 +31,31 @@ from vigi_vision.recording_search_b4_models import (
     ClassificationOperationalReason,
     PublishedClassificationResult,
 )
+from vigi_vision.recording_search_c1_models import CoarseSampleStatus
+from vigi_vision.recording_search_c1_planner import (
+    CoarseSamplingIdentity,
+    baseline_identity_for,
+    build_coarse_sampling_plan,
+)
+from vigi_vision.recording_search_c1_service import CoarseSamplingExecutor
+from vigi_vision.recording_search_c2_interpreter import interpret_coarse_evidence
+from vigi_vision.recording_search_c2_models import (
+    CoarseEvidenceSnapshot,
+    CoarseInterpretationResult,
+    CoarseInterpretationStatus,
+    CoarseTargetEvidence,
+)
+from vigi_vision.recording_search_c2_service import capture_coarse_evidence_snapshot
 from vigi_vision.recording_search_lock import LocalInvestigationLock
 from vigi_vision.recording_search_models import (
     Phase8HandoffStatus,
     ReconfirmationRequiredError,
+    RecordingSearchArtifactError,
     RecordingSearchBaseline,
     RecordingSearchBaselineError,
     RecordingSearchManifest,
+    RecordingSearchManifestCorruptError,
+    RecordingSearchNotFoundError,
     RecordingSearchOutcome,
     RecordingSearchRequest,
     RecordingSearchState,
@@ -57,6 +75,8 @@ if TYPE_CHECKING:
     from vigi_vision.recording_search_a2_support import A2HandleBoundary
     from vigi_vision.recording_search_b3_models import ClassifyRecordingProbeRequest
     from vigi_vision.recording_search_b4_service import ObservationClassificationService
+    from vigi_vision.recording_search_c1_models import CoarseSamplingResult
+    from vigi_vision.recording_search_c1_planner import CoarseSamplingPlan
     from vigi_vision.recording_search_repository import RecordingSearchRepository
 
 
@@ -66,6 +86,100 @@ def _new_run_id() -> str:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(microsecond=0)
+
+
+_C2_DIGEST_LENGTH = 64
+
+
+def _incomplete_snapshot(
+    handle: RecordingSearchRunHandle,
+    execution: CoarseSamplingResult,
+) -> CoarseEvidenceSnapshot:
+    targets = tuple(
+        CoarseTargetEvidence(
+            requested_time_utc=sample.requested_time_utc,
+            status=sample.status,
+            probe_request_id=sample.probe_request_id,
+        )
+        for sample in execution.samples
+    )
+    return CoarseEvidenceSnapshot(
+        investigation_id=handle.investigation_id,
+        search_run_id=handle.search_run_id,
+        identity=CoarseSamplingIdentity(
+            handle.investigation_id,
+            handle.search_run_id,
+            handle.phase6_confirmation_id,
+            handle.baseline_identity,
+        ),
+        plan=execution.plan,
+        policy_version="unavailable",
+        absence_confirmation_frames=execution.plan.absence_confirmation_frames,
+        absence_cadence_seconds=execution.plan.absence_cadence_seconds,
+        baseline_observation_id="unavailable",
+        manifest_digest="0" * _C2_DIGEST_LENGTH,
+        execution=execution,
+        targets=targets,
+        maximum_consecutive_indeterminate_targets=execution.plan.maximum_consecutive_indeterminate_targets,
+    )
+
+
+def _schema2_snapshot(
+    manifest: RecordingSearchManifestV2,
+    plan: CoarseSamplingPlan,
+    execution: CoarseSamplingResult,
+) -> CoarseEvidenceSnapshot:
+    identity = CoarseSamplingIdentity(
+        manifest.investigation_id,
+        manifest.search_run_id,
+        manifest.investigation_id,
+        baseline_identity_for(manifest.confirmation),
+    )
+    if execution.identity != identity:
+        raise RecordingSearchManifestCorruptError
+    targets = tuple(
+        CoarseTargetEvidence(
+            requested_time_utc=sample.requested_time_utc,
+            status=sample.status,
+            probe_request_id=sample.probe_request_id,
+        )
+        for sample in execution.samples
+    )
+    return CoarseEvidenceSnapshot(
+        investigation_id=manifest.investigation_id,
+        search_run_id=manifest.search_run_id,
+        identity=identity,
+        plan=plan,
+        policy_version=manifest.policy.policy_version,
+        absence_confirmation_frames=manifest.policy.absence_confirmation_frames,
+        absence_cadence_seconds=manifest.policy.absence_cadence_seconds,
+        baseline_observation_id="unpublished",
+        manifest_digest=hashlib.sha256(manifest.canonical_json().encode("utf-8")).hexdigest(),
+        execution=execution,
+        targets=targets,
+        maximum_consecutive_indeterminate_targets=plan.maximum_consecutive_indeterminate_targets,
+    )
+
+
+def _interpret_incomplete_snapshot(
+    service: RecordingSearchService,
+    handle: RecordingSearchRunHandle,
+    execution: CoarseSamplingResult,
+) -> CoarseInterpretationResult:
+    try:
+        with service.a2_mutation(handle):
+            snapshot = _incomplete_snapshot(handle, execution)
+    except (RecordingSearchBaselineError, RecordingSearchNotFoundError):
+        return CoarseInterpretationResult(
+            status=CoarseInterpretationStatus.INTERRUPTED,
+            safe_reason="inactive_run_handle",
+        )
+    except (RecordingSearchManifestCorruptError, ValueError):
+        return CoarseInterpretationResult(
+            status=CoarseInterpretationStatus.CORRUPT,
+            safe_reason="authoritative_evidence_invalid",
+        )
+    return interpret_coarse_evidence(snapshot)
 
 
 def _status_manifest(
@@ -134,19 +248,23 @@ class RecordingSearchRunHandle:
 
     __slots__ = (
         "_baseline_bytes",
+        "_baseline_identity",
         "_classification_attempts",
         "_closed",
         "_investigation_id",
         "_mutation_lock",
+        "_phase6_confirmation_id",
         "_search_run_id",
         "_service",
     )
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - immutable handle identity is explicit.
         self,
         service: RecordingSearchService,
         investigation_id: str,
         search_run_id: str,
+        phase6_confirmation_id: str,
+        baseline_identity: str,
         baseline_bytes: bytes,
         mutation_lock: RLock,
     ) -> None:
@@ -154,6 +272,8 @@ class RecordingSearchRunHandle:
         self._service = service
         self._investigation_id = investigation_id
         self._search_run_id = search_run_id
+        self._phase6_confirmation_id = phase6_confirmation_id
+        self._baseline_identity = baseline_identity
         self._baseline_bytes = bytes(baseline_bytes)
         self._classification_attempts = ClassificationAttemptSlot()
         self._mutation_lock = mutation_lock
@@ -173,6 +293,16 @@ class RecordingSearchRunHandle:
     def baseline_bytes(self) -> bytes:
         """Return the immutable baseline bytes captured for this handle."""
         return self._baseline_bytes
+
+    @property
+    def phase6_confirmation_id(self) -> str:
+        """Return the Phase 6 package identity bound to the run."""
+        return self._phase6_confirmation_id
+
+    @property
+    def baseline_identity(self) -> str:
+        """Return the canonical identity of the validated baseline."""
+        return self._baseline_identity
 
     @property
     def classification_attempts(self) -> ClassificationAttemptSlot:
@@ -235,6 +365,82 @@ class RecordingSearchService:
     ) -> tuple[ProbeFrameRequestRecord, ...]:
         """Acquire ordered recording probes through the Phase 7A-2 boundary."""
         return acquire_targets(self, handle, requested_times)
+
+    def build_coarse_plan(self, handle: RecordingSearchRunHandle) -> CoarseSamplingPlan:
+        """Build the chronological Phase 7C-1 plan for the active run."""
+        with self.a2_mutation(handle):
+            manifest = self.repository.load(handle.investigation_id, handle.search_run_id)
+            if isinstance(manifest, RecordingSearchManifestV3):
+                policy = manifest.as_schema2().policy
+                state = manifest.state
+            else:
+                policy = manifest.policy
+                state = manifest.state
+            if state not in {RecordingSearchState.RUNNING, "RUNNING"}:
+                raise RecordingSearchBaselineError
+        return build_coarse_sampling_plan(policy)
+
+    def execute_coarse_sampling(self, handle: RecordingSearchRunHandle) -> CoarseSamplingResult:
+        """Execute the Phase 7C-1 plan through A2 acquisition and B4 classification."""
+        plan = self.build_coarse_plan(handle)
+        return CoarseSamplingExecutor(self).execute(handle, plan)
+
+    def interpret_coarse_sampling(
+        self, handle: RecordingSearchRunHandle, execution: CoarseSamplingResult
+    ) -> CoarseInterpretationResult:
+        """Recompute a non-persistent interpretation from one active run."""
+        if not execution.complete:
+            return _interpret_incomplete_snapshot(self, handle, execution)
+        try:
+            with self.a2_mutation(handle):
+                loaded = self._load_coarse_snapshot(handle, execution)
+        except (RecordingSearchBaselineError, RecordingSearchNotFoundError):
+            return CoarseInterpretationResult(
+                status=CoarseInterpretationStatus.INTERRUPTED,
+                safe_reason="inactive_run_handle",
+            )
+        except (
+            RecordingSearchManifestCorruptError,
+            RecordingSearchArtifactError,
+            ValueError,
+        ):
+            return CoarseInterpretationResult(
+                status=CoarseInterpretationStatus.CORRUPT,
+                safe_reason="authoritative_evidence_invalid",
+            )
+        if isinstance(loaded, CoarseInterpretationResult):
+            return loaded
+        return interpret_coarse_evidence(loaded)
+
+    def _load_coarse_snapshot(
+        self, handle: RecordingSearchRunHandle, execution: CoarseSamplingResult
+    ) -> CoarseEvidenceSnapshot | CoarseInterpretationResult:
+        manifest = self.repository.load(handle.investigation_id, handle.search_run_id)
+        if isinstance(manifest, RecordingSearchManifestV3):
+            if manifest.state != "RUNNING":
+                return CoarseInterpretationResult(
+                    status=CoarseInterpretationStatus.CORRUPT,
+                    safe_reason="lifecycle_state_invalid",
+                )
+            plan = build_coarse_sampling_plan(manifest.as_schema2().policy)
+            return capture_coarse_evidence_snapshot(self.repository, manifest, plan, execution)
+        if not isinstance(manifest, RecordingSearchManifestV2):
+            return CoarseInterpretationResult(
+                status=CoarseInterpretationStatus.CORRUPT,
+                safe_reason="unsupported_manifest_state",
+            )
+        if any(sample.status is CoarseSampleStatus.SUCCESS for sample in execution.samples):
+            return CoarseInterpretationResult(
+                status=CoarseInterpretationStatus.CORRUPT,
+                safe_reason="classification_evidence_missing",
+            )
+        plan = build_coarse_sampling_plan(manifest.policy)
+        if plan != execution.plan:
+            return CoarseInterpretationResult(
+                status=CoarseInterpretationStatus.CORRUPT,
+                safe_reason="coarse_plan_mismatch",
+            )
+        return _schema2_snapshot(manifest, plan, execution)
 
     def classify(
         self,
@@ -340,6 +546,8 @@ class RecordingSearchService:
                     self,
                     request.investigation_id,
                     run_id,
+                    request.investigation_id,
+                    baseline_identity_for(baseline[0]),
                     bytes(baseline[1]),
                     mutation_lock,
                 )

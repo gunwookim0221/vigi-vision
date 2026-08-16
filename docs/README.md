@@ -30,8 +30,10 @@ documentation route is added, removed, or relocated.
   for the current normative Phase 7 single-site MVP: one active local run,
   interruption and explicit restart, the required Phase 6 schema 3 integrity
   handoff, the implemented Phase 7A-1 local lifecycle/API, Phase 7A-2 canonical
-  multi-target acquisition boundaries, and the implemented Phase 7B single-probe
-  classifier/schema-3 observation boundary. Deterministic coarse/binary search,
+  multi-target acquisition boundaries, the implemented Phase 7B single-probe
+  classifier/schema-3 observation boundary, and the Phase 7C-1 deterministic
+  chronological coarse execution foundation and the non-persistent deterministic
+  transition interpretation handoff. Binary search,
   terminal disappearance persistence, and the Phase 8 request boundary remain
   planned. Read
   [design/object-presence-classification.md](design/object-presence-classification.md)

@@ -182,10 +182,9 @@ and mismatch-safe loading. Search uses
 one unique run ID and directory
 per attempt, rejects concurrent starts with one local OS-backed lock, marks
 abandoned nonterminal runs `INTERRUPTED`, and requires an explicit new run
-instead of automatic resume or takeover. The search samples recordings every
-five minutes, resolves absence support through one bounded multi-target decode,
-deduplicates canonical frames, and uses the production EfficientSAM-Ti mask plus
-aligned-ROI luma-NCC comparator before whole-second binary narrowing. Its compact
+instead of automatic resume or takeover. Phase 7C-1 now builds the deterministic
+policy-snapshot coarse grid and executes targets chronologically through the
+existing acquisition/classification boundaries. Its compact
 manifest persists the closed baseline/probe/alias union and full policy snapshot
 without inventing stable source identity. Advanced lease, fencing, takeover,
 resume, and crash-recovery analysis is preserved as non-normative future
@@ -201,9 +200,9 @@ The Phase 7B source-pixel comparison, deterministic mask/area/luma/NCC gates,
 closed RawComparison matrix, conservative three-state mapping, single-read byte
 admission, bounded execution, timeout/abandonment authority revocation,
 mutex-scoped revalidation, and atomic schema-3 observation publication are
-implemented. Phase 7C chronological coarse sampling, Phase 7D narrowing, Phase
-7E real-NVR validation, Phase 8 review media, and Phase 9 result UI remain
-unimplemented.
+implemented. Phase 7C-1 chronological execution and Phase 7C-2 non-persistent
+absence/transition interpretation are implemented; Phase 7D narrowing, Phase 7E
+real-NVR validation, Phase 8 review media, and Phase 9 result UI remain unimplemented.
 Absolute source-time
 calibration remains deferred; Phase 4C-2
 provides transient frontend-only selection of one
@@ -235,8 +234,8 @@ capability.
    slices: build on completed Phase 6C schema 3 compatibility, Phase 7A-1 local
    lifecycle, Phase 7A-2 canonical multi-target acquisition, and completed Phase
    7B production three-state classification/schema-3 observations; implement
-   Phase 7C-7E for
-   chronological coarse sampling and exhaustive support transitions; binary
+   Phase 7C-2-7E for
+   deterministic transition interpretation and exhaustive support transitions; binary
    narrowing, terminal persistence, and Phase 8 handoff; then real-NVR
    validation. Preserve published Phase 6 package immutability, reject duplicate
    starts, never reuse interrupted-run evidence, and defer Phase 8 media plus

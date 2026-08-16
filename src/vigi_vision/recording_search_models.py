@@ -177,7 +177,7 @@ class RecordingSearchCandidateInterval(BaseModel):
     last_present_requested_time_utc: CanonicalUtc
     first_absent_observation_id: StrictStr = Field(min_length=1)
     first_absent_requested_time_utc: CanonicalUtc
-    absence_support_observation_ids: tuple[StrictStr, StrictStr, StrictStr]
+    absence_support_observation_ids: tuple[StrictStr, ...] = Field(min_length=1)
 
 
 class RecordingSearchManifest(BaseModel):

@@ -73,8 +73,9 @@ The search policy is deliberately small:
    and persistence failure publish no RawComparison or observation and never
    masquerade as a visual state. The linked Phase 7B matrix requires the
    `effective_comparison_area` field and closes its overlap/area failure rows.
-5. Confirm absence with three distinct canonical frames in increasing normalized
-   decoded UTC order at one-second requested-target cadence. Each later observation alias
+5. Confirm absence with the configured positive number of distinct canonical
+   frames (default three) in increasing normalized decoded UTC order at the
+   configured requested-target cadence. Each later observation alias
    must resolve to an indexed canonical recording observation in the same
    manifest and never counts as evidence; an A2 request alias is not evidence at
    all.
@@ -123,7 +124,8 @@ rejects future observation/classifier/result fields and any foreign or
 incomplete child. Phase 7B schema-3 records require a successful request/frame
 pair; acquisition failures remain failed requests and cannot become
 observations. The later integrated search contract requires finite policy-valid
-PRESENT/ABSENT metrics, safe INDETERMINATE reasons, and exactly three distinct
+PRESENT/ABSENT metrics, safe INDETERMINATE reasons, and exactly the configured
+number of distinct
 ordered ABSENT frames for `FOUND`; those rules are not accepted by the A2 or
 Phase 7B loader.
 
@@ -218,8 +220,8 @@ narrowing instead of being hidden.
 ### Treat one absent observation as disappearance
 
 Rejected. One frame may reflect occlusion, poor image quality, compression, or
-an alias returned for several requested times. The MVP requires three distinct
-ordered absent frames.
+an alias returned for several requested times. The MVP requires the configured
+number of distinct ordered absent frames.
 
 ### Resume interrupted runs automatically
 

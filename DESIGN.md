@@ -195,7 +195,8 @@ or glass effects are used.
   schema-3 persistence, single-read byte admission, bounded execution,
   timeout/abandonment authority revocation, current-state revalidation, strict
   reopening, and atomic observation publication without adding transport or UI.
-  Phase 7C chronological coarse sampling, Phase 7D narrowing, Phase 7E
+  Phase 7C-1 chronological coarse execution and Phase 7C-2 non-persistent
+  transition interpretation are implemented. Phase 7D narrowing, Phase 7E
   validation, and the Phase 8/9 review workflow remain later work.
   Advanced recovery analysis is retained only as
   [non-normative future reference](docs/future/recording-search-resilience.md).

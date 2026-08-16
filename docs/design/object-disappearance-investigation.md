@@ -8,11 +8,13 @@ immutable confirmation. Phase 7A-1 implements its validated local run lifecycle
 and safe start/status boundary. Phase 7A-2 implements its acquisition-only
 schema-2 request/frame persistence and strict reopen boundary. Phase 7B
 implements bounded single-probe classification and immutable schema-3
-observation persistence and strict reopening. Phase 7C chronological coarse
-sampling is the next unimplemented slice; Phase 7D narrowing and terminal
-persistence remain unimplemented, and Phase 7E real-NVR policy validation is
-pending. Phase 8 and Phase 9 remain unimplemented. Phase 7B alone is not a
-completed disappearance-search workflow.**
+observation persistence and strict reopening. Phase 7C-1 implements the
+deterministic chronological coarse plan and sequential A2/B4 execution
+foundation. Phase 7C-2 implements only the pure non-persistent interpretation
+handoff; Phase 7D narrowing and terminal persistence, and Phase 7E real-NVR
+policy validation remain unimplemented.
+Phase 8 and Phase 9 remain unimplemented. Phase 7C-1 and 7C-2 together are not
+a completed disappearance-search workflow.**
 
 This document defines the first bounded use case for VIGI Vision's longer-term
 Event Discovery direction: a user investigates one selected object on one NVR
@@ -103,14 +105,18 @@ object-presence or disappearance classification.
 
 The repository does **not** currently provide:
 
-- chronological coarse-to-binary recording-search orchestration or disappearance outcomes;
+- coarse-to-binary search orchestration, terminal disappearance outcomes, or
+  public result transport;
 - Phase 8 boundary images, evidence timeline, or review clip; or
 - an operator transport or review surface for recording-search results.
 
 Phase 7B now provides a bounded single-probe classifier, deterministic outcomes,
 schema-3 observation publication, and strict reopening. Those outcomes describe
 one admitted probe only; they are not chronological disappearance-search
-conclusions. The provisional thresholds are policy inputs for deterministic
+conclusions. Phase 7C-1 now provides the deterministic chronological target plan
+and sequential A2/B4 execution foundation. Phase 7C-2 now provides only the
+strict, non-persistent transition interpretation handoff. The provisional
+thresholds are policy inputs for deterministic
 processing, not accuracy claims.
 
 The existing Phase 5 browser and Phase 6 backend already provide transient ROI
@@ -192,8 +198,9 @@ interval, always includes the search end, and looks for the first supported
 binary midpoints until the bracket is one second wide.
 
 A single `ABSENT` frame never proves disappearance. The absence rule requests
-one-second target cadence but requires those targets to resolve to three
-distinct canonical frames in strictly increasing normalized decoded UTC order;
+the configured target cadence (one second by default) but requires those targets
+to resolve to the configured number of distinct canonical frames (three by
+default) in strictly increasing normalized decoded UTC order;
 multiple
 targets that decode the same frame count once. `INDETERMINATE`, a
 recording gap, or contradictory ordering stops narrowing safely. The MVP does
@@ -289,8 +296,10 @@ provenance, and the bounded continuous multi-target acquisition contract. That
 acquisition slice writes one request record per requested target and one
 canonical frame record per distinct authoritative decoded source frame. Phase
 7B adds bounded single-probe classification and immutable schema-3 observations;
-Phase 7C and Phase 7D later add chronological coarse sampling, deterministic
-binary narrowing, terminal persistence, and a separate Phase 8 request. Existing
+Phase 7C-1 adds chronological coarse target execution and Phase 7C-2 adds the
+non-persistent transition interpretation handoff; Phase 7D later adds
+deterministic binary narrowing,
+terminal persistence, and a separate Phase 8 request. Existing
 single-target callers remain unchanged. Requested time never substitutes for
 stable authoritative decoded-frame provenance. Phase 7A-2
 now provides the decoder-boundary source-time capability that retains the
@@ -314,14 +323,16 @@ version after Phase 7E evidence.
 2. **Phase 6 (schema 2 and schema 3 compatibility implemented):** strict
    immutable confirmation publication, explicit legacy reconfirmation, and
    digest-bound typed Phase 7 loading.
-3. **Phase 7 (A-1, A-2, and 7B implemented):** single-host run lifecycle,
+3. **Phase 7 (A-1, A-2, 7B, 7C-1, and 7C-2 implemented):** single-host run lifecycle,
    interruption/new-run isolation, truthful baseline provenance, and
    acquisition-only request/frame records with canonical frame identities,
    run-relative JPEG publication, strict acquisition indexes, bounded
    single-probe three-state classification, and immutable schema-3 observations.
-   Phase 7C next adds five-minute coarse sampling. Phase 7D remains responsible
-   for one-second binary narrowing, terminal persistence, and the Phase 8
-   handoff; Phase 7E real-NVR policy validation remains pending.
+   Phase 7C-1 now adds the deterministic five-minute (policy-snapshot) coarse
+   target plan and sequential acquisition/classification execution, plus the
+   pure non-persistent transition interpretation handoff. Phase 7D remains
+   responsible for one-second binary narrowing, terminal persistence, and the
+   Phase 8 handoff; Phase 7E real-NVR policy validation remains pending.
 4. **Phase 8 (future):** boundary images, evidence timeline, and review video.
 5. **Phase 9 (future):** user-facing review and final human decision.
 6. **Later work:** object relocation, automatic detection, broader event types,
