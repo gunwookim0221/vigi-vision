@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import timedelta
 from itertools import pairwise
 from typing import TYPE_CHECKING
@@ -207,6 +209,16 @@ def _build_bracket(
         support_decoded_ordinals=tuple(_required_int(target.decoded_ordinal) for target in support),
         manifest_digest=snapshot.manifest_digest,
         last_present_is_baseline=last_present.is_baseline,
+        last_present_target_id=(
+            None
+            if last_present.is_baseline
+            else coarse_target_id(
+                snapshot.investigation_id,
+                snapshot.search_run_id,
+                last_present.requested_time_utc,
+            )
+        ),
+        support_group_id=_required_str(support[0].confirmation_run_id),
     )
 
 
@@ -226,6 +238,21 @@ def _required_int(value: int | None) -> int:
     if value is None:
         raise ValueError
     return value
+
+
+def _coarse_target_id(
+    investigation_id: str, search_run_id: str, requested_time_utc: datetime
+) -> str:
+    payload = {
+        "investigation_id": investigation_id,
+        "requested_time_utc": requested_time_utc.isoformat(),
+        "search_run_id": search_run_id,
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return f"coarse-target-{hashlib.sha256(serialized.encode('utf-8')).hexdigest()}"
+
+
+coarse_target_id = _coarse_target_id
 
 
 validate_execution = _validate_execution

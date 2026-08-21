@@ -33,10 +33,11 @@ documentation route is added, removed, or relocated.
   multi-target acquisition boundaries, the implemented Phase 7B single-probe
   classifier/schema-3 observation boundary, and the Phase 7C-1 deterministic
   chronological coarse execution foundation and the non-persistent deterministic
-  transition interpretation handoff. Phase 7D-1 is implemented locally but
-  remains uncommitted. Phase 7D-2 has a corrected terminal-result/schema-4
-  design awaiting follow-up review; its runtime, terminal disappearance
-  persistence, and the Phase 8 request boundary remain unimplemented. Read
+  transition interpretation handoff. Phase 7D-1 and D2-1's in-memory
+  narrowing history/identity reconstruction are implemented locally but remain
+  uncommitted. Phase 7D-2's D2-2 terminal-result/schema-4 design is approved;
+  its runtime, terminal disappearance persistence, and the Phase 8 request
+  boundary remain unimplemented. Read
   [design/object-presence-classification.md](design/object-presence-classification.md)
   for the normative Phase 7B single-probe input, geometry, classifier, outcome,
   schema-3 observation, publication, idempotency, and strict-reopen contract.

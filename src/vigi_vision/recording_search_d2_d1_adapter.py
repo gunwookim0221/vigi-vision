@@ -42,21 +42,24 @@ def adapt_d1_result(
     history: tuple[D2HistoryEntry, ...] | None = None,
 ) -> D1Result:
     """Convert D1 output without constructing history owned by D2-1."""
+    effective_history = getattr(result, "history", ()) if history is None else history
     try:
         if type(result.status) is not NarrowingStatus or not _shape_is_valid(result):
             return D1OperationalStop(OperationalStopReason.ADAPTER_UNKNOWN_RESULT, ())
         adapted: D1Result
         status_value = result.status.value
         if status_value == NarrowingStatus.READY.value:
-            adapted = _ready(result.narrowed_bracket, snapshot, history)
+            adapted = _ready(result.narrowed_bracket, snapshot, effective_history)
         elif status_value == NarrowingStatus.INDETERMINATE.value:
-            adapted = _indeterminate(result.safe_reason, snapshot, history)
+            adapted = _indeterminate(result.safe_reason, snapshot, effective_history)
         elif status_value == NarrowingStatus.INTERRUPTED.value:
             adapted = _interrupted(result.safe_reason, snapshot)
         elif status_value == NarrowingStatus.CORRUPT.value:
             adapted = _corrupt(result.safe_reason, snapshot)
         elif status_value == NarrowingStatus.INCOMPLETE.value:
-            adapted = _nonterminal(D1NonTerminalReason.INCOMPLETE_EVIDENCE, history, snapshot)
+            adapted = _nonterminal(
+                D1NonTerminalReason.INCOMPLETE_EVIDENCE, effective_history, snapshot
+            )
         elif status_value == NarrowingStatus.RESOURCE_EXHAUSTED.value:
             adapted = D1OperationalStop(
                 OperationalStopReason.CAPACITY_EXHAUSTED, target_ids(snapshot)

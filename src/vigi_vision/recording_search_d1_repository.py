@@ -18,12 +18,12 @@ from vigi_vision.recording_search_b2_models import RecordingSearchManifestV3
 from vigi_vision.recording_search_b2_validation import read_schema3_children
 from vigi_vision.recording_search_c1_models import CoarseSampleStatus
 from vigi_vision.recording_search_c1_planner import build_coarse_sampling_plan
+from vigi_vision.recording_search_d1_identity import source_bracket_identity
 from vigi_vision.recording_search_d1_models import (
     NarrowingBoundEvidence,
     NarrowingProbeEvidence,
     NarrowingState,
 )
-from vigi_vision.recording_search_d1_planner import source_bracket_identity
 from vigi_vision.recording_search_d1_support import NarrowingEvidenceStore, NarrowingHandle
 from vigi_vision.recording_search_models import RecordingSearchManifestCorruptError
 
@@ -372,6 +372,7 @@ class RepositoryNarrowingEvidenceStore(NarrowingEvidenceStore[NarrowingHandle]):
             alias_id=None if alias is None else alias.alias_id,
             canonical_frame_id=observation.canonical_frame_id,
             operation_id=request.operation_id,
+            classification_operation_id=observation.classification_operation_id,
             decode_session_id=frame.decode_session_id,
             decoded_frame_utc=frame.decoded_frame_utc,
             decoded_pts=frame.decoded_pts,

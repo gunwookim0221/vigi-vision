@@ -195,13 +195,15 @@ class _CoarseCandidateBracket:
     support_decoded_ordinals: tuple[int, ...]
     manifest_digest: str
     last_present_is_baseline: bool = False
+    last_present_target_id: str | None = None
+    support_group_id: str | None = None
 
     def __post_init__(self) -> None:
         _validate_bracket_identity(self)
         _validate_bracket_order(self)
 
 
-def _validate_bracket_identity(value: _CoarseCandidateBracket) -> None:
+def _validate_bracket_identity(value: _CoarseCandidateBracket) -> None:  # noqa: C901 - strict field contract
     _require_whole_utc(value.last_present_requested_time_utc)
     _require_whole_utc(value.first_absent_requested_time_utc)
     if value.last_present_requested_time_utc >= value.first_absent_requested_time_utc:
@@ -218,6 +220,8 @@ def _validate_bracket_identity(value: _CoarseCandidateBracket) -> None:
         ):
             raise ValueError
     elif not value.last_present_probe_request_id or not value.last_present_canonical_frame_id:
+        raise ValueError
+    if value.support_group_id is not None and not value.support_group_id:
         raise ValueError
     lengths = {
         len(value.support_target_times),
@@ -312,6 +316,8 @@ class CoarseCandidateBracket(_CoarseCandidateBracket):
     support_decoded_ordinals: tuple[int, ...]
     manifest_digest: str
     last_present_is_baseline: bool = False
+    last_present_target_id: str | None = None
+    support_group_id: str | None = None
 
 
 CoarseInterpretationResult = _CoarseInterpretationResult

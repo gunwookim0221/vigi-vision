@@ -15,6 +15,7 @@ from vigi_vision.recording_search_b4_models import (
 from vigi_vision.recording_search_c1_models import CoarseSampleStatus
 from vigi_vision.recording_search_c1_planner import CoarseSamplingIdentity
 from vigi_vision.recording_search_c2_models import CoarseCandidateBracket
+from vigi_vision.recording_search_d1_identity import source_bracket_identity
 from vigi_vision.recording_search_d1_models import (
     NarrowingBoundEvidence,
     NarrowingProbeEvidence,
@@ -102,7 +103,7 @@ class FakeStore:
         del handle, bracket, policy
 
     def load_state(self, handle: FakeHandle, bracket: CoarseCandidateBracket) -> NarrowingState:
-        del handle, bracket
+        del handle
         lower = NarrowingBoundEvidence(
             target_id="source-baseline",
             requested_time_utc=START,
@@ -123,7 +124,11 @@ class FakeStore:
             search_run_id=RUN,
             phase6_confirmation_id=INVESTIGATION,
             baseline_identity="baseline-test",
-            source_bracket_id="coarse-source",
+            source_bracket_id=(
+                source_bracket_identity(bracket)
+                if bracket.support_group_id is not None
+                else "coarse-source"
+            ),
             policy_version="recording-search-mvp-v1",
             lower_bound_utc=START,
             upper_bound_utc=START + timedelta(seconds=8),
@@ -199,6 +204,7 @@ def _evidence(
         observation_id=f"observation-{suffix}",
         canonical_frame_id=f"frame-{suffix}",
         operation_id="acquisition-op-test",
+        classification_operation_id=f"classification-op-{suffix}",
         decode_session_id="decode-session-test",
         decoded_frame_utc=stamp,
         decoded_pts=int(requested_time_utc.timestamp()),
@@ -227,7 +233,7 @@ def _bound(requested_time_utc: datetime) -> NarrowingBoundEvidence:
     )
 
 
-def _bracket() -> CoarseCandidateBracket:
+def _bracket(*, with_d1: bool = False) -> CoarseCandidateBracket:
     support = tuple(START + timedelta(seconds=8 + index) for index in range(3))
     return CoarseCandidateBracket(
         investigation_id=INVESTIGATION,
@@ -252,6 +258,8 @@ def _bracket() -> CoarseCandidateBracket:
         support_decoded_pts=(1, 2, 3),
         support_decoded_ordinals=(1, 2, 3),
         manifest_digest="a" * 64,
+        last_present_target_id="present-target" if with_d1 else None,
+        support_group_id="coarse-confirmation-test" if with_d1 else None,
     )
 
 
@@ -417,3 +425,62 @@ def test_internal_composition_wrapper_returns_narrowed_bracket() -> None:
 
     assert result.status is NarrowingStatus.READY
     assert result.narrowed_bracket is not None
+
+
+def test_d1_history_and_identities_are_attached_to_production_handoff() -> None:
+    service, _host, _store = _run(
+        {START + timedelta(seconds=value): ClassificationOutcome.PRESENT for value in range(1, 9)}
+    )
+
+    result = service.narrow(
+        FakeHandle(),
+        _bracket(with_d1=True),
+        default_policy(START, START + timedelta(seconds=20)),
+    )
+
+    assert result.status is NarrowingStatus.READY
+    assert result.history
+    assert result.narrowed_bracket is not None
+    assert result.narrowed_bracket.d1_input_bracket is not None
+    assert result.narrowed_bracket.source_bracket is not None
+    assert result.narrowed_bracket.history_digest is not None
+    assert result.narrowed_bracket.narrowed_bracket_id is not None
+
+
+def test_absent_transition_records_d1_support_identity_and_order() -> None:
+    states = {
+        START + timedelta(seconds=value): ClassificationOutcome.PRESENT for value in range(1, 9)
+    }
+    states.update(
+        {START + timedelta(seconds=value): ClassificationOutcome.ABSENT for value in (4, 5, 6)}
+    )
+    service, _host, _store = _run(states)
+
+    result = service.narrow(
+        FakeHandle(),
+        _bracket(with_d1=True),
+        default_policy(START, START + timedelta(seconds=20)),
+    )
+
+    assert result.status is NarrowingStatus.READY
+    absent = next(
+        entry for entry in result.history if entry.entry_kind.value == "ABSENT_TRANSITION"
+    )
+    assert absent.support_group_id is not None
+    assert absent.support_indexes == (0, 1, 2)
+
+
+def test_operational_stop_is_retained_without_visual_evidence() -> None:
+    service, host, _store = _run({START + timedelta(seconds=4): ClassificationOutcome.PRESENT})
+    host.fail_at = START + timedelta(seconds=4)
+
+    result = service.narrow(
+        FakeHandle(),
+        _bracket(with_d1=True),
+        default_policy(START, START + timedelta(seconds=20)),
+    )
+
+    assert result.status is NarrowingStatus.INDETERMINATE
+    assert result.history
+    assert result.history[0].entry_kind.value == "OPERATIONAL_STOP"
+    assert result.history[0].evidence == ()

@@ -11,10 +11,10 @@ from vigi_vision.recording_search_c1_planner import (
     build_coarse_sampling_plan,
 )
 from vigi_vision.recording_search_c2_models import CoarseCandidateBracket
+from vigi_vision.recording_search_d1_identity import source_bracket_identity
 from vigi_vision.recording_search_d1_planner import (
     maximum_narrowing_iterations,
     midpoint_target,
-    source_bracket_identity,
 )
 from vigi_vision.recording_search_models import RecordingSearchPolicy, default_policy
 

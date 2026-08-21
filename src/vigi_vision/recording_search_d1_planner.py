@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, TypeAlias
 
 from vigi_vision.recording_search_c2_models import CoarseCandidateBracket
+from vigi_vision.recording_search_d1_identity import source_bracket_identity
 from vigi_vision.recording_search_d1_models import (
     NarrowingState,
     NarrowingStopReason,
@@ -21,42 +22,6 @@ if TYPE_CHECKING:
 MidpointBounds: TypeAlias = CoarseCandidateBracket | NarrowingState
 
 _MIN_INTERVAL_SECONDS = 2
-
-
-def source_bracket_identity(bracket: CoarseCandidateBracket) -> str:
-    """Derive a stable identity from every authoritative coarse bracket field."""
-    payload = {
-        "investigation_id": bracket.investigation_id,
-        "search_run_id": bracket.search_run_id,
-        "identity": {
-            "investigation_id": bracket.identity.investigation_id,
-            "search_run_id": bracket.identity.search_run_id,
-            "phase6_confirmation_id": bracket.identity.phase6_confirmation_id,
-            "baseline_identity": bracket.identity.baseline_identity,
-        },
-        "plan_id": bracket.plan_id,
-        "policy_version": bracket.policy_version,
-        "baseline_observation_id": bracket.baseline_observation_id,
-        "last_present_observation_id": bracket.last_present_observation_id,
-        "last_present_probe_request_id": bracket.last_present_probe_request_id,
-        "last_present_canonical_frame_id": bracket.last_present_canonical_frame_id,
-        "last_present_requested_time_utc": bracket.last_present_requested_time_utc.isoformat(),
-        "first_absent_requested_time_utc": bracket.first_absent_requested_time_utc.isoformat(),
-        "support_target_times": [value.isoformat() for value in bracket.support_target_times],
-        "support_probe_request_ids": bracket.support_probe_request_ids,
-        "support_observation_ids": bracket.support_observation_ids,
-        "support_canonical_frame_ids": bracket.support_canonical_frame_ids,
-        "support_decode_session_id": bracket.support_decode_session_id,
-        "support_decoded_frame_times": [
-            value.isoformat() for value in bracket.support_decoded_frame_times
-        ],
-        "support_decoded_pts": bracket.support_decoded_pts,
-        "support_decoded_ordinals": bracket.support_decoded_ordinals,
-        "manifest_digest": bracket.manifest_digest,
-        "last_present_is_baseline": bracket.last_present_is_baseline,
-    }
-    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return f"coarse-bracket-{hashlib.sha256(serialized.encode('utf-8')).hexdigest()}"
 
 
 def midpoint_target(

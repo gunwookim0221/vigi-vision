@@ -13,9 +13,11 @@ chronological coarse target plan and sequential A2/B4 execution foundation;
 7C-2 implements the pure, non-persistent interpretation of that ordered
 evidence. Phase 7D-1 implements deterministic non-terminal binary narrowing
 through the existing A2/B4 boundaries and returns only an in-memory narrowed
-bracket. Phase 7D-2 now has a corrected terminal-result, schema-4 publication,
-strict-reopen, status, and Phase 8 handoff design awaiting follow-up review, but
-its runtime remains unimplemented. Phase 7E real-NVR validation and Phase 8 review-media generation
+bracket. D2-1 now implements the typed in-memory history, canonical identity
+producers, and strict reconstruction handoff for that bracket. D2-2 has the
+corrected terminal-result, schema-4 publication, strict-reopen, status, and
+Phase 8 handoff design, but its runtime remains unimplemented. Phase 7E
+real-NVR validation and Phase 8 review-media generation
 also remain unimplemented. The required Phase 6C
 schema 3 compatibility increment is complete.**
 
