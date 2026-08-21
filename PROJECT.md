@@ -201,8 +201,11 @@ closed RawComparison matrix, conservative three-state mapping, single-read byte
 admission, bounded execution, timeout/abandonment authority revocation,
 mutex-scoped revalidation, and atomic schema-3 observation publication are
 implemented. Phase 7C-1 chronological execution and Phase 7C-2 non-persistent
-absence/transition interpretation are implemented; Phase 7D narrowing, Phase 7E
-real-NVR validation, Phase 8 review media, and Phase 9 result UI remain unimplemented.
+absence/transition interpretation are implemented. Phase 7D-1 deterministic
+non-terminal binary narrowing is now implemented; Phase 7D-2 terminal
+persistence now has a corrected schema-4 result/publication/handoff design
+awaiting follow-up review but remains unimplemented. Phase 7E real-NVR validation, Phase 8 review media, and
+Phase 9 result UI also remain unimplemented.
 Absolute source-time
 calibration remains deferred; Phase 4C-2
 provides transient frontend-only selection of one
@@ -234,11 +237,11 @@ capability.
    slices: build on completed Phase 6C schema 3 compatibility, Phase 7A-1 local
    lifecycle, Phase 7A-2 canonical multi-target acquisition, and completed Phase
    7B production three-state classification/schema-3 observations; implement
-   Phase 7C-2-7E for
-   deterministic transition interpretation and exhaustive support transitions; binary
-   narrowing, terminal persistence, and Phase 8 handoff; then real-NVR
-   validation. Preserve published Phase 6 package immutability, reject duplicate
-   starts, never reuse interrupted-run evidence, and defer Phase 8 media plus
+   Phase 7D-2 for the corrected terminal schema/publication after follow-up
+   approval and the Phase 8 request
+   boundary, then Phase 7E real-NVR validation. Preserve published Phase 6
+   package immutability, reject duplicate starts, never reuse interrupted-run
+   evidence, and defer Phase 8 media plus
    Phase 9 judgment.
 
 ## High-level roadmap

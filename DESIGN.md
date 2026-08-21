@@ -196,8 +196,13 @@ or glass effects are used.
   timeout/abandonment authority revocation, current-state revalidation, strict
   reopening, and atomic observation publication without adding transport or UI.
   Phase 7C-1 chronological coarse execution and Phase 7C-2 non-persistent
-  transition interpretation are implemented. Phase 7D narrowing, Phase 7E
-  validation, and the Phase 8/9 review workflow remain later work.
+  transition interpretation are implemented. Phase 7D-1 now provides
+  deterministic non-terminal binary narrowing through the existing A2/B4
+  boundaries; it returns an in-memory narrowed bracket and does not publish
+  terminal state. Phase 7D-2 now has a corrected closed terminal-result,
+  schema-4 atomic-publication, strict-reopen, status, and Phase 8 request design
+  awaiting follow-up review; runtime implementation remains pending. Phase 7E validation and the Phase
+  8/9 review workflow remain later work.
   Advanced recovery analysis is retained only as
   [non-normative future reference](docs/future/recording-search-resilience.md).
 - Tap-assisted selection and the Phase 5-3C transient silhouette preview are

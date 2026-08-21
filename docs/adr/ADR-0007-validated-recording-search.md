@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted as the implementation decision for the Phase 7 MVP.
+Accepted as the implementation decision for the Phase 7 MVP. Phase 7D-2's
+corrected terminal schema and publication design is awaiting follow-up review;
+its runtime is not yet implemented.
 
 ## Context
 
@@ -93,7 +95,8 @@ The search policy is deliberately small:
    fabricated observation. Invalid baseline geometry, corrupt immutable input,
    manifest corruption, and unexpected storage or persistence failure remain
    fixed operational failures, not visual uncertainty.
-9. Persist the candidate interval and a separate Phase 8 handoff request.
+9. Persist a closed terminal result through the schema-4 contract below. Create
+   a separate Phase 8 handoff request only for a valid `FOUND` result.
 
 The compact run manifest stores schema 3 Phase 6 facts, the complete policy
 snapshot, and phase-appropriate strict indexes. Schema 1 remains the exact
@@ -116,6 +119,66 @@ adds one immutable confirmed-baseline record and ordered
 classification-operation, canonical-observation, and alias indexes, and still
 excludes terminal search and Phase 8 fields. Its atomic manifest replacement is
 the sole promotion and observation publication commit point.
+
+Phase 7D-2 introduces schema 4 because schema 3's closed lifecycle deliberately
+cannot represent a terminal search result. One active-handle operation may
+atomically replace a strictly reopened schema-3 `RUNNING` manifest with a
+complete schema-4 terminal successor. V4 preserves every schema-3 fact and
+ordered child index and adds exactly one immutable result from the closed union
+`FOUND | NOT_FOUND | INCONCLUSIVE`. Result kind remains separate from lifecycle:
+`INCONCLUSIVE` projects through the existing `INDETERMINATE` state, while
+`FAILED` and `INTERRUPTED` remain administrative states with no result.
+
+`FOUND` requires a policy-resolution requested-time interval bounded by a
+`PRESENT` baseline/probe and exactly the configured number of distinct ordered
+canonical `ABSENT` frames. `NOT_FOUND` requires the complete policy coarse grid
+through the search end, with every target resolving to a distinct canonical
+`PRESENT` observation and no gap, alias, uncertainty, or unsupported absence.
+`INCONCLUSIVE` requires strictly reopened visual inadequacy or contradictory
+visual evidence. Recording gaps, acquisition/decode/classifier failure,
+timeouts, stale/corrupt input, interruption, and resource exhaustion never
+become visual terminal results.
+
+Terminal result identity is SHA-256 over canonical JSON binding result kind,
+investigation/run, Phase 6 confirmation and baseline, complete policy and plan,
+source manifest revision, source C2/D1 bracket identities where applicable,
+requested interval/window, closed reason/limitations, and canonically ordered
+evidence references. Publication time and the derived Phase 8 review anchor are
+excluded. Exact duplicate evidence therefore reopens the same result without a
+write; a materially different proposal conflicts and cannot replace it.
+
+The active handle continuously holds the OS lock. D2 snapshots under the shared
+mutation mutex, performs only pure expensive validation outside it, then
+reacquires it to revalidate authority, schema-3 `RUNNING` state, complete
+manifest/evidence digest, Phase 6/probe JPEG integrity, and every indexed child.
+One same-directory atomic manifest replacement is the sole result/lifecycle
+commit point. Interruption and publication are ordered by that mutex; whichever
+commits first prevents the other. A concurrent child admission changes the
+source digest and makes the terminal candidate stale rather than being lost.
+
+For a closed-handle duplicate, the existing
+`LocalInvestigationLock(repository.lock_path(investigation_id))` is reacquired
+directly after validated `run_path(investigation_id, search_run_id)` resolution;
+the exact terminal manifest is then strictly reopened while that OS-backed lock
+is held. Schema 4 is a read-only duplicate/conflict branch and does not require
+an active handle. Schema 3 `RUNNING` still requires the exact active handle and
+its mutation mutex. The canonical order is validate IDs/run path -> existing OS
+lock -> service guard -> active mutation mutex only for a live schema-3
+mutation -> release guard -> release OS lock. Status and interruption use the
+same order and recheck the active map after acquiring the OS lock, so a live
+owner is never marked interrupted. D2-3 explicitly migrates the current
+guard-first `start` and unowned `status` paths, plus any interruption/cleanup
+path that can wait, so no code waits for the OS lock while holding the service
+guard. Active-handle removal quiesces the mutation mutex before removing its
+map entry. No new lock, registry, lease, takeover, or repository is introduced.
+
+Only strict schema-4 `FOUND` is eligible for an immutable deterministic
+`phase8-request.json`. Request creation happens after the result commit. Failure
+therefore leaves `FOUND` unchanged and permits an explicit idempotent handoff
+retry. Phase 8 revalidates the result and recording coverage and owns all review
+media; Phase 9 remains authoritative for human judgment. The complete field,
+strict-reopen, failure-matrix, status, and handoff contract is normative in the
+linked Phase 7 design.
 
 Strict A2 loading validates every request/frame/JPEG relationship, ownership,
 the durable operation-record index, stable canonical identity, source/replay
@@ -181,8 +244,8 @@ The exact Phase 7B classifier and schema-3 observation contract is in
 ## Deferred resilience analysis
 
 Lease expiry, fencing epochs, ownership-generation transfer, automatic
-recovery, compatible cross-process resume, multi-host coordination, complete
-crash-safe publication, strict full terminal manifests, and stable source
+recovery, compatible cross-process resume, multi-host coordination, generalized
+cross-process crash-safe publication, event-sourced manifests, and stable source
 binding are not Phase 7 MVP requirements.
 
 Existing analysis is preserved in
