@@ -206,8 +206,10 @@ non-terminal binary narrowing and the approved Phase 7D-2 D2-1 in-memory
 history, canonical identities, and strict reconstruction handoff are implemented
 locally. D2-2 now implements the pure terminal outcome interpreter, strict
 reconstruction, visual evidence digest binding, and in-memory result identities;
-schema-4 terminal persistence/publication remains unimplemented. Phase 7E real-NVR
-validation, Phase 8 review media, and Phase 9 result UI also remain unimplemented.
+D2-3 now adds canonical lock-ordered atomic schema-4 terminal publication,
+strict readback, duplicate reuse/conflict handling, and active-handle retirement.
+Phase 7E real-NVR validation, Phase 8 review media, and Phase 9 result UI also
+remain unimplemented.
 Absolute source-time
 calibration remains deferred; Phase 4C-2
 provides transient frontend-only selection of one

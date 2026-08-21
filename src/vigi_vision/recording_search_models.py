@@ -71,6 +71,14 @@ class RecordingSearchTransitionError(RecordingSearchError):
     """A lifecycle transition is invalid."""
 
 
+class RecordingSearchTerminalConflictError(RecordingSearchError):
+    """A different terminal proposal already committed."""
+
+
+class RecordingSearchPublicationInProgressError(RecordingSearchError):
+    """A terminal publication could not acquire the bounded run lock."""
+
+
 class RecordingSearchOutcome(str, Enum):
     """Outcome of a start request."""
 

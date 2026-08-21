@@ -200,9 +200,9 @@ or glass effects are used.
   deterministic non-terminal binary narrowing through the existing A2/B4
   boundaries; it returns an in-memory narrowed bracket and does not publish
   terminal state. Phase 7D-2 now has a corrected closed terminal-result,
-  schema-4 atomic-publication, strict-reopen, status, and Phase 8 request design
-  awaiting follow-up review; runtime implementation remains pending. Phase 7E validation and the Phase
-  8/9 review workflow remain later work.
+  schema-4 atomic-publication, strict-reopen, status, and Phase 8 request design;
+  D2-3 implements the atomic terminal publication and strict readback boundary.
+  Phase 7E validation and the Phase 8/9 review workflow remain later work.
   Advanced recovery analysis is retained only as
   [non-normative future reference](docs/future/recording-search-resilience.md).
 - Tap-assisted selection and the Phase 5-3C transient silhouette preview are

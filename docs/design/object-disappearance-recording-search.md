@@ -17,8 +17,8 @@ bracket. D2-1 now implements the typed in-memory history, canonical identity
 producers, and strict reconstruction handoff for that bracket. D2-2 now
 implements only the pure terminal-result models/interpreter, strict evidence
 reconstruction, visual snapshot digest binding, and in-memory result identity;
-schema-4 publication, strict reopen, status, and the Phase 8 handoff remain
-unimplemented. Phase 7E
+D2-3 now implements schema-4 publication, strict reopen/readback, and the
+canonical lock-order migration. The Phase 8 handoff remains unimplemented. Phase 7E
 real-NVR validation and Phase 8 review-media generation
 also remain unimplemented. The required Phase 6C
 schema 3 compatibility increment is complete.**
@@ -1337,8 +1337,8 @@ search persistence:
 ## Phase 7D-2 terminal result contract
 
 **Implementation status:** the pure D2-2 terminal interpreter and typed
-in-memory identities are implemented; schema-4 publication and persistence
-remain pending. D2 is the only boundary that may turn strictly reopened Phase 7
+in-memory identities are implemented; D2-3 now provides schema-4 publication,
+strict persistence/readback, and duplicate conflict handling. D2 is the only boundary that may turn strictly reopened Phase 7
 evidence into an authoritative terminal search result. It does not acquire or
 classify media, reinterpret arbitrary paths, or create Phase 8 media.
 
@@ -2993,8 +2993,9 @@ classification, filesystem write, manifest mutation, or schema change. Phase
 
 #### Phase 7D-2: terminal persistence
 
-- **Status:** D2-2 interpretation is implemented as a pure, non-persistent
-  increment; schema-4 persistence/publication remains pending.
+- **Status:** D2-2 interpretation is implemented as a pure increment; D2-3
+  implements schema-4 persistence/publication with strict readback and the
+  canonical lock order.
 - **Prerequisite:** retain reconstructible source-C2 and visually blocking
   evidence in the D1 in-memory handoff as specified above. Do not change D1
   midpoint or A2/B4 behavior.

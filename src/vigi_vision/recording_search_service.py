@@ -48,6 +48,12 @@ from vigi_vision.recording_search_c2_models import (
 from vigi_vision.recording_search_c2_service import capture_coarse_evidence_snapshot
 from vigi_vision.recording_search_d1_repository import RepositoryNarrowingEvidenceStore
 from vigi_vision.recording_search_d1_service import execute_binary_narrowing
+from vigi_vision.recording_search_d2_publication import (
+    TerminalPublicationOutcome,
+    TerminalPublicationResult,
+    build_schema4_successor,
+)
+from vigi_vision.recording_search_d2_publication_models import RecordingSearchManifestV4
 from vigi_vision.recording_search_lock import LocalInvestigationLock
 from vigi_vision.recording_search_models import (
     Phase8HandoffStatus,
@@ -59,8 +65,10 @@ from vigi_vision.recording_search_models import (
     RecordingSearchManifestCorruptError,
     RecordingSearchNotFoundError,
     RecordingSearchOutcome,
+    RecordingSearchPublicationInProgressError,
     RecordingSearchRequest,
     RecordingSearchState,
+    RecordingSearchTerminalConflictError,
     default_policy,
 )
 from vigi_vision.reference_frame_models import ReferenceFrameError, parse_reference_frame_request
@@ -81,8 +89,12 @@ if TYPE_CHECKING:
     from vigi_vision.recording_search_c1_planner import CoarseSamplingPlan
     from vigi_vision.recording_search_c2_models import CoarseCandidateBracket
     from vigi_vision.recording_search_d1_models import NarrowingResult
+    from vigi_vision.recording_search_d2_terminal_models import (
+        TerminalInputSnapshot,
+        TerminalResult,
+    )
     from vigi_vision.recording_search_models import RecordingSearchPolicy
-    from vigi_vision.recording_search_repository import RecordingSearchRepository
+    from vigi_vision.recording_search_repository import RecordingSearchRepository, SearchManifest
 
 
 def _new_run_id() -> str:
@@ -195,6 +207,23 @@ def _status_manifest(
             return value.as_status_manifest()
         case RecordingSearchManifest() | RecordingSearchManifestV2():
             return value
+
+
+def _status_value(
+    value: RecordingSearchManifest
+    | RecordingSearchManifestV2
+    | RecordingSearchManifestV3
+    | RecordingSearchManifestV4,
+) -> RecordingSearchManifest | RecordingSearchManifestV2:
+    if isinstance(value, RecordingSearchManifestV4):
+        return value.as_schema3().as_status_manifest()
+    return _status_manifest(value)
+
+
+def _active_status(value: SearchManifest) -> RecordingSearchManifest | RecordingSearchManifestV2:
+    if isinstance(value, RecordingSearchManifestV4):
+        raise RecordingSearchManifestCorruptError
+    return _status_manifest(value)
 
 
 class ConfirmationLoader(Protocol):
@@ -329,10 +358,34 @@ class RecordingSearchRunHandle:
             self._closed = True
             self._service.release_handle(self)
 
+    def retire(self) -> None:
+        """Retire this handle after an irreversible terminal publication."""
+        self._closed = True
+
     @property
     def closed(self) -> bool:
         """Return whether this handle has released its active ownership."""
         return self._closed
+
+
+@dataclass(frozen=True, slots=True)
+class _D1RepositoryView:
+    repository: RecordingSearchRepository
+
+    @property
+    def root(self) -> Path:
+        return self.repository.root
+
+    def run_path(self, investigation_id: str, search_run_id: str) -> Path:
+        return self.repository.run_path(investigation_id, search_run_id)
+
+    def load(
+        self, investigation_id: str, search_run_id: str
+    ) -> RecordingSearchManifest | RecordingSearchManifestV2 | RecordingSearchManifestV3:
+        manifest = self.repository.load(investigation_id, search_run_id)
+        if isinstance(manifest, RecordingSearchManifestV4):
+            raise RecordingSearchManifestCorruptError
+        return manifest
 
 
 @dataclass(slots=True)
@@ -378,6 +431,8 @@ class RecordingSearchService:
             if isinstance(manifest, RecordingSearchManifestV3):
                 policy = manifest.as_schema2().policy
                 state = manifest.state
+            elif isinstance(manifest, RecordingSearchManifestV4):
+                raise RecordingSearchBaselineError
             else:
                 policy = manifest.policy
                 state = manifest.state
@@ -397,7 +452,7 @@ class RecordingSearchService:
         policy: RecordingSearchPolicy,
     ) -> NarrowingResult:
         """Run D1 through this service's active handle, A2/B4 host, and repository."""
-        evidence_store = RepositoryNarrowingEvidenceStore(self.repository)
+        evidence_store = RepositoryNarrowingEvidenceStore(_D1RepositoryView(self.repository))
         return execute_binary_narrowing(self, handle, bracket, policy, evidence_store)
 
     def interpret_coarse_sampling(
@@ -470,6 +525,93 @@ class RecordingSearchService:
             )
         return service.classify(handle, request)
 
+    def publish_terminal(
+        self,
+        handle: RecordingSearchRunHandle,
+        result: TerminalResult,
+        snapshot: TerminalInputSnapshot,
+    ) -> TerminalPublicationResult:
+        """Publish one validated D2-2 result through the Schema 4 boundary."""
+        run_path = self.repository.run_path(handle.investigation_id, handle.search_run_id)
+        lock, owns_lock = self._publication_lock(handle)
+        try:
+            current = self.repository.load(
+                handle.investigation_id, handle.search_run_id, include_terminal=True
+            )
+            if isinstance(current, RecordingSearchManifestV4):
+                if current.terminal_result.result_id != result.result_id:
+                    raise RecordingSearchTerminalConflictError
+                return TerminalPublicationResult(
+                    manifest=current,
+                    result=current.terminal_result,
+                    outcome=TerminalPublicationOutcome.REUSED,
+                )
+            if not isinstance(current, RecordingSearchManifestV3):
+                raise RecordingSearchManifestCorruptError
+            with self._guard:
+                active = self._active_for_publication(handle)
+                with active.mutation_lock:
+                    latest = self.repository.load_manifest_for_commit(
+                        handle.investigation_id, handle.search_run_id
+                    )
+                    if not isinstance(latest, RecordingSearchManifestV3) or latest != current:
+                        raise RecordingSearchBaselineError
+                    successor = build_schema4_successor(
+                        current, snapshot, result, _canonical_now(self.now_utc())
+                    )
+                    self.repository.write_schema4_manifest(successor, run_path)
+                    removed = self._active.pop(handle.investigation_id, None)
+                    if removed is not active:
+                        raise RecordingSearchBaselineError
+                    handle.retire()
+                    committed = self.repository.load(
+                        handle.investigation_id, handle.search_run_id, include_terminal=True
+                    )
+                    if not isinstance(committed, RecordingSearchManifestV4):
+                        raise RecordingSearchManifestCorruptError
+                    if committed.terminal_result.result_id != result.result_id:
+                        raise RecordingSearchManifestCorruptError
+            return TerminalPublicationResult(
+                manifest=committed,
+                result=committed.terminal_result,
+                outcome=TerminalPublicationOutcome.CREATED,
+            )
+        finally:
+            if owns_lock or handle.closed:
+                lock.release()
+
+    def _publication_lock(
+        self, handle: RecordingSearchRunHandle
+    ) -> tuple[LocalInvestigationLock, bool]:
+        with self._guard:
+            active = self._active.get(handle.investigation_id)
+            live = (
+                not handle.closed
+                and active is not None
+                and active.run_id == handle.search_run_id
+                and active.os_lock.held
+            )
+        lock = (
+            active.os_lock
+            if live and active is not None
+            else LocalInvestigationLock(self.repository.lock_path(handle.investigation_id))
+        )
+        owns_lock = not live
+        if owns_lock and not lock.try_acquire(self.lock_timeout_seconds):
+            raise RecordingSearchPublicationInProgressError
+        return lock, owns_lock
+
+    def _active_for_publication(self, handle: RecordingSearchRunHandle) -> _ActiveRun:
+        active = self._active.get(handle.investigation_id)
+        if (
+            handle.closed
+            or active is None
+            or active.run_id != handle.search_run_id
+            or not active.os_lock.held
+        ):
+            raise RecordingSearchBaselineError
+        return active
+
     @contextmanager
     def a2_mutation(self, handle: A2HandleBoundary) -> Generator[None, None, None]:
         """Hold the active handle guard and shared A2 mutation mutex."""
@@ -501,110 +643,134 @@ class RecordingSearchService:
     def start(self, request: RecordingSearchRequest) -> RecordingSearchStartResult:
         """Validate the baseline and create one active run."""
         baseline, end_utc = self._validate_baseline(request)
-        with self._guard:
-            active = self._active.get(request.investigation_id)
+        lock = LocalInvestigationLock(self.repository.lock_path(request.investigation_id))
+        try:
+            if not lock.try_acquire(self.lock_timeout_seconds):
+                with self._guard:
+                    active = self._active.get(request.investigation_id)
+                if active is not None:
+                    manifest = _active_status(
+                        self.repository.load(request.investigation_id, active.run_id)
+                    )
+                    return RecordingSearchStartResult(
+                        manifest=manifest,
+                        outcome=RecordingSearchOutcome.ALREADY_RUNNING,
+                        baseline_bytes=bytes(baseline[1]),
+                    )
+                existing = self.repository.latest_nonterminal(request.investigation_id)
+                if existing is None:
+                    _raise_baseline()
+                return RecordingSearchStartResult(
+                    manifest=_status_manifest(existing),
+                    outcome=RecordingSearchOutcome.ALREADY_RUNNING,
+                    baseline_bytes=bytes(baseline[1]),
+                )
+            with self._guard:
+                active = self._active.get(request.investigation_id)
             if active is not None:
-                manifest = _status_manifest(
+                manifest = _active_status(
                     self.repository.load(request.investigation_id, active.run_id)
                 )
+                lock.release()
                 return RecordingSearchStartResult(
                     manifest=manifest,
                     outcome=RecordingSearchOutcome.ALREADY_RUNNING,
                     baseline_bytes=bytes(baseline[1]),
                 )
-            lock = LocalInvestigationLock(self.repository.lock_path(request.investigation_id))
-            try:
-                if not lock.try_acquire(self.lock_timeout_seconds):
-                    existing = self.repository.latest_nonterminal(request.investigation_id)
-                    if existing is None:
-                        _raise_baseline()
-                    return RecordingSearchStartResult(
-                        manifest=_status_manifest(existing),
-                        outcome=RecordingSearchOutcome.ALREADY_RUNNING,
-                        baseline_bytes=bytes(baseline[1]),
-                    )
-                previous = self.repository.latest_nonterminal(request.investigation_id)
-                if previous is not None:
-                    _ = self.repository.transition(
-                        request.investigation_id,
-                        previous.search_run_id,
-                        RecordingSearchState.INTERRUPTED,
-                        "process_lock_released",
-                    )
-                run_id = self._new_unique_run_id(request.investigation_id)
-                created = _canonical_now(self.now_utc())
-                manifest = RecordingSearchManifest(
-                    schema_version=1,
-                    investigation_id=request.investigation_id,
-                    search_run_id=run_id,
-                    state=RecordingSearchState.PENDING,
-                    created_at_utc=created,
-                    started_at_utc=None,
-                    completed_at_utc=None,
-                    confirmation=baseline[0],
-                    policy=default_policy(baseline[0].reference_requested_time_utc, end_utc),
-                    canonical_observation_ids=(),
-                    target_alias_ids=(),
-                    candidate_interval=None,
-                    failure_reason=None,
-                    phase8_handoff_status=Phase8HandoffStatus.NOT_APPLICABLE,
-                    phase8_failure_reason=None,
-                )
-                _ = self.repository.create(manifest)
-                running = _status_manifest(
-                    self.repository.transition(
-                        request.investigation_id, run_id, RecordingSearchState.RUNNING
-                    )
-                )
-                mutation_lock = RLock()
-                handle = RecordingSearchRunHandle(
-                    self,
+            previous = self.repository.latest_nonterminal(request.investigation_id)
+            if previous is not None:
+                _ = self.repository.transition(
                     request.investigation_id,
-                    run_id,
-                    request.investigation_id,
-                    baseline_identity_for(baseline[0]),
-                    bytes(baseline[1]),
-                    mutation_lock,
+                    previous.search_run_id,
+                    RecordingSearchState.INTERRUPTED,
+                    "process_lock_released",
                 )
+            run_id = self._new_unique_run_id(request.investigation_id)
+            created = _canonical_now(self.now_utc())
+            manifest = RecordingSearchManifest(
+                schema_version=1,
+                investigation_id=request.investigation_id,
+                search_run_id=run_id,
+                state=RecordingSearchState.PENDING,
+                created_at_utc=created,
+                started_at_utc=None,
+                completed_at_utc=None,
+                confirmation=baseline[0],
+                policy=default_policy(baseline[0].reference_requested_time_utc, end_utc),
+                canonical_observation_ids=(),
+                target_alias_ids=(),
+                candidate_interval=None,
+                failure_reason=None,
+                phase8_handoff_status=Phase8HandoffStatus.NOT_APPLICABLE,
+                phase8_failure_reason=None,
+            )
+            _ = self.repository.create(manifest)
+            running = _status_manifest(
+                self.repository.transition(
+                    request.investigation_id, run_id, RecordingSearchState.RUNNING
+                )
+            )
+            mutation_lock = RLock()
+            handle = RecordingSearchRunHandle(
+                self,
+                request.investigation_id,
+                run_id,
+                request.investigation_id,
+                baseline_identity_for(baseline[0]),
+                bytes(baseline[1]),
+                mutation_lock,
+            )
+            with self._guard:
                 self._active[request.investigation_id] = _ActiveRun(run_id, lock, mutation_lock)
-                return RecordingSearchStartResult(
-                    manifest=running,
-                    outcome=RecordingSearchOutcome.STARTED,
-                    baseline_bytes=bytes(baseline[1]),
-                    run_handle=handle,
-                )
-            except Exception:
-                lock.release()
-                raise
+            return RecordingSearchStartResult(
+                manifest=running,
+                outcome=RecordingSearchOutcome.STARTED,
+                baseline_bytes=bytes(baseline[1]),
+                run_handle=handle,
+            )
+        except Exception:
+            lock.release()
+            raise
 
     def status(
         self, investigation_id: str, search_run_id: str
     ) -> RecordingSearchManifest | RecordingSearchManifestV2:
         """Return persisted status and reconcile an unowned active run."""
-        with self._guard:
-            active = self._active.get(investigation_id)
-            if active is not None:
-                if active.run_id != search_run_id:
-                    return _status_manifest(self.repository.load(investigation_id, search_run_id))
-                return _status_manifest(self.repository.load(investigation_id, search_run_id))
-            lock = LocalInvestigationLock(self.repository.lock_path(investigation_id))
-            try:
-                if not lock.try_acquire(self.lock_timeout_seconds):
-                    return _status_manifest(self.repository.load(investigation_id, search_run_id))
-                persisted = self.repository.load(investigation_id, search_run_id)
-                manifest = _status_manifest(persisted)
-                if manifest.state in (RecordingSearchState.PENDING, RecordingSearchState.RUNNING):
-                    return _status_manifest(
-                        self.repository.transition(
-                            investigation_id,
-                            search_run_id,
-                            RecordingSearchState.INTERRUPTED,
-                            "process_lock_released",
-                        )
+        _ = self.repository.run_path(investigation_id, search_run_id)
+        lock = LocalInvestigationLock(self.repository.lock_path(investigation_id))
+        try:
+            if not lock.try_acquire(self.lock_timeout_seconds):
+                with self._guard:
+                    active = self._active.get(investigation_id)
+                if active is not None and active.run_id == search_run_id:
+                    return _status_value(
+                        self.repository.load(investigation_id, search_run_id, include_terminal=True)
                     )
-                return manifest
-            finally:
-                lock.release()
+                return _status_value(
+                    self.repository.load(investigation_id, search_run_id, include_terminal=True)
+                )
+            with self._guard:
+                active = self._active.get(investigation_id)
+            if active is not None and active.run_id == search_run_id:
+                return _status_value(
+                    self.repository.load(investigation_id, search_run_id, include_terminal=True)
+                )
+            persisted = self.repository.load(investigation_id, search_run_id, include_terminal=True)
+            if isinstance(persisted, RecordingSearchManifestV4):
+                return _status_value(persisted)
+            manifest = _status_value(persisted)
+            if manifest.state in (RecordingSearchState.PENDING, RecordingSearchState.RUNNING):
+                return _status_manifest(
+                    self.repository.transition(
+                        investigation_id,
+                        search_run_id,
+                        RecordingSearchState.INTERRUPTED,
+                        "process_lock_released",
+                    )
+                )
+            return manifest
+        finally:
+            lock.release()
 
     def close(self) -> None:
         """Release all locks owned by this process instance."""
@@ -612,9 +778,14 @@ class RecordingSearchService:
             self.classification_service.close()
         with self._guard:
             active = tuple(self._active.values())
-            self._active.clear()
             for item in active:
-                item.os_lock.release()
+                with item.mutation_lock:
+                    for investigation_id, current in tuple(self._active.items()):
+                        if current is item:
+                            del self._active[investigation_id]
+                            break
+        for item in active:
+            item.os_lock.release()
 
     def mark_terminal_for_handle(
         self,
@@ -623,13 +794,15 @@ class RecordingSearchService:
         failure_reason: str,
     ) -> RecordingSearchManifest | RecordingSearchManifestV2:
         """Persist a terminal state for a process-owned handle."""
+        lock_to_release: LocalInvestigationLock | None = None
+        persisted: RecordingSearchManifest | RecordingSearchManifestV2
         with self._guard:
             active = self._active.get(handle.investigation_id)
             if active is None or active.run_id != handle.search_run_id:
                 raise RecordingSearchBaselineError
             with active.mutation_lock:
                 try:
-                    return _status_manifest(
+                    persisted = _status_manifest(
                         self.repository.transition(
                             handle.investigation_id,
                             handle.search_run_id,
@@ -638,18 +811,22 @@ class RecordingSearchService:
                         )
                     )
                 finally:
-                    _ = self._active.pop(handle.investigation_id, None)
-                    active.os_lock.release()
+                    del self._active[handle.investigation_id]
+                    lock_to_release = active.os_lock
+        lock_to_release.release()
+        return persisted
 
     def release_handle(self, handle: RecordingSearchRunHandle) -> None:
         """Release a process-owned handle without publishing completion."""
+        lock_to_release: LocalInvestigationLock | None = None
         with self._guard:
             active = self._active.get(handle.investigation_id)
             if active is None or active.run_id != handle.search_run_id:
                 return
             with active.mutation_lock:
-                _ = self._active.pop(handle.investigation_id, None)
-                active.os_lock.release()
+                del self._active[handle.investigation_id]
+                lock_to_release = active.os_lock
+        lock_to_release.release()
 
     def _validate_baseline(
         self, request: RecordingSearchRequest
