@@ -204,8 +204,9 @@ implemented. Phase 7C-1 chronological execution and Phase 7C-2 non-persistent
 absence/transition interpretation are implemented. Phase 7D-1 deterministic
 non-terminal binary narrowing and the approved Phase 7D-2 D2-1 in-memory
 history, canonical identities, and strict reconstruction handoff are implemented
-locally; D2-2 terminal persistence now has a corrected schema-4
-result/publication/handoff design but remains unimplemented. Phase 7E real-NVR
+locally. D2-2 now implements the pure terminal outcome interpreter, strict
+reconstruction, visual evidence digest binding, and in-memory result identities;
+schema-4 terminal persistence/publication remains unimplemented. Phase 7E real-NVR
 validation, Phase 8 review media, and Phase 9 result UI also remain unimplemented.
 Absolute source-time
 calibration remains deferred; Phase 4C-2

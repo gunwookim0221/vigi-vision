@@ -12,9 +12,10 @@ observation persistence and strict reopening. Phase 7C-1 implements the
 deterministic chronological coarse plan and sequential A2/B4 execution
 foundation. Phase 7C-2 implements only the pure non-persistent interpretation
 handoff. Phase 7D-1 now implements deterministic non-terminal binary narrowing
-through the existing A2/B4 boundaries. Phase 7D-2 now has a corrected closed
-terminal-result/schema-4 design awaiting follow-up review, but its runtime and Phase 7E real-NVR policy
-validation remain unimplemented.
+through the existing A2/B4 boundaries. Phase 7D-2 D2-2 now implements the pure
+terminal outcome interpreter, strict reconstruction, and in-memory result
+identities; schema-4 persistence remains unimplemented. Phase 7E real-NVR policy
+validation remains unimplemented.
 Phase 8 and Phase 9 remain unimplemented. Phase 7C-1 and 7C-2 together are not
 a completed disappearance-search workflow.**
 
@@ -300,9 +301,10 @@ canonical frame record per distinct authoritative decoded source frame. Phase
 Phase 7C-1 adds chronological coarse target execution and Phase 7C-2 adds the
 non-persistent transition interpretation handoff. Phase 7D-1 now adds
 deterministic non-terminal binary narrowing and a typed in-memory bracket;
-Phase 7D-2's corrected design, pending follow-up review, later adds a strict
-schema-4 `FOUND`, `NOT_FOUND`, or `INCONCLUSIVE` result and a separate Phase 8
-request for `FOUND` only. Existing
+Phase 7D-2 D2-2 now adds pure terminal interpretation and in-memory result
+identity construction. Later D2 increments add strict schema-4 `FOUND`,
+`NOT_FOUND`, or `INCONCLUSIVE` persistence and a separate Phase 8 request for
+`FOUND` only. Existing
 single-target callers remain unchanged. Requested time never substitutes for
 stable authoritative decoded-frame provenance. Phase 7A-2
 now provides the decoder-boundary source-time capability that retains the
@@ -335,9 +337,9 @@ version after Phase 7E evidence.
    target plan and sequential acquisition/classification execution, plus the
    pure non-persistent transition interpretation handoff, and deterministic
    non-terminal binary narrowing to a one-second in-memory bracket. Phase 7D-2
-   has a corrected terminal persistence and Phase 8 handoff contract awaiting
-   follow-up review, but remains unimplemented; Phase 7E real-NVR policy
-   validation remains pending.
+   D2-2 now provides pure terminal interpretation and identity construction;
+   terminal persistence and the Phase 8 handoff remain pending. Phase 7E
+   real-NVR policy validation remains pending.
 4. **Phase 8 (future):** boundary images, evidence timeline, and review video.
 5. **Phase 9 (future):** user-facing review and final human decision.
 6. **Later work:** object relocation, automatic detection, broader event types,

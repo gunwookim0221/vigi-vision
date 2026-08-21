@@ -14,9 +14,11 @@ chronological coarse target plan and sequential A2/B4 execution foundation;
 evidence. Phase 7D-1 implements deterministic non-terminal binary narrowing
 through the existing A2/B4 boundaries and returns only an in-memory narrowed
 bracket. D2-1 now implements the typed in-memory history, canonical identity
-producers, and strict reconstruction handoff for that bracket. D2-2 has the
-corrected terminal-result, schema-4 publication, strict-reopen, status, and
-Phase 8 handoff design, but its runtime remains unimplemented. Phase 7E
+producers, and strict reconstruction handoff for that bracket. D2-2 now
+implements only the pure terminal-result models/interpreter, strict evidence
+reconstruction, visual snapshot digest binding, and in-memory result identity;
+schema-4 publication, strict reopen, status, and the Phase 8 handoff remain
+unimplemented. Phase 7E
 real-NVR validation and Phase 8 review-media generation
 also remain unimplemented. The required Phase 6C
 schema 3 compatibility increment is complete.**
@@ -1334,8 +1336,9 @@ search persistence:
 
 ## Phase 7D-2 terminal result contract
 
-**Implementation status:** corrected design awaiting follow-up review; runtime
-and tests are not yet implemented. D2 is the only boundary that may turn strictly reopened Phase 7
+**Implementation status:** the pure D2-2 terminal interpreter and typed
+in-memory identities are implemented; schema-4 publication and persistence
+remain pending. D2 is the only boundary that may turn strictly reopened Phase 7
 evidence into an authoritative terminal search result. It does not acquire or
 classify media, reinterpret arbitrary paths, or create Phase 8 media.
 
@@ -2990,7 +2993,8 @@ classification, filesystem write, manifest mutation, or schema change. Phase
 
 #### Phase 7D-2: terminal persistence
 
-- **Status:** corrected design awaiting follow-up review; implementation pending.
+- **Status:** D2-2 interpretation is implemented as a pure, non-persistent
+  increment; schema-4 persistence/publication remains pending.
 - **Prerequisite:** retain reconstructible source-C2 and visually blocking
   evidence in the D1 in-memory handoff as specified above. Do not change D1
   midpoint or A2/B4 behavior.
