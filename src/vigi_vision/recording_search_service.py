@@ -46,6 +46,8 @@ from vigi_vision.recording_search_c2_models import (
     CoarseTargetEvidence,
 )
 from vigi_vision.recording_search_c2_service import capture_coarse_evidence_snapshot
+from vigi_vision.recording_search_d1_repository import RepositoryNarrowingEvidenceStore
+from vigi_vision.recording_search_d1_service import execute_binary_narrowing
 from vigi_vision.recording_search_lock import LocalInvestigationLock
 from vigi_vision.recording_search_models import (
     Phase8HandoffStatus,
@@ -77,6 +79,9 @@ if TYPE_CHECKING:
     from vigi_vision.recording_search_b4_service import ObservationClassificationService
     from vigi_vision.recording_search_c1_models import CoarseSamplingResult
     from vigi_vision.recording_search_c1_planner import CoarseSamplingPlan
+    from vigi_vision.recording_search_c2_models import CoarseCandidateBracket
+    from vigi_vision.recording_search_d1_models import NarrowingResult
+    from vigi_vision.recording_search_models import RecordingSearchPolicy
     from vigi_vision.recording_search_repository import RecordingSearchRepository
 
 
@@ -384,6 +389,16 @@ class RecordingSearchService:
         """Execute the Phase 7C-1 plan through A2 acquisition and B4 classification."""
         plan = self.build_coarse_plan(handle)
         return CoarseSamplingExecutor(self).execute(handle, plan)
+
+    def narrow_binary(
+        self,
+        handle: RecordingSearchRunHandle,
+        bracket: CoarseCandidateBracket,
+        policy: RecordingSearchPolicy,
+    ) -> NarrowingResult:
+        """Run D1 through this service's active handle, A2/B4 host, and repository."""
+        evidence_store = RepositoryNarrowingEvidenceStore(self.repository)
+        return execute_binary_narrowing(self, handle, bracket, policy, evidence_store)
 
     def interpret_coarse_sampling(
         self, handle: RecordingSearchRunHandle, execution: CoarseSamplingResult

@@ -285,5 +285,33 @@ def _require_whole_utc(value: datetime) -> None:
 CoarseInterpretationStatus = _CoarseInterpretationStatus
 CoarseTargetEvidence = _CoarseTargetEvidence
 CoarseEvidenceSnapshot = _CoarseEvidenceSnapshot
-CoarseCandidateBracket = _CoarseCandidateBracket
+
+
+@dataclass(frozen=True, slots=True)
+class CoarseCandidateBracket(_CoarseCandidateBracket):
+    """Public typed view of the immutable C2 candidate bracket."""
+
+    investigation_id: str
+    search_run_id: str
+    identity: CoarseSamplingIdentity
+    plan_id: str
+    policy_version: str
+    baseline_observation_id: str
+    last_present_observation_id: str
+    last_present_probe_request_id: str | None
+    last_present_canonical_frame_id: str | None
+    last_present_requested_time_utc: datetime
+    first_absent_requested_time_utc: datetime
+    support_target_times: tuple[datetime, ...]
+    support_probe_request_ids: tuple[str, ...]
+    support_observation_ids: tuple[str, ...]
+    support_canonical_frame_ids: tuple[str, ...]
+    support_decode_session_id: str
+    support_decoded_frame_times: tuple[datetime, ...]
+    support_decoded_pts: tuple[int, ...]
+    support_decoded_ordinals: tuple[int, ...]
+    manifest_digest: str
+    last_present_is_baseline: bool = False
+
+
 CoarseInterpretationResult = _CoarseInterpretationResult
