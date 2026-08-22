@@ -496,7 +496,7 @@ class RecordingSearchService:
         evidence_store = RepositoryNarrowingEvidenceStore(_D1RepositoryView(self.repository))
         return execute_binary_narrowing(self, handle, bracket, policy, evidence_store)
 
-    def terminalize(  # noqa: C901, PLR0911 - bounded orchestration boundary
+    def terminalize(  # noqa: C901, PLR0911, PLR0912, PLR0915 - bounded orchestration boundary
         self,
         handle: RecordingSearchRunHandle,
         *,
@@ -538,7 +538,7 @@ class RecordingSearchService:
                     manifest,
                     plan,
                     execution,
-                    narrowing=narrowing_result,
+                    narrowing=None,
                 )
         except (RecordingSearchBaselineError, RecordingSearchNotFoundError):
             c2_result = C2OperationalStop(OperationalStopReason.INACTIVE_AUTHORITY, ())
@@ -558,12 +558,36 @@ class RecordingSearchService:
             # proposal from the repository before adapting either result so
             # terminal validation sees the complete evidence set.
             try:
-                snapshot = build_authoritative_d2_snapshot(
-                    self.repository,
-                    manifest,
-                    plan,
-                    execution,
-                    narrowing=narrowing_result,
+                with self.a2_mutation(handle):
+                    latest_manifest = self.repository.load(
+                        handle.investigation_id, handle.search_run_id
+                    )
+                    if not isinstance(latest_manifest, RecordingSearchManifestV3):
+                        raise RecordingSearchManifestCorruptError  # noqa: TRY301
+                    if (
+                        latest_manifest.investigation_id != manifest.investigation_id
+                        or latest_manifest.search_run_id != manifest.search_run_id
+                        or latest_manifest.state != "RUNNING"
+                        or latest_manifest.confirmation != manifest.confirmation
+                        or latest_manifest.policy != manifest.policy
+                    ):
+                        raise RecordingSearchBaselineError  # noqa: TRY301
+                    manifest = latest_manifest
+                    plan = build_coarse_sampling_plan(manifest.as_schema2().policy)
+                    policy = manifest.as_schema2().policy
+                    snapshot = build_authoritative_d2_snapshot(
+                        self.repository,
+                        manifest,
+                        plan,
+                        execution,
+                        narrowing=narrowing_result,
+                    )
+            except RecordingSearchBaselineError:
+                c2_result = C2OperationalStop(OperationalStopReason.INACTIVE_AUTHORITY, ())
+                return RecordingSearchTerminalizationResult(
+                    outcome=OperationalOutcome(c2_result.reason, ()),
+                    c2_result=c2_result,
+                    d1_result=None,
                 )
             except (RecordingSearchManifestCorruptError, RecordingSearchArtifactError, ValueError):
                 c2_result = C2OperationalStop(OperationalStopReason.CORRUPT_PERSISTED_EVIDENCE, ())
@@ -706,7 +730,7 @@ class RecordingSearchService:
         run_path = self.repository.run_path(handle.investigation_id, handle.search_run_id)
         lock, owns_lock = self._publication_lock(handle)
         replacement_succeeded = False
-        replacement_attempted = False
+        replacement_committed = False
         active: _ActiveRun | None = None
         try:
             current = self.repository.load(
@@ -788,10 +812,11 @@ class RecordingSearchService:
                         authoritative_context,
                         authoritative_result,
                         _canonical_now(self.now_utc()),
+                        narrowing_result=narrowing_result,
                     )
-                    replacement_attempted = True
                     try:
                         self.repository.write_schema4_manifest(successor, run_path)
+                        replacement_committed = True
                         committed = self.repository.load(
                             handle.investigation_id, handle.search_run_id, include_terminal=True
                         )
@@ -807,18 +832,16 @@ class RecordingSearchService:
                             raise RecordingSearchTerminalReopenError(  # noqa: TRY301
                                 RecordingSearchTerminalReopenCategory.IDENTITY_MISMATCH
                             )
-                    except Exception:
-                        # A failed readback must not leave an unverified Schema 4
-                        # manifest authoritative.  Restore exactly the locked
-                        # predecessor; no foreign state can be touched under the
-                        # active mutation boundary.
-                        if replacement_attempted:
-                            try:
-                                self.repository.write_schema3_manifest(latest, run_path)
-                            except Exception:  # noqa: BLE001 - translate restore failure safely
-                                raise RecordingSearchTerminalReopenError(
-                                    RecordingSearchTerminalReopenCategory.READ_FAILURE
-                                ) from None
+                    except Exception as error:
+                        if replacement_committed:
+                            if isinstance(error, RecordingSearchTerminalReopenError):
+                                raise
+                            category = (
+                                RecordingSearchTerminalReopenCategory.MALFORMED_RECORD
+                                if isinstance(error, RecordingSearchManifestCorruptError)
+                                else RecordingSearchTerminalReopenCategory.READ_FAILURE
+                            )
+                            raise RecordingSearchTerminalReopenError(category) from None
                         raise
                     replacement_succeeded = True
             return TerminalPublicationResult(
@@ -827,7 +850,7 @@ class RecordingSearchService:
                 outcome=TerminalPublicationOutcome.CREATED,
             )
         finally:
-            if replacement_succeeded and active is not None:
+            if (replacement_succeeded or replacement_committed) and active is not None:
                 with self._guard:
                     removed = self._active.pop(handle.investigation_id, None)
                     if removed is not None and removed is not active:

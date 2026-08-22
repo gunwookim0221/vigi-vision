@@ -211,8 +211,10 @@ duplicate reuse/conflict handling, and active-handle retirement. D2-4 adds stric
 process-restart terminal reopen validation and the non-sensitive schema-4 status
 projection. D2-5 adds the strict FOUND-only Phase 8 request handoff with stable
 delayed-retry reuse. The production terminalization operation reconstructs its
-snapshot from indexed schema-2/3 evidence, preserves operational causes, and
-publishes only after strict readback. Phase 7E real-NVR validation, Phase 8 review
+snapshot from indexed schema-2/3 evidence, reloads the post-D1 schema-3
+manifest under the mutation boundary, persists a validated D1 reconstruction
+envelope for FOUND, and publishes only after strict readback; a post-commit
+readback failure never downgrades schema 4. Phase 7E real-NVR validation, Phase 8 review
 media, and Phase 9 result UI remain unimplemented.
 Absolute source-time
 calibration remains deferred; Phase 4C-2

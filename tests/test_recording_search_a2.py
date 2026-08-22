@@ -397,9 +397,8 @@ def test_unindexed_final_frame_is_not_reopened_as_evidence(tmp_path: Path) -> No
     orphan = run_path / "frames" / f"frame-{'a' * 64}.json"
     _ = orphan.write_text("{}", encoding="utf-8")
 
-    status = service.status(investigation_id, started.manifest.search_run_id)
-
-    assert status.state is RecordingSearchState.RUNNING
+    with pytest.raises(RecordingSearchManifestCorruptError):
+        _ = service.status(investigation_id, started.manifest.search_run_id)
     started.run_handle.release()
 
 

@@ -37,7 +37,9 @@ documentation route is added, removed, or relocated.
   narrowing history/identity reconstruction are implemented locally. Phase 7D-2
   now includes the production terminalization composition, terminal-result and
   schema-4 publication, strict reopen/status projection, and D2-5 Phase 8
-  request boundary; Phase 8 clip processing remains unimplemented. Read
+  request boundary. FOUND reopen independently rebuilds the persisted D1
+  reconstruction against the live schema-3 evidence; Phase 8 clip processing
+  remains unimplemented. Read
   [design/object-presence-classification.md](design/object-presence-classification.md)
   for the normative Phase 7B single-probe input, geometry, classifier, outcome,
   schema-3 observation, publication, idempotency, and strict-reopen contract.

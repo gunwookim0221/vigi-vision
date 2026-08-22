@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from itertools import pairwise
 from pathlib import Path
@@ -10,10 +12,17 @@ from typing import TYPE_CHECKING, NoReturn, TypeVar
 from vigi_vision.durable_io import is_safe_contained_path
 from vigi_vision.object_presence_values import ClassificationOutcome
 from vigi_vision.recording_search_a2_repository import read_schema2_children
+from vigi_vision.recording_search_b2_models import RecordingSearchManifestV3
 from vigi_vision.recording_search_b2_validation import read_schema3_children
-from vigi_vision.recording_search_c1_planner import build_coarse_sampling_plan
+from vigi_vision.recording_search_c1_planner import (
+    baseline_identity_for,
+    build_coarse_sampling_plan,
+)
 from vigi_vision.recording_search_c2_support import coarse_target_id
-from vigi_vision.recording_search_d1_identity import policy_identity
+from vigi_vision.recording_search_d1_identity import policy_identity, source_bracket_identity
+from vigi_vision.recording_search_d1_models import NarrowingStatus
+from vigi_vision.recording_search_d1_repository import RepositoryNarrowingEvidenceStore
+from vigi_vision.recording_search_d1_service import execute_binary_narrowing
 from vigi_vision.recording_search_d2_enums import D2EvidenceRole
 from vigi_vision.recording_search_d2_evidence import (
     D2EvidenceReference,
@@ -25,6 +34,7 @@ from vigi_vision.recording_search_d2_identity import (
     authoritative_source_digest,
     evidence_snapshot_digest,
 )
+from vigi_vision.recording_search_d2_persistence import decode_persisted_narrowed_bracket
 from vigi_vision.recording_search_d2_publication_models import (
     PublishedFoundResult,
     PublishedInconclusiveResult,
@@ -32,7 +42,9 @@ from vigi_vision.recording_search_d2_publication_models import (
     RecordingSearchManifestV4,
     TerminalEvidenceReference,
 )
+from vigi_vision.recording_search_d2_results import C2BracketReady, D1BracketReady
 from vigi_vision.recording_search_d2_status import RecordingSearchStatusV4, terminal_status
+from vigi_vision.recording_search_d2_terminal import TerminalInputSnapshot, interpret_terminal
 from vigi_vision.recording_search_d2_terminal_identity import terminal_result_id
 from vigi_vision.recording_search_d2_terminal_models import (
     FoundResult,
@@ -50,6 +62,7 @@ from vigi_vision.recording_search_models import (
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from datetime import datetime
 
     from vigi_vision.recording_search_a2_models import (
         CanonicalProbeFrameRecord,
@@ -62,8 +75,23 @@ if TYPE_CHECKING:
         RecordingProbeObservationRecord,
         TargetAliasRecord,
     )
+    from vigi_vision.recording_search_b3_models import ClassifyRecordingProbeRequest
+    from vigi_vision.recording_search_c2_models import CoarseCandidateBracket
+    from vigi_vision.recording_search_d1_models import NarrowingProbeEvidence, NarrowingState
+    from vigi_vision.recording_search_models import RecordingSearchPolicy
 
 _ValueT = TypeVar("_ValueT")
+
+
+@dataclass(frozen=True, slots=True)
+class _ReopenHandle:
+    """Read-only identity adapter used by the existing D1 repository validator."""
+
+    investigation_id: str
+    search_run_id: str
+    phase6_confirmation_id: str
+    baseline_identity: str
+    closed: bool = False
 
 
 def reopen_terminal(
@@ -106,8 +134,21 @@ def reopen_terminal_result(
         result, references = _reconstruct_result(
             manifest, baseline, operations, observations, aliases, acquisition, frames, requests
         )
+        source_digest = authoritative_evidence_digest(root, run_path, predecessor)
+        _validate_common_bindings(manifest, predecessor, baseline, source_digest)
         _validate_source_digest(manifest, predecessor, root, run_path)
-        _validate_evidence_digest(manifest, references, baseline)
+        _validate_evidence_digest(manifest, references, baseline, source_digest)
+        if isinstance(manifest.terminal_result, PublishedFoundResult):
+            _validate_found_reconstruction(
+                manifest,
+                predecessor,
+                root,
+                run_path,
+                baseline,
+                references,
+                source_digest,
+                result,
+            )
         if terminal_result_id(result) != manifest.terminal_result.result_id:
             _fail(RecordingSearchTerminalReopenCategory.IDENTITY_MISMATCH)
     except RecordingSearchTerminalReopenError:
@@ -201,6 +242,259 @@ def validate_authoritative_snapshot(  # noqa: C901 - strict field-by-field admis
         raise
     except (RecordingSearchManifestCorruptError, OSError, ValueError, TypeError, KeyError):
         _fail(RecordingSearchTerminalReopenCategory.VALIDATOR_FAILURE)
+
+
+def _validate_common_bindings(
+    manifest: RecordingSearchManifestV4,
+    predecessor: RecordingSearchManifestV3,
+    baseline: ConfirmedReferenceBaselineRecord,
+    source_digest: str,
+) -> None:
+    """Bind persisted terminal common fields to the schema-3 authority."""
+    terminal = manifest.terminal_result
+    expected_plan = build_coarse_sampling_plan(predecessor.as_schema2().policy)
+    expected_policy = policy_identity(predecessor.as_schema2().policy)
+    if (
+        terminal.investigation_id != predecessor.investigation_id
+        or terminal.search_run_id != predecessor.search_run_id
+        or terminal.phase6_confirmation_id != predecessor.investigation_id
+        or terminal.baseline_observation_id != baseline.observation_id
+        or terminal.plan_id != expected_plan.plan_id
+        or terminal.policy_identity != expected_policy
+        or terminal.source_manifest_digest != source_digest
+    ):
+        _fail(RecordingSearchTerminalReopenCategory.IDENTITY_MISMATCH)
+
+
+def _validate_found_reconstruction(  # noqa: PLR0913 - explicit authority inputs
+    manifest: RecordingSearchManifestV4,
+    predecessor: RecordingSearchManifestV3,
+    root: Path,
+    run_path: Path,
+    baseline: ConfirmedReferenceBaselineRecord,
+    references: tuple[D2EvidenceReference, ...],
+    source_digest: str,
+    persisted_result: TerminalResult,
+) -> None:
+    """Rebuild FOUND from persisted D1 facts and the live schema-3 tree."""
+    envelope = manifest.d1_reconstruction
+    if envelope is None:
+        _fail(RecordingSearchTerminalReopenCategory.MISSING_RECORD)
+    narrowed = decode_persisted_narrowed_bracket(envelope)
+    source_bracket = narrowed.source_bracket
+    input_bracket = narrowed.d1_input_bracket
+    if source_bracket is None or input_bracket is None:
+        _fail(RecordingSearchTerminalReopenCategory.MISSING_RECORD)
+    if narrowed.manifest_digest != source_digest:
+        _fail(RecordingSearchTerminalReopenCategory.IDENTITY_MISMATCH)
+    try:
+        store = RepositoryNarrowingEvidenceStore(_RepositoryView(root, run_path, predecessor))
+        current_source = replace(source_bracket, manifest_digest=source_digest)
+        store.validate_bracket(
+            _ReopenHandle(
+                investigation_id=predecessor.investigation_id,
+                search_run_id=predecessor.search_run_id,
+                phase6_confirmation_id=predecessor.investigation_id,
+                baseline_identity=baseline_identity_for(predecessor.confirmation),
+            ),
+            current_source,
+            predecessor.as_schema2().policy,
+        )
+    except (RecordingSearchManifestCorruptError, ValueError, OSError):
+        _fail(RecordingSearchTerminalReopenCategory.EVIDENCE_OWNERSHIP_MISMATCH)
+    handle = _ReopenHandle(
+        investigation_id=predecessor.investigation_id,
+        search_run_id=predecessor.search_run_id,
+        phase6_confirmation_id=predecessor.investigation_id,
+        baseline_identity=baseline_identity_for(predecessor.confirmation),
+    )
+    replayed = execute_binary_narrowing(
+        _ReopenReplayHost(_replay_requests(root, run_path, predecessor)),
+        handle,
+        source_bracket,
+        predecessor.as_schema2().policy,
+        _ReopenEvidenceStore(store, source_digest),
+    )
+    replayed_bracket = replayed.narrowed_bracket
+    if replayed.status is not NarrowingStatus.READY or replayed_bracket is None:
+        _fail(RecordingSearchTerminalReopenCategory.TERMINAL_CONTRADICTION)
+    if replayed_bracket != narrowed:
+        _fail(RecordingSearchTerminalReopenCategory.TERMINAL_CONTRADICTION)
+    plan = build_coarse_sampling_plan(predecessor.as_schema2().policy)
+    snapshot = _authoritative_snapshot(
+        manifest,
+        references,
+        baseline,
+        source_digest,
+        source_bracket_id=source_bracket_identity(source_bracket),
+        d1_source_bracket_id=narrowed.source_bracket_id,
+    )
+    digest = evidence_snapshot_digest(snapshot)
+    expected = interpret_terminal(
+        TerminalInputSnapshot(
+            evidence_snapshot=snapshot,
+            plan=plan,
+            policy=predecessor.as_schema2().policy,
+            c2_result=C2BracketReady(source_bracket, digest),
+            d1_result=D1BracketReady(replayed_bracket, digest),
+            d1_input_bracket=input_bracket,
+        )
+    )
+    if not isinstance(expected, FoundResult) or expected != persisted_result:
+        _fail(RecordingSearchTerminalReopenCategory.TERMINAL_CONTRADICTION)
+
+
+@dataclass(frozen=True, slots=True)
+class _RepositoryView:
+    """Minimal repository view required by the strict D1 validator."""
+
+    root: Path
+    path: Path
+    manifest: RecordingSearchManifestV3
+
+    def run_path(self, investigation_id: str, search_run_id: str) -> Path:
+        if (self.path.name, self.path.parent.name) != (search_run_id, investigation_id):
+            raise RecordingSearchManifestCorruptError
+        return self.path
+
+    def load(self, investigation_id: str, search_run_id: str) -> RecordingSearchManifestV3:
+        if (
+            self.manifest.investigation_id != investigation_id
+            or self.manifest.search_run_id != search_run_id
+        ):
+            raise RecordingSearchManifestCorruptError
+        return self.manifest
+
+
+@dataclass(frozen=True, slots=True)
+class _ReopenEvidenceStore:
+    """Adapt the live store while retaining the original C2 revision identity."""
+
+    store: RepositoryNarrowingEvidenceStore
+    source_digest: str
+
+    def validate_bracket(
+        self,
+        handle: _ReopenHandle,
+        bracket: CoarseCandidateBracket,
+        policy: RecordingSearchPolicy,
+    ) -> None:
+        self.store.validate_bracket(
+            handle,
+            replace(bracket, manifest_digest=self.source_digest),
+            policy,
+        )
+
+    def load_state(self, handle: _ReopenHandle, bracket: CoarseCandidateBracket) -> NarrowingState:
+        return self.store.load_state(
+            handle,
+            replace(bracket, manifest_digest=self.source_digest),
+        )
+
+    def find_existing(
+        self, handle: _ReopenHandle, requested_time_utc: datetime, target_id: str
+    ) -> NarrowingProbeEvidence | None:
+        return self.store.find_existing(handle, requested_time_utc, target_id)
+
+    def resolve_request(
+        self, handle: _ReopenHandle, request: ProbeFrameRequestRecord, target_id: str
+    ) -> NarrowingProbeEvidence:
+        return self.store.resolve_request(handle, request, target_id)
+
+    def current_manifest_digest(self, handle: _ReopenHandle) -> str:
+        return self.store.current_manifest_digest(handle)
+
+
+@dataclass(frozen=True, slots=True)
+class _ReopenReplayHost:
+    """Read-only host for replaying D1 solely from persisted repository records."""
+
+    requests: tuple[ProbeFrameRequestRecord, ...]
+
+    def a2_mutation(self, handle: _ReopenHandle) -> AbstractContextManager[None]:
+        _ = handle
+        return nullcontext()
+
+    def acquire_targets(
+        self, handle: _ReopenHandle, requested_times: tuple[datetime, ...]
+    ) -> tuple[ProbeFrameRequestRecord, ...]:
+        _ = handle
+        by_time: dict[datetime, ProbeFrameRequestRecord] = {}
+        for request in self.requests:
+            requested_time = request.requested_time_utc
+            if requested_time in by_time:
+                raise RecordingSearchManifestCorruptError
+            by_time[requested_time] = request
+        try:
+            return tuple(by_time[value] for value in requested_times)
+        except KeyError:
+            raise RecordingSearchManifestCorruptError from None
+
+    def classify(self, handle: _ReopenHandle, request: ClassifyRecordingProbeRequest) -> NoReturn:
+        _ = handle
+        _ = request
+        raise RecordingSearchManifestCorruptError
+
+
+def _replay_requests(
+    root: Path, run_path: Path, predecessor: RecordingSearchManifestV3
+) -> tuple[ProbeFrameRequestRecord, ...]:
+    """Load the immutable request records needed by the read-only D1 replay."""
+    _, _, requests = read_schema2_children(root, run_path, predecessor.as_schema2())
+    return tuple(requests.values())
+
+
+def _authoritative_snapshot(  # noqa: PLR0913 - explicit persisted authority inputs
+    manifest: RecordingSearchManifestV4,
+    references: tuple[D2EvidenceReference, ...],
+    baseline: ConfirmedReferenceBaselineRecord,
+    source_digest: str,
+    *,
+    source_bracket_id: str,
+    d1_source_bracket_id: str,
+) -> D2EvidenceSnapshot:
+    groups: list[D2SupportGroup] = []
+    support_refs = tuple(item for item in references if item.role is D2EvidenceRole.ABSENCE_SUPPORT)
+    for group_id in dict.fromkeys(item.support_group_id for item in support_refs):
+        if group_id is None:
+            _fail(RecordingSearchTerminalReopenCategory.SUPPORT_ORDER_VIOLATION)
+        members = tuple(item for item in support_refs if item.support_group_id == group_id)
+        first = next(iter(members), None)
+        if first is None or first.decode_session_id is None:
+            _fail(RecordingSearchTerminalReopenCategory.SUPPORT_ORDER_VIOLATION)
+        second = members[1] if len(members) > 1 else None
+        cadence = (
+            int((second.requested_time_utc - first.requested_time_utc).total_seconds())
+            if second is not None
+            else 1
+        )
+        groups.append(
+            D2SupportGroup(
+                support_group_id=group_id,
+                origin_target_id=first.target_id or "",
+                support_count=len(members),
+                cadence_seconds=cadence,
+                decode_session_id=first.decode_session_id,
+                member_target_ids=tuple(item.target_id or "" for item in members),
+                member_observation_ids=tuple(item.observation_id or "" for item in members),
+                member_canonical_frame_ids=tuple(item.canonical_frame_id or "" for item in members),
+            )
+        )
+    return D2EvidenceSnapshot(
+        investigation_id=manifest.investigation_id,
+        search_run_id=manifest.search_run_id,
+        phase6_confirmation_id=manifest.investigation_id,
+        baseline_observation_id=baseline.observation_id,
+        plan_id=build_coarse_sampling_plan(manifest.policy.to_acquisition_policy()).plan_id,
+        policy_identity=policy_identity(manifest.policy.to_acquisition_policy()),
+        source_revision=D2SourceRevision(
+            manifest_digest=source_digest,
+            c2_bracket_id=source_bracket_id,
+            d1_source_bracket_id=d1_source_bracket_id,
+        ),
+        references=references,
+        support_groups=tuple(groups),
+    )
 
 
 def _validate_source_digest(
@@ -773,6 +1067,7 @@ def _validate_evidence_digest(
     manifest: RecordingSearchManifestV4,
     references: tuple[D2EvidenceReference, ...],
     baseline: ConfirmedReferenceBaselineRecord,
+    source_digest: str,
 ) -> None:
     terminal = manifest.terminal_result
     source_c2 = terminal.source_c2_bracket_id
@@ -814,7 +1109,7 @@ def _validate_evidence_digest(
         plan_id=terminal.plan_id,
         policy_identity=terminal.policy_identity,
         source_revision=D2SourceRevision(
-            manifest_digest=terminal.source_manifest_digest,
+            manifest_digest=source_digest,
             c2_bracket_id=source_c2,
             d1_source_bracket_id=source_d1,
         ),

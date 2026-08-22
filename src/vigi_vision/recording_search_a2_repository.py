@@ -589,7 +589,7 @@ def _reject_orphan_files(
         ),
     ):
         directory = run_path / directory_name
-        if not names.issubset({path.name for path in directory.iterdir()}):
+        if {path.name for path in directory.iterdir()} != names:
             raise RecordingSearchManifestCorruptError
 
 

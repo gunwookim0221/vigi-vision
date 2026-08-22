@@ -214,3 +214,45 @@ def test_authoritative_source_digest_binds_baseline_and_classification_records(
             _ = operation_path.write_bytes(operation_bytes)
     finally:
         harness.service.close()
+
+
+def test_authoritative_digest_domain_fixture_is_stable_without_helper_reuse() -> None:
+    domain = "vigi-vision-recording-search-authoritative-source-v1"
+    payload = {
+        "identity_schema": domain,
+        "manifest": {
+            "schema_version": 3,
+            "investigation_id": "investigation-fixed",
+            "search_run_id": "search-run-fixed",
+            "state": "RUNNING",
+        },
+        "baseline": {
+            "observation_id": "observation-fixed",
+            "jpeg_sha256": "a" * 64,
+            "jpeg_size_bytes": 42,
+        },
+        "acquisition_operations": [{"operation_id": "acquisition-operation-fixed"}],
+        "probe_requests": [{"probe_request_id": "probe-request-fixed"}],
+        "canonical_frames": [
+            {
+                "canonical_frame_id": "frame-fixed",
+                "jpeg_sha256": "b" * 64,
+                "jpeg_size_bytes": 43,
+            }
+        ],
+        "classification_operations": [
+            {"classification_operation_id": "classification-operation-fixed"}
+        ],
+        "observations": [{"observation_id": "observation-fixed", "state": "PRESENT"}],
+        "aliases": [],
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    assert sha256(f"{domain}\0{canonical}".encode()).hexdigest() == (
+        "8c277904528719425a2c1420ed3a59d9ca3320d2a6e15bbf67100ab0fd3afd82"
+    )

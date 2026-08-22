@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from vigi_vision.recording_search_d2_persistence import persisted_narrowed_bracket
 from vigi_vision.recording_search_d2_publication_models import (
     PublishedTerminalResult,
     RecordingSearchManifestV4,
@@ -14,11 +15,13 @@ from vigi_vision.recording_search_d2_publication_models import (
 from vigi_vision.recording_search_d2_publication_validation import (
     validate_terminal_publication,
 )
+from vigi_vision.recording_search_d2_terminal_models import FoundResult
 
 if TYPE_CHECKING:
     from datetime import datetime
 
     from vigi_vision.recording_search_b2_models import RecordingSearchManifestV3
+    from vigi_vision.recording_search_d1_models import NarrowingResult
     from vigi_vision.recording_search_d2_terminal_models import (
         TerminalInputSnapshot,
         TerminalResult,
@@ -46,11 +49,17 @@ def build_schema4_successor(
     snapshot: TerminalInputSnapshot,
     result: TerminalResult,
     published_at_utc: datetime,
+    narrowing_result: NarrowingResult | None = None,
 ) -> RecordingSearchManifestV4:
     """Validate a D2-2 result and construct its immutable Schema 4 successor."""
     if predecessor.state != "RUNNING":
         raise ValueError
     validate_terminal_publication(snapshot, result)
+    reconstruction = None
+    if isinstance(result, FoundResult):
+        if narrowing_result is None or narrowing_result.narrowed_bracket is None:
+            raise ValueError
+        reconstruction = persisted_narrowed_bracket(narrowing_result.narrowed_bracket)
     terminal = published_terminal_result(
         result,
         published_at_utc,
@@ -79,5 +88,6 @@ def build_schema4_successor(
         classification_operation_ids=predecessor.classification_operation_ids,
         canonical_observation_ids=predecessor.canonical_observation_ids,
         target_alias_ids=predecessor.target_alias_ids,
+        d1_reconstruction=reconstruction,
         terminal_result=terminal,
     )

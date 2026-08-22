@@ -10,6 +10,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     StrictBool,
     StrictInt,
     StrictStr,
@@ -182,6 +183,7 @@ class RecordingSearchManifestV4(BaseModel):
     classification_operation_ids: tuple[StrictStr, ...]
     canonical_observation_ids: tuple[StrictStr, ...]
     target_alias_ids: tuple[StrictStr, ...]
+    d1_reconstruction: dict[str, JsonValue] | None = None
     failure_reason: None = None
     terminal_result: PublishedTerminalResult = Field(discriminator="result_kind")
 
@@ -200,6 +202,16 @@ class RecordingSearchManifestV4(BaseModel):
         if self.state == "INDETERMINATE":
             expected_state = "INDETERMINATE"
         if self.state != expected_state:
+            raise ValueError
+        from vigi_vision.recording_search_d2_persistence import (  # noqa: PLC0415
+            validate_persisted_narrowed_bracket,
+        )
+
+        if self.terminal_result.result_kind is TerminalResultKind.FOUND:
+            if self.d1_reconstruction is None:
+                raise ValueError
+            validate_persisted_narrowed_bracket(self.d1_reconstruction)
+        elif self.d1_reconstruction is not None:
             raise ValueError
         return self
 

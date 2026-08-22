@@ -21,7 +21,9 @@ D2-3 now implements schema-4 publication and the canonical lock-order migration;
 D2-4 now implements strict process-restart terminal reopen validation and the
 non-sensitive schema-4 status projection. D2-5 now implements the strict
 FOUND-only Phase 8 handoff request model, canonical identity, and atomic
-run-owned persistence. Phase 7E real-NVR validation and Phase 8 review-media
+run-owned persistence. The final D2 safety correction persists a lossless D1
+reconstruction envelope for `FOUND` and independently rebuilds it from the
+schema-3 authority during reopen. Phase 7E real-NVR validation and Phase 8 review-media
 generation also remain unimplemented. The required Phase 6C
 schema 3 compatibility increment is complete.**
 
@@ -1355,13 +1357,14 @@ canonical-frame IDs from one decode session with strictly increasing decoded
 UTC, PTS, and ordinal values. The phrase “three distinct frames” in older D1
 test names describes the default fixture only.
 
-The current `NarrowedBracket` is not yet sufficient for durable terminalization.
-Its `source_bracket_id` is a hash of the transient C2 bracket, but the original
-C2 bracket fields are discarded as narrowing advances. D2 cannot reconstruct
-that hash unambiguously from the final bounds. Likewise, a non-ready D1 result
-does not retain the specific persisted visual observation or support sequence
-that caused a visual stop. Before D2 runtime is implemented, D1 models must be
-extended narrowly so that:
+The corrected `NarrowedBracket` is sufficient as the in-memory D1 handoff and
+retains the complete source bracket, policy identity, ordered history, and
+child references needed by D2. D2 persists a separate allowlisted
+`d1_reconstruction` envelope only inside a schema-4 `FOUND` manifest. That
+envelope is not accepted as authority by itself: strict reopen decodes it,
+reopens the live schema-3 children, recomputes the source and narrowed
+identities, and compares a freshly interpreted `FOUND` result. The D1 models
+therefore provide:
 
 1. a ready bracket carries the complete immutable `CoarseCandidateBracket`, its
    `plan_id`, a SHA-256 identity of the complete persisted policy snapshot, and
@@ -1372,11 +1375,11 @@ extended narrowly so that:
    ordered support references and a refreshed authoritative manifest digest;
 4. operational, interrupted, stale, corrupt, and capacity results carry no
    visual terminal candidate; and
-5. all additions remain in-memory only. D1 still publishes no result record or
-   manifest state.
+5. D1 itself still publishes no result record or manifest state; only D2's
+   schema-4 publication stores the validated reconstruction envelope.
 
-This is an implementation prerequisite, not a redesign of midpoint selection or
-the A2/B4 evidence boundaries. Until it is satisfied, D2 must reject the input
+This is the implemented handoff prerequisite, not a redesign of midpoint
+selection or the A2/B4 evidence boundaries. D2 rejects an incomplete handoff
 without mutation as `terminal_input_incomplete`.
 
 ### Closed D1/C2 visual and operational handoff
@@ -2102,6 +2105,8 @@ manifest and reconstructs every claim from its indexed children. It requires:
 - strict confined reopen of every referenced acquisition operation, request,
   canonical frame/JPEG, classification operation, observation, and alias;
 - membership in the committed ordered indexes and matching back-references;
+- exact child-directory membership: frames, requests, and evidence JPEG names
+  must equal their committed indexes, so unindexed extras are corruption;
 - no arbitrary path, directory scan used to discover evidence, unpublished
   staging file, unindexed child, operational record, or foreign-run/baseline
   record; and
@@ -2115,6 +2120,22 @@ facts. The service also rebuilds the snapshot after D1 narrowing so publication
 and strict reopen use the same complete evidence set. A C2 or D1
 operational/nonterminal outcome remains schema 3 `RUNNING`; only a strictly
 visual terminal interpretation reaches schema 4 publication.
+
+For `FOUND`, schema 4 additionally stores `d1_reconstruction`, an exact-key
+JSON envelope containing the complete source bracket, D1 input bracket, final
+narrowed bracket, bound/support/probe evidence, and lossless history. It
+contains no path, URL, credential, or diagnostic field. The schema-4 parser
+rejects missing, extra, malformed, or internally inconsistent envelope fields.
+On every status/reopen, D2 first validates the current schema-3 source digest,
+then runs the existing D1 state machine in a read-only replay host: the source
+bracket and every midpoint/support request are resolved from indexed children,
+while the envelope supplies only the original D1 identity and transition
+proposal. The reconstructed source bracket, transition history, stop reason,
+and narrowed identity must equal the envelope before accepting the persisted
+`FOUND`.
+Changing D1 facts and merely recomputing terminal/result hashes therefore fails
+closed as an identity or evidence mismatch; it cannot produce a new valid
+terminal result.
 
 ### Closed terminal result vocabulary
 
@@ -2740,7 +2761,7 @@ and their future identities/confinement remain Phase 8 work. `NOT_FOUND` and
 
 ### Implementation blueprint and acceptance
 
-The later D2 implementation should use `recording_search_d2_models.py` for the
+The implemented D2 runtime uses `recording_search_d2_models.py` for the
 closed result/V4/status records, `recording_search_d2_identity.py` for canonical
 identities, `recording_search_d2_validator.py` for pure interpretation and
 strict evidence validation, `recording_search_d2_repository.py` for V4 parser,
@@ -2748,7 +2769,8 @@ reopen, atomic replacement, and handoff request, and
 `recording_search_d2_service.py` for handle/mutex orchestration. Extend the
 existing repository parser, `RecordingSearchService`, and status projection;
 do not create a parallel repository, executor, lifecycle, or public route.
-Apply the narrow D1 handoff correction above first.
+The narrow D1 handoff correction above is implemented before the D2 publication
+boundary; no separate migration or parallel repository is required.
 
 The implementation order is deliberately Luna-sized and each step leaves the
 existing runtime usable:

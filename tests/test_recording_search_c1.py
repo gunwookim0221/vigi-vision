@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from itertools import count
@@ -48,6 +49,8 @@ from vigi_vision.recording_search_c1_service import CoarseSamplingExecutor
 from vigi_vision.recording_search_models import (
     RecordingSearchPolicy,
     RecordingSearchRequest,
+    RecordingSearchTerminalReopenCategory,
+    RecordingSearchTerminalReopenError,
     default_policy,
 )
 from vigi_vision.recording_search_repository import RecordingSearchRepository
@@ -575,6 +578,22 @@ def test_production_path_acquires_publishes_reopens_and_reuses_support_evidence(
     published = service.repository.load(investigation_id, handle.search_run_id)
     assert published.schema_version == 4
     assert published.state == terminalized.publication.result.result_kind.value
+    assert published.d1_reconstruction is not None
+
+    manifest_path = run_path / "manifest.json"
+    original_manifest = manifest_path.read_bytes()
+    tampered = cast("dict[str, object]", json.loads(original_manifest))
+    reconstruction = cast("dict[str, object]", tampered["d1_reconstruction"])
+    narrowed = cast("dict[str, object]", reconstruction["narrowed_bracket"])
+    narrowed["manifest_digest"] = "b" * 64
+    _ = manifest_path.write_text(json.dumps(tampered), encoding="utf-8")
+    try:
+        with pytest.raises(RecordingSearchTerminalReopenError) as raised:
+            _ = service.reopen_terminal(investigation_id, handle.search_run_id)
+        assert raised.value.category is RecordingSearchTerminalReopenCategory.IDENTITY_MISMATCH
+    finally:
+        _ = manifest_path.write_bytes(original_manifest)
+    _ = service.reopen_terminal(investigation_id, handle.search_run_id)
     handle.release()
 
 

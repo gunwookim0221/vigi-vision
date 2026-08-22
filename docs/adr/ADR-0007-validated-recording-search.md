@@ -157,6 +157,17 @@ commit point. Interruption and publication are ordered by that mutex; whichever
 commits first prevents the other. A concurrent child admission changes the
 source digest and makes the terminal candidate stale rather than being lost.
 
+For a `FOUND` successor, schema 4 also stores an exact-key `d1_reconstruction`
+envelope containing the complete source C2 bracket, D1 input/final bracket,
+ordered narrowing evidence, and lossless history. It is a validated snapshot,
+not an authority: strict reopen recomputes the current schema-3 source digest,
+reopens the indexed children, and runs the existing D1 state machine through a
+read-only repository-backed replay before accepting the terminal result. A
+changed D1 fact therefore fails closed even if an attacker recomputes
+terminal/result hashes. The A2 loader also
+requires exact child-directory membership for indexed frames, requests, and
+evidence JPEGs; unindexed extras are corruption.
+
 For a closed-handle duplicate, the existing
 `LocalInvestigationLock(repository.lock_path(investigation_id))` is reacquired
 directly after validated `run_path(investigation_id, search_run_id)` resolution;
