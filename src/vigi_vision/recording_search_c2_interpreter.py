@@ -117,9 +117,14 @@ def _interpret_targets(
         else:
             unusable_count = 0
         if unusable_count >= snapshot.maximum_consecutive_indeterminate_targets:
+            operational_reason = _operational_reason(
+                snapshot.execution.samples[
+                    max(0, len(snapshot.execution.samples) - unusable_count) :
+                ]
+            )
             return _safe_result(
                 CoarseInterpretationStatus.INCONCLUSIVE,
-                "maximum_consecutive_unusable_targets",
+                operational_reason or "maximum_consecutive_unusable_targets",
             )
     if unresolved:
         return _safe_result(CoarseInterpretationStatus.INCONCLUSIVE, "insufficient_visual_evidence")
@@ -211,6 +216,39 @@ def _baseline_evidence(snapshot: CoarseEvidenceSnapshot) -> CoarseTargetEvidence
 
 def _safe_result(status: CoarseInterpretationStatus, reason: str) -> CoarseInterpretationResult:
     return CoarseInterpretationResult(status=status, safe_reason=reason)
+
+
+def _operational_reason(  # noqa: PLR0911 - explicit status precedence
+    samples: tuple[CoarseSampleResult, ...],
+) -> str | None:
+    """Return a closed operational cause when an unusable run is not visual.
+
+    A consecutive run may contain both visual INDETERMINATE samples and an
+    acquisition/classification failure.  The latter has precedence: a visual
+    terminal must never be inferred from evidence that was not actually
+    acquired or classified.
+    """
+    for sample in samples:
+        match sample.status:
+            case CoarseSampleStatus.RECORDING_UNAVAILABLE:
+                return "recording_unavailable"
+            case CoarseSampleStatus.TIMEOUT:
+                return (
+                    "classifier_timeout"
+                    if sample.safe_reason == "classifier_timeout"
+                    else "acquisition_timeout"
+                )
+            case CoarseSampleStatus.ACQUISITION_FAILED:
+                return "acquisition_failed"
+            case CoarseSampleStatus.CLASSIFICATION_FAILED:
+                return "classification_failed"
+            case CoarseSampleStatus.INTERRUPTED:
+                return "coarse_execution_interrupted"
+            case CoarseSampleStatus.UNEXPECTED_ERROR:
+                return "unexpected_error"
+            case CoarseSampleStatus.SUCCESS:
+                continue
+    return None
 
 
 interpret_coarse_evidence = _interpret_coarse_evidence

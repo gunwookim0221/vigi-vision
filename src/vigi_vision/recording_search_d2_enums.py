@@ -12,6 +12,7 @@ class OperationalStopReason(str, Enum):
     INTERRUPTED = "interrupted"
     CANCELLED = "cancelled"
     TIMEOUT = "timeout"
+    CLASSIFICATION_TIMEOUT = "classification_timeout"
     CAPACITY_EXHAUSTED = "capacity_exhausted"
     RECORDING_COVERAGE_GAP = "recording_coverage_gap"
     ACQUISITION_FAILED = "acquisition_failed"

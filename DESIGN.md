@@ -199,7 +199,8 @@ or glass effects are used.
   transition interpretation are implemented. Phase 7D-1 now provides
   deterministic non-terminal binary narrowing through the existing A2/B4
   boundaries; it returns an in-memory narrowed bracket and does not publish
-  terminal state. Phase 7D-2 now has a corrected closed terminal-result,
+  terminal state. Phase 7D-2 now has a corrected production terminalization
+  composition, authoritative snapshot reconstruction, closed terminal-result,
   schema-4 atomic-publication, strict-reopen, status, and Phase 8 request design;
   D2-3 implements atomic terminal publication; D2-4 implements the strict
   process-restart reopen and safe status-projection boundary; D2-5 implements

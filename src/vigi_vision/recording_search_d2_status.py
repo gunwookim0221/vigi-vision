@@ -13,12 +13,7 @@ from vigi_vision.recording_search_d2_publication_models import (
     RecordingSearchManifestV4,
 )
 from vigi_vision.recording_search_d2_terminal_models import TerminalLimitation, TerminalResultKind
-from vigi_vision.recording_search_models import (
-    Phase8HandoffStatus,
-    RecordingSearchBaseline,
-    RecordingSearchPolicy,
-    RecordingSearchState,
-)
+from vigi_vision.recording_search_models import Phase8HandoffStatus, RecordingSearchState
 
 SCHEMA_VERSION = 4
 
@@ -83,7 +78,14 @@ class RecordingSearchTerminalProjection(BaseModel):
 
 
 class RecordingSearchStatusV4(BaseModel):
-    """Schema-4 status without raw evidence or filesystem details."""
+    """Strict public schema-4 status projection.
+
+    Schema 4 is the terminal boundary.  Its persisted manifest necessarily
+    contains the evidence needed for strict reopen, but the public status must
+    never serialize those reconstruction inputs.  Keep this model deliberately
+    small and explicit; callers that need evidence use the internal reopen
+    boundary instead of this API projection.
+    """
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -94,15 +96,6 @@ class RecordingSearchStatusV4(BaseModel):
     created_at_utc: CanonicalUtc
     started_at_utc: CanonicalUtc
     completed_at_utc: CanonicalUtc
-    confirmation: RecordingSearchBaseline
-    policy: RecordingSearchPolicy
-    acquisition_operation_ids: tuple[StrictStr, ...]
-    probe_request_ids: tuple[StrictStr, ...]
-    canonical_frame_ids: tuple[StrictStr, ...]
-    baseline_observation_id: StrictStr
-    classification_operation_ids: tuple[StrictStr, ...]
-    canonical_observation_ids: tuple[StrictStr, ...]
-    target_alias_ids: tuple[StrictStr, ...]
     failure_reason: None = None
     result: RecordingSearchTerminalProjection
     phase8_handoff_status: Phase8HandoffStatus
@@ -169,15 +162,6 @@ def terminal_status(
         created_at_utc=manifest.created_at_utc,
         started_at_utc=manifest.started_at_utc,
         completed_at_utc=manifest.completed_at_utc,
-        confirmation=manifest.confirmation,
-        policy=manifest.policy.to_acquisition_policy(),
-        acquisition_operation_ids=manifest.acquisition_operation_ids,
-        probe_request_ids=manifest.probe_request_ids,
-        canonical_frame_ids=manifest.canonical_frame_ids,
-        baseline_observation_id=manifest.baseline_observation_id,
-        classification_operation_ids=manifest.classification_operation_ids,
-        canonical_observation_ids=manifest.canonical_observation_ids,
-        target_alias_ids=manifest.target_alias_ids,
         result=projection,
         phase8_handoff_status=(
             phase8_handoff_status

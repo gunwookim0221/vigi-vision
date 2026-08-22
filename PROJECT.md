@@ -207,10 +207,13 @@ history, canonical identities, and strict reconstruction handoff are implemented
 locally. D2-2 now implements the pure terminal outcome interpreter, strict
 reconstruction, visual evidence digest binding, and in-memory result identities;
 D2-3 now adds canonical lock-ordered atomic schema-4 terminal publication,
-duplicate reuse/conflict handling, and active-handle retirement. D2-4 now adds
-strict process-restart terminal reopen validation and the non-sensitive schema-4
-status projection. Phase 7E real-NVR validation, Phase 8 review media, and Phase 9 result UI also
-remain unimplemented.
+duplicate reuse/conflict handling, and active-handle retirement. D2-4 adds strict
+process-restart terminal reopen validation and the non-sensitive schema-4 status
+projection. D2-5 adds the strict FOUND-only Phase 8 request handoff with stable
+delayed-retry reuse. The production terminalization operation reconstructs its
+snapshot from indexed schema-2/3 evidence, preserves operational causes, and
+publishes only after strict readback. Phase 7E real-NVR validation, Phase 8 review
+media, and Phase 9 result UI remain unimplemented.
 Absolute source-time
 calibration remains deferred; Phase 4C-2
 provides transient frontend-only selection of one
@@ -241,10 +244,9 @@ capability.
 6. Implement the scope-reviewed single-site object-disappearance MVP in bounded
    slices: build on completed Phase 6C schema 3 compatibility, Phase 7A-1 local
    lifecycle, Phase 7A-2 canonical multi-target acquisition, and completed Phase
-   7B production three-state classification/schema-3 observations; implement
-   Phase 7D-2 for the corrected terminal schema/publication after follow-up
-   approval and the Phase 8 request
-   boundary, then Phase 7E real-NVR validation. Preserve published Phase 6
+   7B production three-state classification/schema-3 observations, and the
+   completed Phase 7D terminal schema/publication/reopen/status/handoff
+   boundaries; next implement Phase 7E real-NVR validation. Preserve published Phase 6
    package immutability, reject duplicate starts, never reuse interrupted-run
    evidence, and defer Phase 8 media plus
    Phase 9 judgment.

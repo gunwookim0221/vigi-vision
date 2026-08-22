@@ -34,10 +34,10 @@ documentation route is added, removed, or relocated.
   classifier/schema-3 observation boundary, and the Phase 7C-1 deterministic
   chronological coarse execution foundation and the non-persistent deterministic
   transition interpretation handoff. Phase 7D-1 and D2-1's in-memory
-  narrowing history/identity reconstruction are implemented locally but remain
-  uncommitted. Phase 7D-2's D2-2 terminal-result/schema-4 design and D2-5
-  Phase 8 request boundary are implemented; Phase 8 clip processing remains
-  unimplemented. Read
+  narrowing history/identity reconstruction are implemented locally. Phase 7D-2
+  now includes the production terminalization composition, terminal-result and
+  schema-4 publication, strict reopen/status projection, and D2-5 Phase 8
+  request boundary; Phase 8 clip processing remains unimplemented. Read
   [design/object-presence-classification.md](design/object-presence-classification.md)
   for the normative Phase 7B single-probe input, geometry, classifier, outcome,
   schema-3 observation, publication, idempotency, and strict-reopen contract.

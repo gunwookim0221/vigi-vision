@@ -54,6 +54,7 @@ def map_operational_reason(reason: str | None) -> OperationalStopReason:
         "recording_unavailable": OperationalStopReason.RECORDING_COVERAGE_GAP,
         "acquisition_timeout": OperationalStopReason.TIMEOUT,
         "timeout": OperationalStopReason.TIMEOUT,
+        "classifier_timeout": OperationalStopReason.CLASSIFICATION_TIMEOUT,
         "classification_failed": OperationalStopReason.CLASSIFICATION_FAILED,
         "decode_failed": OperationalStopReason.DECODE_FAILED,
         "acquisition_failed": OperationalStopReason.ACQUISITION_FAILED,

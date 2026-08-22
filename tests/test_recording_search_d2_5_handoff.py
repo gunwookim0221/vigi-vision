@@ -118,10 +118,16 @@ def test_request_repository_reuses_exact_duplicate_without_rewrite(tmp_path: Pat
     first = create_or_reuse_phase8_request(tmp_path, run_path, request)
     before = (run_path / "phase8-request.json").read_bytes()
     second = create_or_reuse_phase8_request(tmp_path, run_path, request)
+    delayed_retry = request.model_copy(
+        update={"created_at_utc": request.created_at_utc + timedelta(minutes=5)}
+    )
+    third = create_or_reuse_phase8_request(tmp_path, run_path, delayed_retry)
 
     assert first.request == second.request == request
+    assert third.request == request
     assert first.outcome.value == "created"
     assert second.outcome.value == "reused"
+    assert third.outcome.value == "reused"
     assert (run_path / "phase8-request.json").read_bytes() == before
 
 

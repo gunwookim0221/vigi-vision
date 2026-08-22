@@ -569,6 +569,12 @@ def test_production_path_acquires_publishes_reopens_and_reuses_support_evidence(
     }
     assert repeated_result == result
     assert after == before
+    terminalized = service.terminalize(handle, coarse_execution=repeated)
+    assert terminalized.publication is not None, terminalized
+    assert terminalized.publication.outcome.value == "created"
+    published = service.repository.load(investigation_id, handle.search_run_id)
+    assert published.schema_version == 4
+    assert published.state == terminalized.publication.result.result_kind.value
     handle.release()
 
 

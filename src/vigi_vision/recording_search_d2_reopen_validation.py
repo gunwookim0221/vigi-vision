@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from hashlib import sha256
 from itertools import pairwise
@@ -14,6 +15,7 @@ from vigi_vision.recording_search_a2_repository import read_schema2_children
 from vigi_vision.recording_search_b2_validation import read_schema3_children
 from vigi_vision.recording_search_c1_planner import build_coarse_sampling_plan
 from vigi_vision.recording_search_c2_support import coarse_target_id
+from vigi_vision.recording_search_d1_identity import policy_identity
 from vigi_vision.recording_search_d2_enums import D2EvidenceRole
 from vigi_vision.recording_search_d2_evidence import (
     D2EvidenceReference,
@@ -103,7 +105,7 @@ def reopen_terminal_result(
         result, references = _reconstruct_result(
             manifest, baseline, operations, observations, aliases, acquisition, frames, requests
         )
-        _validate_source_digest(manifest, predecessor)
+        _validate_source_digest(manifest, predecessor, root, run_path)
         _validate_evidence_digest(manifest, references, baseline)
         if terminal_result_id(result) != manifest.terminal_result.result_id:
             _fail(RecordingSearchTerminalReopenCategory.IDENTITY_MISMATCH)
@@ -117,15 +119,122 @@ def reopen_terminal_result(
         return result
 
 
+def validate_authoritative_snapshot(  # noqa: C901 - strict field-by-field admission
+    root: Path,
+    run_path: Path,
+    predecessor: RecordingSearchManifestV3,
+    snapshot: D2EvidenceSnapshot,
+) -> None:
+    """Admit a proposed snapshot only when every reference is repository-owned.
+
+    D2 snapshots are intentionally in-memory.  They are not authority merely
+    because their dataclasses validate, so publication performs this strict
+    conversion against the current schema-3 children before replacing the
+    manifest.  The same child reader used by terminal reopen rejects missing,
+    foreign, duplicate, unordered, or unindexed records.
+    """
+    try:
+        if snapshot.investigation_id != predecessor.investigation_id:
+            _fail(RecordingSearchTerminalReopenCategory.FOREIGN_OWNERSHIP)
+        if snapshot.search_run_id != predecessor.search_run_id:
+            _fail(RecordingSearchTerminalReopenCategory.FOREIGN_OWNERSHIP)
+        if snapshot.baseline_observation_id != predecessor.baseline_observation_id:
+            _fail(RecordingSearchTerminalReopenCategory.EVIDENCE_OWNERSHIP_MISMATCH)
+        expected_plan = build_coarse_sampling_plan(predecessor.as_schema2().policy)
+        if snapshot.plan_id != expected_plan.plan_id:
+            _fail(RecordingSearchTerminalReopenCategory.IDENTITY_MISMATCH)
+        if snapshot.policy_identity != policy_identity(predecessor.as_schema2().policy):
+            _fail(RecordingSearchTerminalReopenCategory.IDENTITY_MISMATCH)
+        if snapshot.phase6_confirmation_id != predecessor.investigation_id:
+            _fail(RecordingSearchTerminalReopenCategory.FOREIGN_OWNERSHIP)
+        if snapshot.source_revision.manifest_digest != authoritative_evidence_digest(
+            root, run_path, predecessor
+        ):
+            _fail(RecordingSearchTerminalReopenCategory.IDENTITY_MISMATCH)
+        baseline, operations, observations, aliases = read_schema3_children(
+            root, run_path, predecessor
+        )
+        acquisition, frames, requests = read_schema2_children(
+            root, run_path, predecessor.as_schema2()
+        )
+        converted: list[D2EvidenceReference] = []
+        for reference in snapshot.references:
+            persisted = TerminalEvidenceReference(
+                role=reference.role,
+                target_id=reference.target_id,
+                requested_time_utc=reference.requested_time_utc,
+                acquisition_operation_id=reference.acquisition_operation_id,
+                probe_request_id=reference.probe_request_id,
+                classification_operation_id=reference.classification_operation_id,
+                observation_id=reference.observation_id or "",
+                canonical_frame_id=reference.canonical_frame_id,
+                alias_id=reference.alias_id,
+                decode_session_id=reference.decode_session_id,
+                decoded_frame_utc=reference.decoded_frame_utc,
+                decoded_pts=reference.decoded_pts,
+                decoded_ordinal=reference.decoded_ordinal,
+                support_group_id=reference.support_group_id,
+                support_index=reference.support_index,
+                is_phase6_baseline=reference.is_phase6_baseline,
+            )
+            converted.append(
+                _record_reference(
+                    persisted,
+                    baseline,
+                    operations,
+                    observations,
+                    aliases,
+                    acquisition,
+                    frames,
+                    requests,
+                )
+            )
+        if tuple(converted) != snapshot.references:
+            _fail(RecordingSearchTerminalReopenCategory.EVIDENCE_OWNERSHIP_MISMATCH)
+        # Construction of ``snapshot`` already enforces role ordering,
+        # support-group membership, distinct IDs, and decoded-frame ordering.
+        # Recompute its digest here so a caller cannot substitute a mutable
+        # object after admission.
+        _ = evidence_snapshot_digest(snapshot)
+    except RecordingSearchTerminalReopenError:
+        raise
+    except (RecordingSearchManifestCorruptError, OSError, ValueError, TypeError, KeyError):
+        _fail(RecordingSearchTerminalReopenCategory.VALIDATOR_FAILURE)
+
+
 def _validate_source_digest(
-    manifest: RecordingSearchManifestV4, predecessor: RecordingSearchManifestV3
+    manifest: RecordingSearchManifestV4,
+    predecessor: RecordingSearchManifestV3,
+    root: Path,
+    run_path: Path,
 ) -> None:
     terminal = manifest.terminal_result
-    if (
-        terminal.source_manifest_digest
-        != sha256(predecessor.canonical_json().encode("utf-8")).hexdigest()
-    ):
+    expected = authoritative_evidence_digest(root, run_path, predecessor)
+    if terminal.source_manifest_digest != expected:
         _fail(RecordingSearchTerminalReopenCategory.IDENTITY_MISMATCH)
+
+
+def authoritative_evidence_digest(
+    root: Path, run_path: Path, predecessor: RecordingSearchManifestV3
+) -> str:
+    """Return the canonical digest of the schema-3 manifest and indexed children."""
+    acquisition, frames, requests = read_schema2_children(root, run_path, predecessor.as_schema2())
+    _baseline, _operations, observations, aliases = read_schema3_children(
+        root, run_path, predecessor
+    )
+    payload = {
+        "manifest": predecessor.model_dump(mode="json"),
+        "operations": [acquisition[key].model_dump(mode="json") for key in sorted(acquisition)],
+        "requests": [requests[key].model_dump(mode="json") for key in sorted(requests)],
+        "frames": [frames[key].model_dump(mode="json") for key in sorted(frames)],
+        "observations": [observations[key].model_dump(mode="json") for key in sorted(observations)],
+        "aliases": [aliases[key].model_dump(mode="json") for key in sorted(aliases)],
+    }
+    return sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
 
 
 def _validate_children(  # noqa: PLR0913
@@ -339,16 +448,6 @@ def _reconstruct_result(  # noqa: PLR0913
         )
         return result, (base, *refs)
     if isinstance(terminal, PublishedFoundResult):
-        coarse = _reconstruct_coarse_references(
-            manifest,
-            baseline,
-            classification_operations,
-            observations,
-            aliases,
-            acquisition,
-            frames,
-            requests,
-        )
         lower = _record_reference(
             terminal.lower_reference,
             baseline,
@@ -384,6 +483,22 @@ def _reconstruct_result(  # noqa: PLR0913
                 requests,
             )
             for item in terminal.narrowing_evidence
+        )
+        excluded_probe_request_ids = {
+            item.probe_request_id
+            for item in (*support, *narrowing)
+            if item.probe_request_id is not None
+        }
+        coarse = _reconstruct_coarse_references(
+            manifest,
+            baseline,
+            classification_operations,
+            observations,
+            aliases,
+            acquisition,
+            frames,
+            requests,
+            exclude_probe_request_ids=excluded_probe_request_ids,
         )
         _validate_found(manifest, lower, support, narrowing)
         result = FoundResult(
@@ -466,9 +581,14 @@ def _reconstruct_coarse_references(  # noqa: PLR0913
     acquisition: Mapping[str, object],
     frames: dict[str, CanonicalProbeFrameRecord],
     requests: dict[str, ProbeFrameRequestRecord],
+    *,
+    exclude_probe_request_ids: set[str] | None = None,
 ) -> tuple[D2EvidenceReference, ...]:
     plan = build_coarse_sampling_plan(manifest.policy.to_acquisition_policy())
     result: list[D2EvidenceReference] = []
+    excluded: set[str] = (
+        set() if exclude_probe_request_ids is None else set(exclude_probe_request_ids)
+    )
     for requested_time in plan.target_times:
         matching = tuple(
             request
@@ -480,6 +600,8 @@ def _reconstruct_coarse_references(  # noqa: PLR0913
         if len(matching) != 1:
             _fail(RecordingSearchTerminalReopenCategory.MISSING_RECORD)
         request = matching[0]
+        if request.probe_request_id in excluded:
+            continue
         frame = frames.get(request.canonical_frame_id or "")
         if frame is None:
             _fail(RecordingSearchTerminalReopenCategory.MISSING_RECORD)

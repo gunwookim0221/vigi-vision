@@ -1670,8 +1670,12 @@ strictly inside its preceding interval; a PRESENT transition moves only the
 lower bound to that midpoint; an ABSENT transition moves only the upper bound
 after a complete policy-count support group; and a visual, operational, or
 nonterminal stop leaves bounds unchanged. Every target, request, observation,
-canonical-frame, operation, and support-group ID is unique within its role and
-belongs to the same run, plan, policy, and source revision. Support members have
+canonical-frame, and support-group ID is unique within its role and belongs to
+the same run, plan, policy, and source revision. A single admitted A2 batch
+acquisition operation may own multiple requested targets and therefore may
+repeat across their references; request and classification operation IDs
+remain unique per reference, and repeated operation ownership is validated
+through the same-run ordered index. Support members have
 one decode session and strictly increasing requested UTC, decoded UTC, PTS, and
 ordinal values; aliases, gaps, missing provenance, and duplicate canonical
 frames cannot occupy support positions. The configured
@@ -2076,8 +2080,9 @@ TerminalizationCandidate =
 `C2BracketReady`, `C2OperationalStop`, and `D1OperationalStop` are not
 terminalization candidates. They remain nonterminal typed outcomes and are
 returned without a terminal result. No transport accepts this union.
-`RecordingSearchService` creates it from the existing C1/C2/D1 production path
-and passes the same explicit
+`RecordingSearchService.terminalize` creates it from the existing C1/C2/D1
+production path, reconstructs the authoritative snapshot from the indexed
+schema-2/3 repository records, and passes the same explicit
 `RecordingSearchRunHandle` to D2. Publication requires the handle to be current,
 open, bound to the same investigation/run/Phase 6 confirmation/baseline, and to
 own the continuously held OS lock. A read-only exact-duplicate lookup after
@@ -2106,7 +2111,10 @@ manifest and reconstructs every claim from its indexed children. It requires:
 The complete coarse execution is accepted only as a claim to recheck. D2
 rebuilds the plan and evidence snapshot from the repository and reruns the
 existing C2 interpretation. A transient status can never override durable
-facts.
+facts. The service also rebuilds the snapshot after D1 narrowing so publication
+and strict reopen use the same complete evidence set. A C2 or D1
+operational/nonterminal outcome remains schema 3 `RUNNING`; only a strictly
+visual terminal interpretation reaches schema 4 publication.
 
 ### Closed terminal result vocabulary
 
@@ -2623,10 +2631,11 @@ phase8_handoff_status: PENDING | READY | NOT_APPLICABLE
 
 `PENDING` means a valid `FOUND` result exists but no valid handoff request is
 present; `READY` means the separate request strictly reopens; other result kinds
-are `NOT_APPLICABLE`. Existing raw observations, comparisons, operation records,
-alias details, paths, decoded timestamps, PTS, ordinals, and private evidence
-remain hidden. The current policy/confirmation fields are preserved only for
-response compatibility; D2 adds no broader policy or evidence exposure. A
+are `NOT_APPLICABLE`. Schema-4 status is an explicit projection of only the
+fields shown above; it does not serialize the internal schema-4 manifest.
+Existing raw observations, comparisons, operation records, alias details,
+paths, decoded timestamps, PTS, ordinals, confirmation/policy internals, and
+private evidence remain hidden. A
 corrupt manifest/request returns the existing fixed safe error and no partial
 result. Schemas 1-3 have no `result` and project
 `phase8_handoff_status: NOT_APPLICABLE`; schema-3 interruption remains an

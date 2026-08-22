@@ -119,7 +119,9 @@ def _corrupt(reason: str | None, snapshot: D2EvidenceSnapshot | None) -> C2Resul
     return C2OperationalStop(mapped, target_ids(snapshot))
 
 
-def _inconclusive(reason: str | None, snapshot: D2EvidenceSnapshot | None) -> C2Result:
+def _inconclusive(  # noqa: PLR0911 - reason mapping is intentionally explicit
+    reason: str | None, snapshot: D2EvidenceSnapshot | None
+) -> C2Result:
     if reason == "nonmonotonic_visual_evidence":
         return _visual(VisualStopReason.NONMONOTONIC_VISUAL_EVIDENCE, snapshot)
     if reason == "insufficient_visual_evidence":
@@ -134,6 +136,8 @@ def _inconclusive(reason: str | None, snapshot: D2EvidenceSnapshot | None) -> C2
                     snapshot_digest,
                 )
         return C2OperationalStop(OperationalStopReason.INCOMPLETE_EVIDENCE, target_ids(snapshot))
+    if reason == "coarse_execution_interrupted":
+        return C2OperationalStop(OperationalStopReason.INTERRUPTED, target_ids(snapshot))
     if reason == "missing_present_lower_bound":
         return C2OperationalStop(OperationalStopReason.INCOMPLETE_EVIDENCE, target_ids(snapshot))
     return C2OperationalStop(map_operational_reason(reason), target_ids(snapshot))

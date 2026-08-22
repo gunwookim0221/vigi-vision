@@ -202,6 +202,32 @@ def test_c2_operational_reason_precedence_is_closed() -> None:
     assert adapted.reason is OperationalStopReason.RECORDING_COVERAGE_GAP
 
 
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("acquisition_timeout", OperationalStopReason.TIMEOUT),
+        ("classifier_timeout", OperationalStopReason.CLASSIFICATION_TIMEOUT),
+        ("acquisition_failed", OperationalStopReason.ACQUISITION_FAILED),
+        ("decode_failed", OperationalStopReason.DECODE_FAILED),
+        ("classification_failed", OperationalStopReason.CLASSIFICATION_FAILED),
+        ("unexpected_error", OperationalStopReason.UNEXPECTED_ERROR),
+        ("coarse_execution_interrupted", OperationalStopReason.INTERRUPTED),
+    ],
+)
+def test_c2_operational_causes_never_become_visual(
+    reason: str, expected: OperationalStopReason
+) -> None:
+    result = CoarseInterpretationResult(
+        status=CoarseInterpretationStatus.INCONCLUSIVE,
+        safe_reason=reason,
+    )
+
+    adapted = adapt_c2_result(result, _snapshot())
+
+    assert isinstance(adapted, C2OperationalStop)
+    assert adapted.reason is expected
+
+
 def test_c2_unknown_status_fails_closed() -> None:
     result = CoarseInterpretationResult(
         status=cast("CoarseInterpretationStatus", cast("object", "future-status")),
@@ -279,6 +305,18 @@ def test_d1_timeout_is_operational_and_has_no_digest() -> None:
 
     assert isinstance(adapted, D1OperationalStop)
     assert adapted.reason is OperationalStopReason.TIMEOUT
+
+
+def test_d1_classifier_timeout_is_distinct_from_acquisition_timeout() -> None:
+    result = NarrowingResult(
+        status=NarrowingStatus.INDETERMINATE,
+        safe_reason="classifier_timeout",
+    )
+
+    adapted = adapt_d1_result(result, _snapshot())
+
+    assert isinstance(adapted, D1OperationalStop)
+    assert adapted.reason is OperationalStopReason.CLASSIFICATION_TIMEOUT
 
 
 def test_d1_interruption_maps_to_operational_stop() -> None:

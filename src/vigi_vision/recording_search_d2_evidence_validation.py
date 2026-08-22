@@ -176,7 +176,8 @@ def validate_reference_order(references: tuple[EvidenceReferenceLike, ...]) -> N
 def validate_unique_reference_ids(references: tuple[EvidenceReferenceLike, ...]) -> None:
     observations: set[str] = set()
     targets: set[str] = set()
-    operations: set[str] = set()
+    probe_requests: set[str] = set()
+    classification_operations: set[str] = set()
     for reference in references:
         observation_id = reference.observation_id
         if (
@@ -191,15 +192,18 @@ def validate_unique_reference_ids(references: tuple[EvidenceReferenceLike, ...])
             if target_id in targets:
                 raise ValueError
             targets.add(target_id)
-        for operation_id in (
-            reference.acquisition_operation_id,
-            reference.probe_request_id,
-            reference.classification_operation_id,
+        # A single A2 batch operation legitimately owns multiple decoded
+        # requests/frames.  Its immutable operation identity may therefore
+        # recur across references; request and classification identities are
+        # per-reference and must remain unique.
+        for operation_id, seen in (
+            (reference.probe_request_id, probe_requests),
+            (reference.classification_operation_id, classification_operations),
         ):
             if operation_id is not None:
-                if operation_id in operations:
+                if operation_id in seen:
                     raise ValueError
-                operations.add(operation_id)
+                seen.add(operation_id)
 
 
 def validate_support_members(

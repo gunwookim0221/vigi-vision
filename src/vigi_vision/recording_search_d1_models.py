@@ -91,6 +91,7 @@ class NarrowingProbeEvidence:
     decoded_pts: int | None = None
     decoded_ordinal: int | None = None
     classification_operation_id: str | None = None
+    operational_reason: str | None = None
 
     def __post_init__(self) -> None:  # noqa: C901 - strict provenance shape
         """Validate admitted request and optional visual provenance."""
@@ -98,6 +99,8 @@ class NarrowingProbeEvidence:
         if not self.target_id or not self.probe_request_id:
             raise ValueError
         if self.status is CoarseSampleStatus.SUCCESS:
+            if self.operational_reason is not None:
+                raise ValueError
             if self.canonical_frame_id is None or self.operation_id is None:
                 raise ValueError
             if self.state is not None and self.observation_id is None:

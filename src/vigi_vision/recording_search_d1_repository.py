@@ -329,6 +329,7 @@ class RepositoryNarrowingEvidenceStore(NarrowingEvidenceStore[NarrowingHandle]):
                 requested_time_utc=request.requested_time_utc,
                 status=status,
                 probe_request_id=request.probe_request_id,
+                operational_reason=request.failure_reason,
             )
         if request.canonical_frame_id is None:
             raise RecordingSearchManifestCorruptError

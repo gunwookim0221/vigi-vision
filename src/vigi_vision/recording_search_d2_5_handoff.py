@@ -187,7 +187,7 @@ def create_or_reuse_phase8_request(  # noqa: C901 - atomic retry branches are co
         raise Phase8HandoffArtifactError
     if destination.exists() or destination.is_symlink():
         existing = _read_request(root, destination)
-        if existing == request:
+        if _same_deterministic_request(existing, request):
             return Phase8HandoffResult(existing, Phase8HandoffOutcome.REUSED)
         raise Phase8HandoffConflictError
     temporary: Path | None = None
@@ -204,12 +204,12 @@ def create_or_reuse_phase8_request(  # noqa: C901 - atomic retry branches are co
             os.fsync(handle.fileno())
         if destination.exists() or destination.is_symlink():
             existing = _read_request(root, destination)
-            if existing == request:
+            if _same_deterministic_request(existing, request):
                 return Phase8HandoffResult(existing, Phase8HandoffOutcome.REUSED)
             raise Phase8HandoffConflictError  # noqa: TRY301
         _ = temporary.rename(destination)
         committed = _read_request(root, destination)
-        if committed != request:
+        if not _same_deterministic_request(committed, request):
             raise Phase8HandoffCorruptError  # noqa: TRY301
         return Phase8HandoffResult(committed, Phase8HandoffOutcome.CREATED)
     except (Phase8HandoffConflictError, Phase8HandoffCorruptError, Phase8HandoffArtifactError):
@@ -283,6 +283,23 @@ def _read_request(root: Path, path: Path) -> Phase8HandoffRequestV1:
 def _expected_request_id(request: Phase8HandoffRequestV1) -> str:
     digest = hashlib.sha256(canonical_phase8_handoff_json(request).encode("utf-8")).hexdigest()
     return f"{_ID_PREFIX}{digest}"
+
+
+def _same_deterministic_request(
+    existing: Phase8HandoffRequestV1, requested: Phase8HandoffRequestV1
+) -> bool:
+    """Compare only the immutable deterministic identity of two requests.
+
+    ``created_at_utc`` is publication metadata.  It is intentionally excluded
+    from the request identity and must not turn a delayed or restarted retry
+    into a conflict.  Strict readback still validates the persisted timestamp;
+    this helper only decides whether the existing immutable request is the
+    same request that was asked for.
+    """
+    return (
+        existing.handoff_request_id == requested.handoff_request_id
+        and canonical_phase8_handoff_json(existing) == canonical_phase8_handoff_json(requested)
+    )
 
 
 def _validate_run_path(root: Path, run_path: Path) -> None:

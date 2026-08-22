@@ -19,7 +19,7 @@ from tests.recording_search_b4_support import (
 
 from vigi_vision.recording_search_b2_models import RecordingSearchManifestV3
 from vigi_vision.recording_search_d2_identity import evidence_snapshot_digest
-from vigi_vision.recording_search_d2_publication import TerminalPublicationOutcome
+from vigi_vision.recording_search_d2_publication import build_schema4_successor
 from vigi_vision.recording_search_d2_terminal import (
     NotFoundResult,
     TerminalInputSnapshot,
@@ -28,7 +28,8 @@ from vigi_vision.recording_search_d2_terminal import (
 )
 from vigi_vision.recording_search_models import (
     RecordingSearchManifestCorruptError,
-    RecordingSearchTerminalConflictError,
+    RecordingSearchTerminalReopenCategory,
+    RecordingSearchTerminalReopenError,
 )
 
 
@@ -85,50 +86,39 @@ def _harness_with_schema3(tmp_path: Path) -> Harness:
     return harness
 
 
-def test_service_publishes_schema4_and_identical_retry_reuses_without_rewrite(
+def test_service_rejects_unindexed_synthetic_evidence_before_replacement(
     tmp_path: Path,
 ) -> None:
     harness = _harness_with_schema3(tmp_path)
     context, predecessor = _publishable_context(harness)
     result = _terminal_result(context)
 
-    published = harness.service.publish_terminal(harness.handle, result, context)
-
-    assert published.outcome is TerminalPublicationOutcome.CREATED
-    assert published.manifest.state == "NOT_FOUND"
-    assert harness.handle.closed
-    assert (
-        harness.service.repository.load(
-            harness.investigation_id, predecessor.search_run_id
-        ).schema_version
-        == 4
-    )
-    assert (
-        harness.service.repository.load(
-            harness.investigation_id, predecessor.search_run_id
-        ).schema_version
-        == 4
-    )
-    manifest_path = (
-        harness.service.repository.run_path(harness.investigation_id, predecessor.search_run_id)
-        / "manifest.json"
-    )
-    before = manifest_path.read_bytes()
-    reused = harness.service.publish_terminal(harness.handle, result, context)
-
-    assert reused.outcome is TerminalPublicationOutcome.REUSED
-    assert manifest_path.read_bytes() == before
+    with pytest.raises(RecordingSearchTerminalReopenError) as raised:
+        _ = harness.service.publish_terminal(harness.handle, result, context)
+    assert raised.value.category is RecordingSearchTerminalReopenCategory.IDENTITY_MISMATCH
+    persisted = harness.service.repository.load(harness.investigation_id, predecessor.search_run_id)
+    assert isinstance(persisted, RecordingSearchManifestV3)
+    assert not harness.handle.closed
     harness.service.close()
 
 
 def test_different_terminal_result_conflicts_after_schema4_commit(tmp_path: Path) -> None:
     harness = _harness_with_schema3(tmp_path)
-    context, _ = _publishable_context(harness)
+    context, predecessor = _publishable_context(harness)
     result = _terminal_result(context)
-    _ = harness.service.publish_terminal(harness.handle, result, context)
+    successor = build_schema4_successor(
+        predecessor,
+        context,
+        result,
+        harness.service.repository.now_utc(),
+    )
+    harness.service.repository.write_schema4_manifest(
+        successor,
+        harness.service.repository.run_path(harness.investigation_id, predecessor.search_run_id),
+    )
 
     different = replace(result, result_id="recording-search-result-v1-" + "f" * 64)
-    with pytest.raises(RecordingSearchTerminalConflictError):
+    with pytest.raises(RecordingSearchTerminalReopenError):
         _ = harness.service.publish_terminal(harness.handle, different, context)
     harness.service.close()
 
@@ -139,7 +129,7 @@ def test_invalid_terminal_proposal_preserves_schema3_and_active_handle(tmp_path:
     result = _terminal_result(context)
     invalid = replace(result, phase6_confirmation_id="foreign-confirmation")
 
-    with pytest.raises(ValueError, match=r"^$"):
+    with pytest.raises(RecordingSearchTerminalReopenError):
         _ = harness.service.publish_terminal(harness.handle, invalid, context)
 
     persisted = harness.service.repository.load(harness.investigation_id, predecessor.search_run_id)
@@ -150,10 +140,19 @@ def test_invalid_terminal_proposal_preserves_schema3_and_active_handle(tmp_path:
 
 def test_schema4_manifest_rejects_unknown_fields(tmp_path: Path) -> None:
     harness = _harness_with_schema3(tmp_path)
-    context, _ = _publishable_context(harness)
+    context, predecessor = _publishable_context(harness)
     result = _terminal_result(context)
-    published = harness.service.publish_terminal(harness.handle, result, context)
-    payload = published.manifest.model_dump(mode="json")
+    successor = build_schema4_successor(
+        predecessor,
+        context,
+        result,
+        harness.service.repository.now_utc(),
+    )
+    harness.service.repository.write_schema4_manifest(
+        successor,
+        harness.service.repository.run_path(harness.investigation_id, predecessor.search_run_id),
+    )
+    payload = successor.model_dump(mode="json")
     payload["unexpected"] = True
 
     manifest_path = (

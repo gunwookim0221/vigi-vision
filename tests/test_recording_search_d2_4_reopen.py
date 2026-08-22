@@ -16,7 +16,7 @@ from tests.recording_search_b4_support import (
 )
 
 from vigi_vision.recording_search_b2_models import RecordingSearchManifestV3
-from vigi_vision.recording_search_d2_publication import TerminalPublicationOutcome
+from vigi_vision.recording_search_d2_publication import build_schema4_successor
 from vigi_vision.recording_search_d2_publication_models import RecordingSearchManifestV4
 from vigi_vision.recording_search_d2_reopen_validation import reopen_terminal
 from vigi_vision.recording_search_d2_status import terminal_status
@@ -42,20 +42,69 @@ def _published_harness(tmp_path: Path) -> tuple[Harness, RecordingSearchManifest
     )
     context, _ = context_factory(harness)
     result = result_factory(context)
-    published = harness.service.publish_terminal(harness.handle, result, context)
-    assert published.outcome is TerminalPublicationOutcome.CREATED
-    return harness, published.manifest
+    predecessor = harness.service.repository.load(
+        harness.investigation_id, harness.manifest.search_run_id
+    )
+    assert isinstance(predecessor, RecordingSearchManifestV3)
+    published = build_schema4_successor(
+        predecessor,
+        context,
+        result,
+        harness.service.repository.now_utc(),
+    )
+    harness.service.repository.write_schema4_manifest(
+        published,
+        harness.service.repository.run_path(harness.investigation_id, predecessor.search_run_id),
+    )
+    return harness, published
 
 
 def test_terminal_status_is_schema4_allowlisted_projection(tmp_path: Path) -> None:
     harness, manifest = _published_harness(tmp_path)
     try:
         status = terminal_status(manifest)
-        payload = status.model_dump(mode="json")
+        payload = cast("dict[str, object]", status.model_dump(mode="json"))
+        result_payload = cast("dict[str, object]", payload["result"])
         assert status.schema_version == 4
-        assert payload["result"]["kind"] == "NOT_FOUND"
+        assert result_payload["kind"] == "NOT_FOUND"
         assert "terminal_result" not in payload
-        assert all("path" not in key.lower() for key in payload)
+        assert set(payload) == {
+            "schema_version",
+            "investigation_id",
+            "search_run_id",
+            "state",
+            "created_at_utc",
+            "started_at_utc",
+            "completed_at_utc",
+            "failure_reason",
+            "result",
+            "phase8_handoff_status",
+        }
+        assert set(result_payload) == {
+            "result_id",
+            "kind",
+            "terminal_reason",
+            "interval",
+            "achieved_precision_seconds",
+            "limitations",
+            "review_anchor_utc",
+        }
+        serialized = str(payload)
+        for forbidden in (
+            "confirmation",
+            "probe_request",
+            "canonical_frame",
+            "observation",
+            "alias",
+            "classification_operation",
+            "operation_id",
+            "decoded_pts",
+            "decoded_ordinal",
+            "decode_session",
+            "jpeg_sha256",
+            "jpeg_relative_path",
+        ):
+            assert forbidden not in serialized
     finally:
         harness.service.close()
 
@@ -63,6 +112,7 @@ def test_terminal_status_is_schema4_allowlisted_projection(tmp_path: Path) -> No
 def test_service_reopen_rejects_terminal_evidence_not_in_index(tmp_path: Path) -> None:
     harness, manifest = _published_harness(tmp_path)
     try:
+        harness.service.close()
         with pytest.raises(RecordingSearchTerminalReopenError) as raised:
             _ = harness.service.status(harness.investigation_id, manifest.search_run_id)
         assert raised.value.category is RecordingSearchTerminalReopenCategory.MISSING_RECORD

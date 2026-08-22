@@ -25,6 +25,10 @@ from vigi_vision.recording_search_a2_models import (
 )
 from vigi_vision.recording_search_a2_service import acquire_targets
 from vigi_vision.recording_search_b2_models import RecordingSearchManifestV3
+from vigi_vision.recording_search_b2_validation import (
+    validate_authoritative_baseline,
+    validate_schema3_tree,
+)
 from vigi_vision.recording_search_b4_authority import ClassificationAttemptSlot
 from vigi_vision.recording_search_b4_models import (
     ClassificationOperationalError,
@@ -55,15 +59,31 @@ from vigi_vision.recording_search_d2_5_handoff import (
     build_phase8_handoff_request,
     phase8_handoff_status,
 )
+from vigi_vision.recording_search_d2_c2_adapter import adapt_c2_result
+from vigi_vision.recording_search_d2_composition import build_authoritative_d2_snapshot
+from vigi_vision.recording_search_d2_d1_adapter import adapt_d1_result
+from vigi_vision.recording_search_d2_enums import OperationalStopReason
 from vigi_vision.recording_search_d2_publication import (
     TerminalPublicationOutcome,
     TerminalPublicationResult,
     build_schema4_successor,
 )
 from vigi_vision.recording_search_d2_publication_models import RecordingSearchManifestV4
-from vigi_vision.recording_search_d2_reopen_validation import reopen_terminal_result
+from vigi_vision.recording_search_d2_reopen_validation import (
+    reopen_terminal_result,
+    validate_authoritative_snapshot,
+)
+from vigi_vision.recording_search_d2_results import C2BracketReady, C2OperationalStop
 from vigi_vision.recording_search_d2_status import terminal_status
-from vigi_vision.recording_search_d2_terminal_models import FoundResult
+from vigi_vision.recording_search_d2_terminal import interpret_terminal
+from vigi_vision.recording_search_d2_terminal_identity import terminal_result_id
+from vigi_vision.recording_search_d2_terminal_models import (
+    FoundResult,
+    InconclusiveResult,
+    NotFoundResult,
+    OperationalOutcome,
+    TerminalInputSnapshot,
+)
 from vigi_vision.recording_search_lock import LocalInvestigationLock
 from vigi_vision.recording_search_models import (
     Phase8HandoffStatus,
@@ -79,6 +99,8 @@ from vigi_vision.recording_search_models import (
     RecordingSearchRequest,
     RecordingSearchState,
     RecordingSearchTerminalConflictError,
+    RecordingSearchTerminalReopenCategory,
+    RecordingSearchTerminalReopenError,
     default_policy,
 )
 from vigi_vision.reference_frame_models import ReferenceFrameError, parse_reference_frame_request
@@ -99,11 +121,9 @@ if TYPE_CHECKING:
     from vigi_vision.recording_search_c1_planner import CoarseSamplingPlan
     from vigi_vision.recording_search_c2_models import CoarseCandidateBracket
     from vigi_vision.recording_search_d1_models import NarrowingResult
+    from vigi_vision.recording_search_d2_results import C2Result, D1Result
     from vigi_vision.recording_search_d2_status import RecordingSearchStatusV4
-    from vigi_vision.recording_search_d2_terminal_models import (
-        TerminalInputSnapshot,
-        TerminalResult,
-    )
+    from vigi_vision.recording_search_d2_terminal_models import TerminalOutcome, TerminalResult
     from vigi_vision.recording_search_models import RecordingSearchPolicy
     from vigi_vision.recording_search_repository import RecordingSearchRepository, SearchManifest
 
@@ -278,6 +298,16 @@ class RecordingSearchStartResult:
     outcome: RecordingSearchOutcome
     baseline_bytes: bytes = field(repr=False)
     run_handle: RecordingSearchRunHandle | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class RecordingSearchTerminalizationResult:
+    """Typed result of the single production C2/D1/D2 composition boundary."""
+
+    outcome: TerminalOutcome
+    c2_result: C2Result
+    d1_result: D1Result | None
+    publication: TerminalPublicationResult | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,6 +496,121 @@ class RecordingSearchService:
         evidence_store = RepositoryNarrowingEvidenceStore(_D1RepositoryView(self.repository))
         return execute_binary_narrowing(self, handle, bracket, policy, evidence_store)
 
+    def terminalize(  # noqa: C901, PLR0911 - bounded orchestration boundary
+        self,
+        handle: RecordingSearchRunHandle,
+        *,
+        coarse_execution: CoarseSamplingResult | None = None,
+        narrowing_result: NarrowingResult | None = None,
+    ) -> RecordingSearchTerminalizationResult:
+        """Compose C2, D1, and D2 and publish only a visual terminal outcome.
+
+        Callers supply at most the typed non-persistent execution handoffs.  The
+        evidence snapshot is rebuilt from the current schema-3 repository and
+        is never accepted as a caller-owned argument.
+        """
+        execution = (
+            self.execute_coarse_sampling(handle) if coarse_execution is None else coarse_execution
+        )
+        coarse_interpretation = self.interpret_coarse_sampling(handle, execution)
+        if not execution.complete:
+            c2_result = adapt_c2_result(coarse_interpretation)
+            if isinstance(c2_result, C2OperationalStop):
+                reason = c2_result.reason
+                attempted_target_ids = c2_result.attempted_target_ids
+            else:
+                reason = OperationalStopReason.INCOMPLETE_EVIDENCE
+                attempted_target_ids = ()
+            outcome = OperationalOutcome(
+                reason,
+                attempted_target_ids,
+            )
+            return RecordingSearchTerminalizationResult(outcome, c2_result, None)
+        try:
+            with self.a2_mutation(handle):
+                manifest = self.repository.load(handle.investigation_id, handle.search_run_id)
+                if not isinstance(manifest, RecordingSearchManifestV3):
+                    raise RecordingSearchManifestCorruptError  # noqa: TRY301
+                plan = build_coarse_sampling_plan(manifest.as_schema2().policy)
+                policy = manifest.as_schema2().policy
+                snapshot = build_authoritative_d2_snapshot(
+                    self.repository,
+                    manifest,
+                    plan,
+                    execution,
+                    narrowing=narrowing_result,
+                )
+        except (RecordingSearchBaselineError, RecordingSearchNotFoundError):
+            c2_result = C2OperationalStop(OperationalStopReason.INACTIVE_AUTHORITY, ())
+            outcome = OperationalOutcome(c2_result.reason, ())
+            return RecordingSearchTerminalizationResult(outcome, c2_result, None)
+        except (RecordingSearchManifestCorruptError, RecordingSearchArtifactError, ValueError):
+            c2_result = C2OperationalStop(OperationalStopReason.CORRUPT_PERSISTED_EVIDENCE, ())
+            outcome = OperationalOutcome(c2_result.reason, ())
+            return RecordingSearchTerminalizationResult(outcome, c2_result, None)
+        c2_result = adapt_c2_result(coarse_interpretation, snapshot)
+        d1_result: D1Result | None = None
+        d1_input = None
+        if isinstance(c2_result, C2BracketReady):
+            if narrowing_result is None:
+                narrowing_result = self.narrow_binary(handle, c2_result.bracket, policy)
+            # D1 may add authoritative midpoint/support records.  Rebuild the
+            # proposal from the repository before adapting either result so
+            # terminal validation sees the complete evidence set.
+            try:
+                snapshot = build_authoritative_d2_snapshot(
+                    self.repository,
+                    manifest,
+                    plan,
+                    execution,
+                    narrowing=narrowing_result,
+                )
+            except (RecordingSearchManifestCorruptError, RecordingSearchArtifactError, ValueError):
+                c2_result = C2OperationalStop(OperationalStopReason.CORRUPT_PERSISTED_EVIDENCE, ())
+                return RecordingSearchTerminalizationResult(
+                    outcome=OperationalOutcome(c2_result.reason, ()),
+                    c2_result=c2_result,
+                    d1_result=None,
+                )
+            c2_result = adapt_c2_result(coarse_interpretation, snapshot)
+            if not isinstance(c2_result, C2BracketReady):
+                return RecordingSearchTerminalizationResult(
+                    outcome=OperationalOutcome(
+                        OperationalStopReason.CORRUPT_PERSISTED_EVIDENCE, ()
+                    ),
+                    c2_result=c2_result,
+                    d1_result=None,
+                )
+            d1_result = adapt_d1_result(
+                narrowing_result,
+                snapshot,
+                history=narrowing_result.history,
+            )
+            if narrowing_result.narrowed_bracket is not None:
+                d1_input = narrowing_result.narrowed_bracket.d1_input_bracket
+        context = TerminalInputSnapshot(
+            evidence_snapshot=snapshot,
+            plan=plan,
+            policy=policy,
+            c2_result=c2_result,
+            d1_result=d1_result,
+            d1_input_bracket=d1_input,
+        )
+        outcome = interpret_terminal(context)
+        if isinstance(outcome, (FoundResult, NotFoundResult, InconclusiveResult)):
+            publication = self.publish_terminal(handle, outcome, context)
+            return RecordingSearchTerminalizationResult(
+                outcome=outcome,
+                c2_result=c2_result,
+                d1_result=d1_result,
+                publication=publication,
+            )
+        return RecordingSearchTerminalizationResult(
+            outcome=outcome,
+            c2_result=c2_result,
+            d1_result=d1_result,
+        )
+
     def interpret_coarse_sampling(
         self, handle: RecordingSearchRunHandle, execution: CoarseSamplingResult
     ) -> CoarseInterpretationResult:
@@ -542,15 +687,28 @@ class RecordingSearchService:
         result: TerminalResult,
         snapshot: TerminalInputSnapshot,
     ) -> TerminalPublicationResult:
-        """Publish one validated D2-2 result through the Schema 4 boundary."""
+        """Publish one D2-2 result after repository-backed reconstruction.
+
+        The in-memory snapshot is a proposal, never an authority.  Under the
+        active run's exclusion boundary we strictly reopen the schema-3 tree,
+        bind the Phase 6 baseline/JPEG, and compare every proposed evidence
+        reference with the immutable child records before replacement.
+        """
         run_path = self.repository.run_path(handle.investigation_id, handle.search_run_id)
         lock, owns_lock = self._publication_lock(handle)
+        replacement_succeeded = False
+        active: _ActiveRun | None = None
         try:
             current = self.repository.load(
                 handle.investigation_id, handle.search_run_id, include_terminal=True
             )
             if isinstance(current, RecordingSearchManifestV4):
-                if current.terminal_result.result_id != result.result_id:
+                reopened = reopen_terminal_result(self.repository.root, run_path, current)
+                if (
+                    current.terminal_result.result_id != result.result_id
+                    or reopened != result
+                    or terminal_result_id(result) != result.result_id
+                ):
                     raise RecordingSearchTerminalConflictError
                 return TerminalPublicationResult(
                     manifest=current,
@@ -567,27 +725,47 @@ class RecordingSearchService:
                     )
                     if not isinstance(latest, RecordingSearchManifestV3) or latest != current:
                         raise RecordingSearchBaselineError
+                    baseline_record = validate_schema3_tree(self.repository.root, run_path, latest)
+                    validate_authoritative_baseline(
+                        self.confirmation_service, latest, baseline_record
+                    )
+                    loaded = self._load_confirmed(handle.investigation_id)
+                    _ = self._read_verified_jpeg(loaded)
+                    validate_authoritative_snapshot(
+                        self.repository.root, run_path, latest, snapshot.evidence_snapshot
+                    )
                     successor = build_schema4_successor(
-                        current, snapshot, result, _canonical_now(self.now_utc())
+                        latest, snapshot, result, _canonical_now(self.now_utc())
                     )
                     self.repository.write_schema4_manifest(successor, run_path)
-                    removed = self._active.pop(handle.investigation_id, None)
-                    if removed is not active:
-                        raise RecordingSearchBaselineError
-                    handle.retire()
+                    replacement_succeeded = True
                     committed = self.repository.load(
                         handle.investigation_id, handle.search_run_id, include_terminal=True
                     )
                     if not isinstance(committed, RecordingSearchManifestV4):
-                        raise RecordingSearchManifestCorruptError
-                    if committed.terminal_result.result_id != result.result_id:
-                        raise RecordingSearchManifestCorruptError
+                        raise RecordingSearchTerminalReopenError(
+                            RecordingSearchTerminalReopenCategory.READ_FAILURE
+                        )
+                    reopened = reopen_terminal_result(self.repository.root, run_path, committed)
+                    if (
+                        committed.terminal_result.result_id != result.result_id
+                        or reopened != result
+                    ):
+                        raise RecordingSearchTerminalReopenError(
+                            RecordingSearchTerminalReopenCategory.IDENTITY_MISMATCH
+                        )
             return TerminalPublicationResult(
                 manifest=committed,
                 result=committed.terminal_result,
                 outcome=TerminalPublicationOutcome.CREATED,
             )
         finally:
+            if replacement_succeeded and active is not None:
+                with self._guard:
+                    removed = self._active.pop(handle.investigation_id, None)
+                    if removed is not None and removed is not active:
+                        raise RecordingSearchBaselineError
+                    handle.retire()
             if owns_lock or handle.closed:
                 lock.release()
 

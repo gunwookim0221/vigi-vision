@@ -10,7 +10,10 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 from vigi_vision.object_presence_values import ClassificationOutcome
 from vigi_vision.recording_search_a2_models import ProbeFrameRequestRecord, ProbeRequestStatus
 from vigi_vision.recording_search_b3_models import ClassifyRecordingProbeRequest
-from vigi_vision.recording_search_b4_models import ClassificationOperationalError
+from vigi_vision.recording_search_b4_models import (
+    ClassificationOperationalError,
+    ClassificationOperationalReason,
+)
 from vigi_vision.recording_search_c1_models import CoarseSampleStatus
 from vigi_vision.recording_search_c2_models import CoarseCandidateBracket
 from vigi_vision.recording_search_d1_history import (
@@ -60,6 +63,12 @@ if TYPE_CHECKING:
 
 
 HandleT = TypeVar("HandleT", bound=NarrowingHandle)
+
+
+@dataclass(frozen=True, slots=True)
+class _SupportAttempt:
+    samples: tuple[NarrowingProbeEvidence, ...] | None
+    reason: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,8 +122,9 @@ class BinaryNarrowingService(Generic[HandleT]):
                     if evidence.status is CoarseSampleStatus.INTERRUPTED
                     else NarrowingStatus.INDETERMINATE
                 )
-                stopped = _record_operational_stop(state, target, _safe_reason(evidence.status))
-                return _safe(status, _safe_reason(evidence.status), stopped)
+                reason = _safe_reason(evidence.status, evidence.operational_reason)
+                stopped = _record_operational_stop(state, target, reason)
+                return _safe(status, reason, stopped)
             match evidence.state:
                 case ClassificationOutcome.PRESENT:
                     before = state
@@ -137,18 +147,23 @@ class BinaryNarrowingService(Generic[HandleT]):
                         return _safe(
                             NarrowingStatus.CORRUPT, "authoritative_evidence_invalid", state
                         )
-                    if support is None:
-                        stopped = _record_operational_stop(
-                            state, target, "absence_support_unusable"
+                    if support.samples is None:
+                        reason = support.reason or "absence_support_unusable"
+                        stopped = _record_operational_stop(state, target, reason)
+                        status = (
+                            NarrowingStatus.INTERRUPTED
+                            if reason == "interrupted"
+                            else NarrowingStatus.INDETERMINATE
                         )
-                        return _safe(
-                            NarrowingStatus.INDETERMINATE, "absence_support_unusable", stopped
-                        )
+                        return _safe(status, reason, stopped)
+                    support_samples = support.samples
                     before = state
-                    advanced = self._advance_absent(state, target.target_id, evidence, support)
+                    advanced = self._advance_absent(
+                        state, target.target_id, evidence, support_samples
+                    )
                     try:
                         state = _record_absent_transition(
-                            before, advanced, target, evidence, support, policy
+                            before, advanced, target, evidence, support_samples, policy
                         )
                     except ValueError:
                         stopped = _record_operational_stop(
@@ -218,9 +233,16 @@ class BinaryNarrowingService(Generic[HandleT]):
                 ),
             )
             require_successful_result(result, request)
-        except ClassificationOperationalError:
+        except ClassificationOperationalError as error:
             return _failure(
-                target_id, request.requested_time_utc, CoarseSampleStatus.CLASSIFICATION_FAILED
+                target_id,
+                request.requested_time_utc,
+                (
+                    CoarseSampleStatus.TIMEOUT
+                    if error.reason is ClassificationOperationalReason.CLASSIFIER_TIMEOUT
+                    else CoarseSampleStatus.CLASSIFICATION_FAILED
+                ),
+                error.reason.value,
             )
         except (RecordingSearchBaselineError, RecordingSearchArtifactError):
             return _failure(target_id, request.requested_time_utc, CoarseSampleStatus.INTERRUPTED)
@@ -247,19 +269,19 @@ class BinaryNarrowingService(Generic[HandleT]):
                 target_id, request.requested_time_utc, CoarseSampleStatus.UNEXPECTED_ERROR
             )
 
-    def _support(  # noqa: C901, PLR0911 - bounded support policy
+    def _support(  # noqa: C901, PLR0911, PLR0912 - bounded support policy
         self,
         handle: HandleT,
         target: NarrowingTarget,
         midpoint: NarrowingProbeEvidence,
         policy: RecordingSearchPolicy,
-    ) -> tuple[NarrowingProbeEvidence, ...] | None:
+    ) -> _SupportAttempt:
         support_times = tuple(
             midpoint.requested_time_utc + index * timedelta(seconds=policy.absence_cadence_seconds)
             for index in range(policy.absence_confirmation_frames)
         )
         if support_times[-1] > policy.search_end_utc:
-            return None
+            return _SupportAttempt(None, "absence_support_unusable")
         support: list[NarrowingProbeEvidence] = [midpoint]
         existing: list[NarrowingProbeEvidence | None] = [midpoint]
         try:
@@ -275,40 +297,43 @@ class BinaryNarrowingService(Generic[HandleT]):
                 )
         except RecordingSearchManifestCorruptError:
             raise
-        except (RecordingSearchBaselineError, ValueError):
-            return None
+        except RecordingSearchBaselineError:
+            return _SupportAttempt(None, "interrupted")
+        except ValueError:
+            return _SupportAttempt(None, "authoritative_evidence_invalid")
         try:
             requests = self.host.acquire_targets(handle, support_times)
             if len(requests) != len(support_times):
-                return None
+                return _SupportAttempt(None, "unexpected_error")
         except RecordingSearchManifestCorruptError:
             raise
-        except (
-            RecordingSearchBaselineError,
-            RecordingSearchArtifactError,
-            OSError,
-            RuntimeError,
-            TypeError,
-            ValueError,
-        ):
-            return None
+        except RecordingSearchBaselineError:
+            return _SupportAttempt(None, "interrupted")
+        except RecordingSearchArtifactError:
+            return _SupportAttempt(None, "acquisition_failed")
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return _SupportAttempt(None, "unexpected_error")
         if requests[0].probe_request_id != midpoint.probe_request_id:
-            return None
+            return _SupportAttempt(None, "unexpected_error")
         for requested_time_utc, request in zip(support_times[1:], requests[1:], strict=True):
             target_id = support_target_id(target, requested_time_utc)
             if request.requested_time_utc != requested_time_utc:
-                return None
+                return _SupportAttempt(None, "unexpected_error")
             evidence = existing[len(support)]
             if evidence is None:
                 evidence = self._classify_request(handle, target_id, request)
+            if evidence.status is not CoarseSampleStatus.SUCCESS:
+                return _SupportAttempt(
+                    None, _safe_reason(evidence.status, evidence.operational_reason)
+                )
             support.append(evidence)
         if not _valid_absence_support(
             support,
             policy.absence_confirmation_frames,
             policy.absence_cadence_seconds,
         ):
-            return None
-        return tuple(support)
+            return _SupportAttempt(None, "absence_support_unusable")
+        return _SupportAttempt(tuple(support), None)
 
     def _advance_present(
         self,
@@ -699,17 +724,23 @@ def _record_operational_stop(
 
 
 def _failure(
-    target_id: str, requested_time_utc: datetime, status: CoarseSampleStatus
+    target_id: str,
+    requested_time_utc: datetime,
+    status: CoarseSampleStatus,
+    operational_reason: str | None = None,
 ) -> NarrowingProbeEvidence:
     return NarrowingProbeEvidence(
         target_id=target_id,
         requested_time_utc=requested_time_utc,
         status=status,
         probe_request_id=f"unadmitted-{target_id}",
+        operational_reason=operational_reason,
     )
 
 
-def _safe_reason(status: CoarseSampleStatus) -> str:
+def _safe_reason(status: CoarseSampleStatus, operational_reason: str | None = None) -> str:
+    if operational_reason in {"classifier_timeout", "classification_failed"}:
+        return operational_reason
     return {
         CoarseSampleStatus.RECORDING_UNAVAILABLE: "recording_unavailable",
         CoarseSampleStatus.ACQUISITION_FAILED: "acquisition_failed",
