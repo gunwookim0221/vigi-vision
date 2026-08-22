@@ -17,8 +17,9 @@ bracket. D2-1 now implements the typed in-memory history, canonical identity
 producers, and strict reconstruction handoff for that bracket. D2-2 now
 implements only the pure terminal-result models/interpreter, strict evidence
 reconstruction, visual snapshot digest binding, and in-memory result identity;
-D2-3 now implements schema-4 publication, strict reopen/readback, and the
-canonical lock-order migration. The Phase 8 handoff remains unimplemented. Phase 7E
+D2-3 now implements schema-4 publication and the canonical lock-order migration;
+D2-4 now implements strict process-restart terminal reopen validation and the
+non-sensitive schema-4 status projection. The Phase 8 handoff remains unimplemented. Phase 7E
 real-NVR validation and Phase 8 review-media generation
 also remain unimplemented. The required Phase 6C
 schema 3 compatibility increment is complete.**
@@ -1337,8 +1338,9 @@ search persistence:
 ## Phase 7D-2 terminal result contract
 
 **Implementation status:** the pure D2-2 terminal interpreter and typed
-in-memory identities are implemented; D2-3 now provides schema-4 publication,
-strict persistence/readback, and duplicate conflict handling. D2 is the only boundary that may turn strictly reopened Phase 7
+in-memory identities are implemented; D2-3 provides schema-4 publication and
+D2-4 provides strict process-restart reopen validation, safe status projection,
+and duplicate conflict handling. D2 is the only boundary that may turn strictly reopened Phase 7
 evidence into an authoritative terminal search result. It does not acquire or
 classify media, reinterpret arbitrary paths, or create Phase 8 media.
 
@@ -2743,7 +2745,7 @@ existing runtime usable:
 | D2-1 | Lossless typed D1 history recorder at midpoint/PRESENT/ABSENT/support/stop transitions, complete source-C2 retention, exact `d1_input_bracket_id` and `history_digest` payloads/examples, separate D1 support-group identity, exact reconstruction and alias/order/foreign tests | Filesystem writes or service composition |
 | D2-2 | Strict result/V4 models, parser/reopen, atomic successor publication, post-replacement readback categories, cleanup table, and compatibility tests | Status/UI or Phase 8 media |
 | D2-3 | Migration of every guard-first path including `start`, unowned `status`, interruption, and cleanup; shared internal lock-order helpers only where needed; authority revalidation after waiting; existing-OS-lock publication entry and closed-handle duplicate branch; deterministic deadlock, duplicate/conflict/restart, exception-boundary, and lock-ownership tests | New lock/repository/executor, lease, takeover, or parallel lifecycle |
-| D2-4 | Compatible status projection, safe readback/corruption categories, and idempotent post-commit handoff request | New HTTP route or review extraction |
+| D2-4 | Compatible status projection and safe readback/corruption categories for process-restart reopen | New HTTP route, Phase 8 handoff, or review extraction |
 | D2-5 | Cross-boundary acceptance/failure matrix, deterministic-event coverage, and durable documentation synchronization | Real-NVR tuning or Phase 7E/8/9 work |
 
 Acceptance tests must cover:
@@ -2994,8 +2996,9 @@ classification, filesystem write, manifest mutation, or schema change. Phase
 #### Phase 7D-2: terminal persistence
 
 - **Status:** D2-2 interpretation is implemented as a pure increment; D2-3
-  implements schema-4 persistence/publication with strict readback and the
-  canonical lock order.
+  implements schema-4 persistence/publication and the canonical lock order;
+  D2-4 implements strict process-restart reopen validation and safe status
+  projection.
 - **Prerequisite:** retain reconstructible source-C2 and visually blocking
   evidence in the D1 in-memory handoff as specified above. Do not change D1
   midpoint or A2/B4 behavior.

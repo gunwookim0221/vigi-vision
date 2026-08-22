@@ -104,8 +104,10 @@ def test_service_publishes_schema4_and_identical_retry_reuses_without_rewrite(
         == 4
     )
     assert (
-        harness.service.status(harness.investigation_id, predecessor.search_run_id).schema_version
-        == 2
+        harness.service.repository.load(
+            harness.investigation_id, predecessor.search_run_id
+        ).schema_version
+        == 4
     )
     manifest_path = (
         harness.service.repository.run_path(harness.investigation_id, predecessor.search_run_id)

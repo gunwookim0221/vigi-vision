@@ -107,6 +107,8 @@ class _PublishedCommon(BaseModel):
     policy_identity: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     source_manifest_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     evidence_snapshot_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    source_c2_bracket_id: StrictStr | None = None
+    source_d1_bracket_id: StrictStr | None = None
     terminal_reason: StrictStr
     limitations: tuple[StrictStr, ...]
     published_at_utc: CanonicalFractionalUtc
@@ -272,7 +274,11 @@ def _normalize_variant(payload: dict[str, object], variant_key: str) -> None:
 
 
 def published_terminal_result(
-    result: TerminalResult, published_at_utc: datetime
+    result: TerminalResult,
+    published_at_utc: datetime,
+    *,
+    source_c2_bracket_id: str | None = None,
+    source_d1_bracket_id: str | None = None,
 ) -> PublishedTerminalResult:
     """Convert one validated D2-2 result into a strict persisted result."""
     payload = canonical_terminal_result_payload(result)
@@ -282,6 +288,8 @@ def published_terminal_result(
         limitations=tuple(result.limitations),
         result_schema_version=1,
         published_at_utc=published_at_utc,
+        source_c2_bracket_id=source_c2_bracket_id,
+        source_d1_bracket_id=source_d1_bracket_id,
     )
     variant_key = {
         FoundResult: "found",

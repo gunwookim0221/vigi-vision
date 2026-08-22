@@ -54,6 +54,7 @@ from vigi_vision.recording_search_d2_publication import (
     build_schema4_successor,
 )
 from vigi_vision.recording_search_d2_publication_models import RecordingSearchManifestV4
+from vigi_vision.recording_search_d2_reopen_validation import reopen_terminal
 from vigi_vision.recording_search_lock import LocalInvestigationLock
 from vigi_vision.recording_search_models import (
     Phase8HandoffStatus,
@@ -89,6 +90,7 @@ if TYPE_CHECKING:
     from vigi_vision.recording_search_c1_planner import CoarseSamplingPlan
     from vigi_vision.recording_search_c2_models import CoarseCandidateBracket
     from vigi_vision.recording_search_d1_models import NarrowingResult
+    from vigi_vision.recording_search_d2_status import RecordingSearchStatusV4
     from vigi_vision.recording_search_d2_terminal_models import (
         TerminalInputSnapshot,
         TerminalResult,
@@ -214,9 +216,9 @@ def _status_value(
     | RecordingSearchManifestV2
     | RecordingSearchManifestV3
     | RecordingSearchManifestV4,
-) -> RecordingSearchManifest | RecordingSearchManifestV2:
+) -> RecordingSearchManifest | RecordingSearchManifestV2 | RecordingSearchStatusV4:
     if isinstance(value, RecordingSearchManifestV4):
-        return value.as_schema3().as_status_manifest()
+        raise RecordingSearchManifestCorruptError
     return _status_manifest(value)
 
 
@@ -732,9 +734,9 @@ class RecordingSearchService:
             lock.release()
             raise
 
-    def status(
+    def status(  # noqa: PLR0911
         self, investigation_id: str, search_run_id: str
-    ) -> RecordingSearchManifest | RecordingSearchManifestV2:
+    ) -> RecordingSearchManifest | RecordingSearchManifestV2 | RecordingSearchStatusV4:
         """Return persisted status and reconcile an unowned active run."""
         _ = self.repository.run_path(investigation_id, search_run_id)
         lock = LocalInvestigationLock(self.repository.lock_path(investigation_id))
@@ -743,21 +745,38 @@ class RecordingSearchService:
                 with self._guard:
                     active = self._active.get(investigation_id)
                 if active is not None and active.run_id == search_run_id:
-                    return _status_value(
-                        self.repository.load(investigation_id, search_run_id, include_terminal=True)
+                    persisted = self.repository.load(
+                        investigation_id, search_run_id, include_terminal=True
                     )
-                return _status_value(
-                    self.repository.load(investigation_id, search_run_id, include_terminal=True)
+                    if isinstance(persisted, RecordingSearchManifestV4):
+                        raise RecordingSearchPublicationInProgressError
+                    return _status_value(persisted)
+                persisted = self.repository.load(
+                    investigation_id, search_run_id, include_terminal=True
                 )
+                if isinstance(persisted, RecordingSearchManifestV4):
+                    raise RecordingSearchPublicationInProgressError
+                return _status_value(persisted)
             with self._guard:
                 active = self._active.get(investigation_id)
             if active is not None and active.run_id == search_run_id:
-                return _status_value(
-                    self.repository.load(investigation_id, search_run_id, include_terminal=True)
+                persisted = self.repository.load(
+                    investigation_id, search_run_id, include_terminal=True
                 )
+                if isinstance(persisted, RecordingSearchManifestV4):
+                    return reopen_terminal(
+                        self.repository.root,
+                        self.repository.run_path(investigation_id, search_run_id),
+                        persisted,
+                    )
+                return _status_value(persisted)
             persisted = self.repository.load(investigation_id, search_run_id, include_terminal=True)
             if isinstance(persisted, RecordingSearchManifestV4):
-                return _status_value(persisted)
+                return reopen_terminal(
+                    self.repository.root,
+                    self.repository.run_path(investigation_id, search_run_id),
+                    persisted,
+                )
             manifest = _status_value(persisted)
             if manifest.state in (RecordingSearchState.PENDING, RecordingSearchState.RUNNING):
                 return _status_manifest(
@@ -769,6 +788,20 @@ class RecordingSearchService:
                     )
                 )
             return manifest
+        finally:
+            lock.release()
+
+    def reopen_terminal(self, investigation_id: str, search_run_id: str) -> RecordingSearchStatusV4:
+        """Strictly reopen and project one persisted Schema 4 terminal run."""
+        run_path = self.repository.run_path(investigation_id, search_run_id)
+        lock = LocalInvestigationLock(self.repository.lock_path(investigation_id))
+        if not lock.try_acquire(self.lock_timeout_seconds):
+            raise RecordingSearchPublicationInProgressError
+        try:
+            persisted = self.repository.load(investigation_id, search_run_id, include_terminal=True)
+            if not isinstance(persisted, RecordingSearchManifestV4):
+                raise RecordingSearchManifestCorruptError
+            return reopen_terminal(self.repository.root, run_path, persisted)
         finally:
             lock.release()
 

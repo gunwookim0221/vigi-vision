@@ -51,7 +51,12 @@ def build_schema4_successor(
     if predecessor.state != "RUNNING":
         raise ValueError
     validate_terminal_publication(snapshot, result)
-    terminal = published_terminal_result(result, published_at_utc)
+    terminal = published_terminal_result(
+        result,
+        published_at_utc,
+        source_c2_bracket_id=snapshot.evidence_snapshot.source_revision.c2_bracket_id,
+        source_d1_bracket_id=snapshot.evidence_snapshot.source_revision.d1_source_bracket_id,
+    )
     state = (
         "INDETERMINATE"
         if terminal.result_kind.value == "INCONCLUSIVE"

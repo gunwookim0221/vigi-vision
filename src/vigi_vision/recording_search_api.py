@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 
 from vigi_vision.recording_search_a2_models import RecordingSearchManifestV2
+from vigi_vision.recording_search_d2_status import RecordingSearchStatusV4
 from vigi_vision.recording_search_models import (
     ReconfirmationRequiredError,
     RecordingSearchArtifactError,
@@ -21,6 +22,7 @@ from vigi_vision.recording_search_models import (
     RecordingSearchNotFoundError,
     RecordingSearchOutcome,
     RecordingSearchRequest,
+    RecordingSearchTerminalReopenError,
     RecordingSearchTransitionError,
 )
 from vigi_vision.reference_frame_api_errors import ReferenceFrameApiError
@@ -103,7 +105,9 @@ def install_recording_search_routes(
 
     async def get_status(
         investigation_id: str, search_run_id: str
-    ) -> RecordingSearchManifest | RecordingSearchManifestV2 | JSONResponse:
+    ) -> (
+        RecordingSearchManifest | RecordingSearchManifestV2 | RecordingSearchStatusV4 | JSONResponse
+    ):
         if dependencies.service is None:
             return _unavailable()
         try:
@@ -122,7 +126,9 @@ def install_recording_search_routes(
         "",
         start,
         methods=["POST"],
-        response_model=RecordingSearchManifest | RecordingSearchManifestV2,
+        response_model=RecordingSearchManifest
+        | RecordingSearchManifestV2
+        | RecordingSearchStatusV4,
         status_code=status.HTTP_201_CREATED,
         responses={
             status.HTTP_400_BAD_REQUEST: {"model": ReferenceFrameErrorResponse},
@@ -135,7 +141,9 @@ def install_recording_search_routes(
         "/{investigation_id}/{search_run_id}",
         get_status,
         methods=["GET"],
-        response_model=RecordingSearchManifest | RecordingSearchManifestV2,
+        response_model=RecordingSearchManifest
+        | RecordingSearchManifestV2
+        | RecordingSearchStatusV4,
         status_code=status.HTTP_200_OK,
         responses={
             status.HTTP_404_NOT_FOUND: {"model": ReferenceFrameErrorResponse},
@@ -187,7 +195,9 @@ def _error_response(error: RecordingSearchError) -> JSONResponse:
             "baseline_validation_failed",
             "The confirmed recording-search baseline could not be validated.",
         )
-    elif isinstance(error, RecordingSearchManifestCorruptError):
+    elif isinstance(
+        error, (RecordingSearchManifestCorruptError, RecordingSearchTerminalReopenError)
+    ):
         specification = (
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             "search_manifest_corrupt",

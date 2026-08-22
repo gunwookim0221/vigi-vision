@@ -79,6 +79,36 @@ class RecordingSearchPublicationInProgressError(RecordingSearchError):
     """A terminal publication could not acquire the bounded run lock."""
 
 
+class RecordingSearchTerminalReopenCategory(str, Enum):
+    """Closed internal categories for strict terminal reopen failures."""
+
+    MANIFEST_MISSING = "manifest_missing"
+    UNSUPPORTED_SCHEMA = "unsupported_schema"
+    MALFORMED_MANIFEST = "malformed_manifest"
+    FOREIGN_OWNERSHIP = "foreign_ownership"
+    MISSING_RECORD = "missing_record"
+    MALFORMED_RECORD = "malformed_record"
+    MISSING_JPEG = "missing_jpeg"
+    JPEG_PATH_VIOLATION = "jpeg_path_violation"
+    JPEG_INTEGRITY_MISMATCH = "jpeg_integrity_mismatch"
+    EVIDENCE_OWNERSHIP_MISMATCH = "evidence_ownership_mismatch"
+    IDENTITY_MISMATCH = "identity_mismatch"
+    SUPPORT_ORDER_VIOLATION = "support_order_violation"
+    TERMINAL_CONTRADICTION = "terminal_contradiction"
+    POST_TERMINAL_EVIDENCE = "post_terminal_evidence"
+    VALIDATOR_FAILURE = "validator_failure"
+    READ_FAILURE = "read_failure"
+
+
+class RecordingSearchTerminalReopenError(RecordingSearchError):
+    """A Schema 4 terminal state failed closed during strict reopen."""
+
+    def __init__(self, category: RecordingSearchTerminalReopenCategory) -> None:
+        """Retain only the closed safe category for internal translation."""
+        super().__init__()
+        self.category: RecordingSearchTerminalReopenCategory = category
+
+
 class RecordingSearchOutcome(str, Enum):
     """Outcome of a start request."""
 
