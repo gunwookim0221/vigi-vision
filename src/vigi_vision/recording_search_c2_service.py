@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NoReturn, Protocol
 
@@ -21,6 +19,7 @@ from vigi_vision.recording_search_c2_models import (
     CoarseEvidenceSnapshot,
     CoarseTargetEvidence,
 )
+from vigi_vision.recording_search_d2_identity import authoritative_source_digest
 from vigi_vision.recording_search_models import RecordingSearchManifestCorruptError
 
 if TYPE_CHECKING:
@@ -76,7 +75,7 @@ def _capture_coarse_evidence_snapshot(
     if execution.identity != identity:
         _raise_corrupt()
     run_path = repository.run_path(manifest.investigation_id, manifest.search_run_id)
-    operations, frames, requests = read_schema2_children(
+    _operations, frames, requests = read_schema2_children(
         repository.root, run_path, manifest.as_schema2()
     )
     baseline, _classification_operations, observations, aliases = read_schema3_children(
@@ -118,22 +117,7 @@ def _capture_coarse_evidence_snapshot(
             ),
         )
     )
-    digest_payload = {
-        "manifest": manifest.model_dump(mode="json"),
-        "operations": [operations[key].model_dump(mode="json") for key in sorted(operations)],
-        "requests": [requests[key].model_dump(mode="json") for key in sorted(requests)],
-        "frames": [frames[key].model_dump(mode="json") for key in sorted(frames)],
-        "observations": [observations[key].model_dump(mode="json") for key in sorted(observations)],
-        "aliases": [aliases[key].model_dump(mode="json") for key in sorted(aliases)],
-    }
-    digest = hashlib.sha256(
-        json.dumps(
-            digest_payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    digest = authoritative_source_digest(repository.root, run_path, manifest)
     return CoarseEvidenceSnapshot(
         investigation_id=manifest.investigation_id,
         search_run_id=manifest.search_run_id,

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
+from vigi_vision.recording_search_d1_identity import d1_input_bracket_id
 from vigi_vision.recording_search_d2_identity import evidence_snapshot_digest
 from vigi_vision.recording_search_d2_results import (
     C2NoCandidate,
@@ -82,6 +85,32 @@ def _validate_inconclusive(snapshot: TerminalInputSnapshot, result: Inconclusive
 def _validate_found(snapshot: TerminalInputSnapshot, result: FoundResult) -> None:
     if not isinstance(snapshot.d1_result, D1BracketReady):
         raise TypeError
-    _ = validate_found(snapshot, snapshot.d1_result)
+    narrowed, lower, support, narrowing = validate_found(snapshot, snapshot.d1_result)
     if result.terminal_reason != "candidate_interval_found":
         raise ValueError
+    if (
+        result.source_bracket_id != narrowed.source_bracket_id
+        or result.narrowed_bracket_id != (narrowed.narrowed_bracket_id or "")
+        or result.lower_bound_requested_time_utc != _format_utc(narrowed.lower_bound_utc)
+        or result.upper_bound_requested_time_utc != _format_utc(narrowed.upper_bound_utc)
+        or result.achieved_precision_seconds != narrowed.achieved_precision_seconds
+        or result.lower_reference != lower
+        or result.upper_support != support
+        or result.narrowing_evidence != narrowing
+        or result.d1_input_bracket_id
+        != (
+            d1_input_bracket_id(narrowed.d1_input_bracket)
+            if narrowed.d1_input_bracket is not None
+            else None
+        )
+        or result.history_digest != narrowed.history_digest
+        or result.iterations != narrowed.iterations
+        or result.stop_reason != narrowed.stop_reason.value
+        or result.upper_support_group_id != narrowed.upper_support_group_id
+    ):
+        raise ValueError
+
+
+def _format_utc(value: datetime) -> str:
+    """Format a validated whole-second UTC bound exactly as result models do."""
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

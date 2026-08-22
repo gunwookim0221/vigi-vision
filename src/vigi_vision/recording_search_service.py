@@ -598,7 +598,13 @@ class RecordingSearchService:
         )
         outcome = interpret_terminal(context)
         if isinstance(outcome, (FoundResult, NotFoundResult, InconclusiveResult)):
-            publication = self.publish_terminal(handle, outcome, context)
+            publication = self.publish_terminal(
+                handle,
+                outcome,
+                context,
+                coarse_execution=execution,
+                narrowing_result=narrowing_result,
+            )
             return RecordingSearchTerminalizationResult(
                 outcome=outcome,
                 c2_result=c2_result,
@@ -681,11 +687,14 @@ class RecordingSearchService:
             )
         return service.classify(handle, request)
 
-    def publish_terminal(
+    def publish_terminal(  # noqa: C901, PLR0912, PLR0915 - bounded publication/reopen boundary
         self,
         handle: RecordingSearchRunHandle,
         result: TerminalResult,
         snapshot: TerminalInputSnapshot,
+        *,
+        coarse_execution: CoarseSamplingResult | None = None,
+        narrowing_result: NarrowingResult | None = None,
     ) -> TerminalPublicationResult:
         """Publish one D2-2 result after repository-backed reconstruction.
 
@@ -697,6 +706,7 @@ class RecordingSearchService:
         run_path = self.repository.run_path(handle.investigation_id, handle.search_run_id)
         lock, owns_lock = self._publication_lock(handle)
         replacement_succeeded = False
+        replacement_attempted = False
         active: _ActiveRun | None = None
         try:
             current = self.repository.load(
@@ -731,29 +741,86 @@ class RecordingSearchService:
                     )
                     loaded = self._load_confirmed(handle.investigation_id)
                     _ = self._read_verified_jpeg(loaded)
-                    validate_authoritative_snapshot(
-                        self.repository.root, run_path, latest, snapshot.evidence_snapshot
-                    )
-                    successor = build_schema4_successor(
-                        latest, snapshot, result, _canonical_now(self.now_utc())
-                    )
-                    self.repository.write_schema4_manifest(successor, run_path)
-                    replacement_succeeded = True
-                    committed = self.repository.load(
-                        handle.investigation_id, handle.search_run_id, include_terminal=True
-                    )
-                    if not isinstance(committed, RecordingSearchManifestV4):
+                    if coarse_execution is None:
+                        try:
+                            validate_authoritative_snapshot(
+                                self.repository.root,
+                                run_path,
+                                latest,
+                                snapshot.evidence_snapshot,
+                            )
+                        except (
+                            RecordingSearchManifestCorruptError,
+                            RecordingSearchArtifactError,
+                            ValueError,
+                        ):
+                            raise RecordingSearchTerminalReopenError(
+                                RecordingSearchTerminalReopenCategory.IDENTITY_MISMATCH
+                            ) from None
                         raise RecordingSearchTerminalReopenError(
-                            RecordingSearchTerminalReopenCategory.READ_FAILURE
+                            RecordingSearchTerminalReopenCategory.VALIDATOR_FAILURE
                         )
-                    reopened = reopen_terminal_result(self.repository.root, run_path, committed)
-                    if (
-                        committed.terminal_result.result_id != result.result_id
-                        or reopened != result
+                    authoritative_context = self._rebuild_terminal_context(
+                        handle,
+                        latest,
+                        coarse_execution,
+                        narrowing_result,
+                    )
+                    authoritative_result = interpret_terminal(authoritative_context)
+                    if not isinstance(
+                        authoritative_result, (FoundResult, NotFoundResult, InconclusiveResult)
                     ):
+                        raise RecordingSearchTerminalReopenError(
+                            RecordingSearchTerminalReopenCategory.TERMINAL_CONTRADICTION
+                        )
+                    if authoritative_result != result:
                         raise RecordingSearchTerminalReopenError(
                             RecordingSearchTerminalReopenCategory.IDENTITY_MISMATCH
                         )
+                    validate_authoritative_snapshot(
+                        self.repository.root,
+                        run_path,
+                        latest,
+                        authoritative_context.evidence_snapshot,
+                    )
+                    successor = build_schema4_successor(
+                        latest,
+                        authoritative_context,
+                        authoritative_result,
+                        _canonical_now(self.now_utc()),
+                    )
+                    replacement_attempted = True
+                    try:
+                        self.repository.write_schema4_manifest(successor, run_path)
+                        committed = self.repository.load(
+                            handle.investigation_id, handle.search_run_id, include_terminal=True
+                        )
+                        if not isinstance(committed, RecordingSearchManifestV4):
+                            raise RecordingSearchTerminalReopenError(  # noqa: TRY301
+                                RecordingSearchTerminalReopenCategory.READ_FAILURE
+                            )
+                        reopened = reopen_terminal_result(self.repository.root, run_path, committed)
+                        if (
+                            committed.terminal_result.result_id != result.result_id
+                            or reopened != result
+                        ):
+                            raise RecordingSearchTerminalReopenError(  # noqa: TRY301
+                                RecordingSearchTerminalReopenCategory.IDENTITY_MISMATCH
+                            )
+                    except Exception:
+                        # A failed readback must not leave an unverified Schema 4
+                        # manifest authoritative.  Restore exactly the locked
+                        # predecessor; no foreign state can be touched under the
+                        # active mutation boundary.
+                        if replacement_attempted:
+                            try:
+                                self.repository.write_schema3_manifest(latest, run_path)
+                            except Exception:  # noqa: BLE001 - translate restore failure safely
+                                raise RecordingSearchTerminalReopenError(
+                                    RecordingSearchTerminalReopenCategory.READ_FAILURE
+                                ) from None
+                        raise
+                    replacement_succeeded = True
             return TerminalPublicationResult(
                 manifest=committed,
                 result=committed.terminal_result,
@@ -768,6 +835,65 @@ class RecordingSearchService:
                     handle.retire()
             if owns_lock or handle.closed:
                 lock.release()
+
+    def _rebuild_terminal_context(
+        self,
+        handle: RecordingSearchRunHandle,
+        manifest: RecordingSearchManifestV3,
+        execution: CoarseSamplingResult,
+        narrowing_result: NarrowingResult | None,
+    ) -> TerminalInputSnapshot:
+        """Reconstruct terminal inputs from current indexed state and claims."""
+        plan = build_coarse_sampling_plan(manifest.as_schema2().policy)
+        policy = manifest.as_schema2().policy
+        loaded = self._load_coarse_snapshot(handle, execution)
+        if not isinstance(loaded, CoarseEvidenceSnapshot):
+            raise RecordingSearchTerminalReopenError(
+                RecordingSearchTerminalReopenCategory.TERMINAL_CONTRADICTION
+            )
+        coarse_interpretation = interpret_coarse_evidence(loaded)
+        snapshot = build_authoritative_d2_snapshot(
+            self.repository,
+            manifest,
+            plan,
+            execution,
+            narrowing=narrowing_result,
+        )
+        c2_result = adapt_c2_result(coarse_interpretation, snapshot)
+        d1_result: D1Result | None = None
+        d1_input = None
+        if isinstance(c2_result, C2BracketReady):
+            if narrowing_result is None:
+                raise RecordingSearchTerminalReopenError(
+                    RecordingSearchTerminalReopenCategory.TERMINAL_CONTRADICTION
+                )
+            snapshot = build_authoritative_d2_snapshot(
+                self.repository,
+                manifest,
+                plan,
+                execution,
+                narrowing=narrowing_result,
+            )
+            c2_result = adapt_c2_result(coarse_interpretation, snapshot)
+            if not isinstance(c2_result, C2BracketReady):
+                raise RecordingSearchTerminalReopenError(
+                    RecordingSearchTerminalReopenCategory.TERMINAL_CONTRADICTION
+                )
+            d1_result = adapt_d1_result(
+                narrowing_result,
+                snapshot,
+                history=narrowing_result.history,
+            )
+            if narrowing_result.narrowed_bracket is not None:
+                d1_input = narrowing_result.narrowed_bracket.d1_input_bracket
+        return TerminalInputSnapshot(
+            evidence_snapshot=snapshot,
+            plan=plan,
+            policy=policy,
+            c2_result=c2_result,
+            d1_result=d1_result,
+            d1_input_bracket=d1_input,
+        )
 
     def _publication_lock(
         self, handle: RecordingSearchRunHandle

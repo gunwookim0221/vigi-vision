@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -25,6 +23,7 @@ from vigi_vision.recording_search_d1_models import (
     NarrowingState,
 )
 from vigi_vision.recording_search_d1_support import NarrowingEvidenceStore, NarrowingHandle
+from vigi_vision.recording_search_d2_identity import authoritative_source_digest
 from vigi_vision.recording_search_models import RecordingSearchManifestCorruptError
 
 if TYPE_CHECKING:
@@ -204,19 +203,7 @@ class RepositoryNarrowingEvidenceStore(NarrowingEvidenceStore[NarrowingHandle]):
         baseline, class_ops, observations, aliases = read_schema3_children(
             self.repository.root, run_path, manifest
         )
-        payload = {
-            "manifest": manifest.model_dump(mode="json"),
-            "operations": [operations[key].model_dump(mode="json") for key in sorted(operations)],
-            "requests": [requests[key].model_dump(mode="json") for key in sorted(requests)],
-            "frames": [frames[key].model_dump(mode="json") for key in sorted(frames)],
-            "observations": [
-                observations[key].model_dump(mode="json") for key in sorted(observations)
-            ],
-            "aliases": [aliases[key].model_dump(mode="json") for key in sorted(aliases)],
-        }
-        digest = hashlib.sha256(
-            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        digest = authoritative_source_digest(self.repository.root, run_path, manifest)
         return _Snapshot(
             manifest,
             operations,

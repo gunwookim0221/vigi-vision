@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from vigi_vision.object_presence_values import ClassificationOutcome
 from vigi_vision.recording_search_c1_planner import (
@@ -31,6 +34,7 @@ from vigi_vision.recording_search_d2_evidence import (
     D2SupportGroup,
 )
 from vigi_vision.recording_search_d2_identity import evidence_snapshot_digest
+from vigi_vision.recording_search_d2_publication_validation import validate_terminal_publication
 from vigi_vision.recording_search_d2_results import C2BracketReady, D1BracketReady
 from vigi_vision.recording_search_d2_terminal import (
     FoundResult,
@@ -279,3 +283,24 @@ def test_non_default_absence_support_count_remains_found() -> None:
 
     assert isinstance(outcome, FoundResult)
     assert len(outcome.upper_support) == 2
+
+
+def test_publication_rejects_independent_found_d1_fact_mutations() -> None:
+    context = _found_context()
+    result = interpret_terminal(context)
+    assert isinstance(result, FoundResult)
+    mutations = (
+        replace(result, lower_bound_requested_time_utc="2026-07-20T03:00:01Z"),
+        replace(result, upper_bound_requested_time_utc="2026-07-20T03:00:05Z"),
+        replace(result, lower_reference=replace(result.lower_reference, target_id="foreign")),
+        replace(result, upper_support=tuple(reversed(result.upper_support))),
+        replace(result, source_bracket_id="foreign-bracket"),
+        replace(result, history_digest="foreign-history"),
+        replace(result, upper_support_group_id="foreign-support"),
+        replace(result, iterations=(result.iterations or 0) + 1),
+        replace(result, stop_reason="maximum_iterations"),
+        replace(result, achieved_precision_seconds=result.achieved_precision_seconds + 1),
+    )
+    for mutation in mutations:
+        with pytest.raises(ValueError, match=r".*"):
+            validate_terminal_publication(context, mutation)

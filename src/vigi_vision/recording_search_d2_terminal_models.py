@@ -136,6 +136,11 @@ class FoundResult:
     lower_reference: D2EvidenceReference
     upper_support: tuple[D2EvidenceReference, ...]
     narrowing_evidence: tuple[D2EvidenceReference, ...]
+    d1_input_bracket_id: str | None = None
+    history_digest: str | None = None
+    iterations: int | None = None
+    stop_reason: str | None = None
+    upper_support_group_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

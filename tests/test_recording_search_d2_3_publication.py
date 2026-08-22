@@ -18,7 +18,10 @@ from tests.recording_search_b4_support import (
 )
 
 from vigi_vision.recording_search_b2_models import RecordingSearchManifestV3
-from vigi_vision.recording_search_d2_identity import evidence_snapshot_digest
+from vigi_vision.recording_search_d2_identity import (
+    authoritative_source_digest,
+    evidence_snapshot_digest,
+)
 from vigi_vision.recording_search_d2_publication import build_schema4_successor
 from vigi_vision.recording_search_d2_terminal import (
     NotFoundResult,
@@ -167,3 +170,47 @@ def test_schema4_manifest_rejects_unknown_fields(tmp_path: Path) -> None:
             harness.investigation_id, harness.manifest.search_run_id
         )
     harness.service.close()
+
+
+def test_authoritative_source_digest_binds_baseline_and_classification_records(
+    tmp_path: Path,
+) -> None:
+    harness = _harness_with_schema3(tmp_path)
+    try:
+        manifest = harness.service.repository.load(
+            harness.investigation_id, harness.manifest.search_run_id
+        )
+        assert isinstance(manifest, RecordingSearchManifestV3)
+        run_path = harness.service.repository.run_path(
+            harness.investigation_id, manifest.search_run_id
+        )
+        original = authoritative_source_digest(harness.service.repository.root, run_path, manifest)
+
+        baseline_path = run_path / "observations" / f"{manifest.baseline_observation_id}.json"
+        baseline_bytes = baseline_path.read_bytes()
+        try:
+            baseline_payload = cast("dict[str, object]", json.loads(baseline_bytes))
+            baseline_payload["published_at_utc"] = "2026-08-02T04:05:07.000000Z"
+            _ = baseline_path.write_text(json.dumps(baseline_payload), encoding="utf-8")
+            assert (
+                authoritative_source_digest(harness.service.repository.root, run_path, manifest)
+                != original
+            )
+        finally:
+            _ = baseline_path.write_bytes(baseline_bytes)
+
+        operation_id = manifest.classification_operation_ids[0]
+        operation_path = run_path / "classification-operations" / f"{operation_id}.json"
+        operation_bytes = operation_path.read_bytes()
+        try:
+            operation_payload = cast("dict[str, object]", json.loads(operation_bytes))
+            operation_payload["admitted_at_utc"] = "2026-08-02T04:05:08.000000Z"
+            _ = operation_path.write_text(json.dumps(operation_payload), encoding="utf-8")
+            assert (
+                authoritative_source_digest(harness.service.repository.root, run_path, manifest)
+                != original
+            )
+        finally:
+            _ = operation_path.write_bytes(operation_bytes)
+    finally:
+        harness.service.close()

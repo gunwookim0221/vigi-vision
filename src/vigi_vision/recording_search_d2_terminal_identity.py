@@ -37,13 +37,18 @@ def canonical_terminal_result_payload(result: TerminalResult) -> dict[str, objec
     if isinstance(result, FoundResult):
         common["found"] = {
             "achieved_precision_seconds": result.achieved_precision_seconds,
+            "d1_input_bracket_id": result.d1_input_bracket_id,
+            "history_digest": result.history_digest,
+            "iterations": result.iterations,
             "lower_bound_requested_time_utc": result.lower_bound_requested_time_utc,
             "lower_reference": result.lower_reference.to_payload(),
             "narrowed_bracket_id": result.narrowed_bracket_id,
             "narrowing_evidence": [item.to_payload() for item in result.narrowing_evidence],
             "source_bracket_id": result.source_bracket_id,
+            "stop_reason": result.stop_reason,
             "upper_bound_requested_time_utc": result.upper_bound_requested_time_utc,
             "upper_support": [item.to_payload() for item in result.upper_support],
+            "upper_support_group_id": result.upper_support_group_id,
         }
     elif isinstance(result, NotFoundResult):
         common["not_found"] = {

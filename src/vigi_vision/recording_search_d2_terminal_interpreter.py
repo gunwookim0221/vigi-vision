@@ -228,6 +228,15 @@ def _found(
         lower_reference=lower,
         upper_support=support,
         narrowing_evidence=narrowing,
+        d1_input_bracket_id=(
+            d1_input_bracket_id(narrowed.d1_input_bracket)
+            if narrowed.d1_input_bracket is not None
+            else None
+        ),
+        history_digest=narrowed.history_digest,
+        iterations=narrowed.iterations,
+        stop_reason=narrowed.stop_reason.value,
+        upper_support_group_id=narrowed.upper_support_group_id,
     )
     return replace(result, result_id=terminal_result_id(result))
 

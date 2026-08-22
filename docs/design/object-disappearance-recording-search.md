@@ -2320,8 +2320,9 @@ source_manifest_digest
 evidence_snapshot_digest
 terminal_reason, limitations
 variant payload:
-  FOUND: source/narrowed bracket IDs, interval, precision, lower reference,
-         ordered upper support, ordered narrowing references
+  FOUND: source/narrowed bracket IDs, D1 input/history IDs, interval, precision,
+         iteration/stop facts, support-group ID, lower reference, ordered upper
+         support, ordered narrowing references
   NOT_FOUND: search window and ordered complete coarse references
   INCONCLUSIVE: source stage, closed visual reason, ordered proving references
 ```
@@ -2336,16 +2337,18 @@ so their canonical closed order is included. Identical ownership and evidence
 produce the same ID; changing a run, baseline, plan, policy, bracket, interval,
 reference, visual reason, or source manifest revision changes it.
 
-`source_manifest_digest` is SHA-256 over compact canonical JSON containing the
-exact schema-3 `RUNNING` predecessor plus every indexed acquisition operation,
-request, canonical frame metadata, baseline observation, classification
-operation, recording observation, and alias in lexicographic ID order. JPEG
-bytes are bound by the indexed digest/size fields and are rehashed separately.
-Strict V4 reopen reconstructs that predecessor from the preserved V4 fields
-(with schema version 3, state `RUNNING`, null completion/failure, and no terminal
-result) and recomputes the same digest. The existing D1 digest is also
-recomputed according to its D1 algorithm for input compatibility; it does not
-replace this complete D2 source digest.
+`source_manifest_digest` is a domain-separated SHA-256 over compact canonical
+JSON containing the exact schema-3 `RUNNING` predecessor plus every indexed
+acquisition operation, request, canonical frame metadata, baseline observation,
+classification operation, recording observation, and alias in lexicographic ID
+order. The payload carries the version tag
+`vigi-vision-recording-search-authoritative-source-v1`; the tag, a NUL byte, and
+the canonical JSON are hashed together. JPEG bytes are bound by the indexed
+digest/size fields and are rehashed separately. Strict V4 reopen reconstructs
+that predecessor from the preserved V4 fields (with schema version 3, state
+`RUNNING`, null completion/failure, and no terminal result) and recomputes the
+same digest. D1 uses this same complete source digest when reopening its
+authoritative repository view; it does not maintain a weaker parallel digest.
 
 ### Lifecycle and atomic publication
 

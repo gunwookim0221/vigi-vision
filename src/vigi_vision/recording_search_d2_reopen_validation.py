@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 from datetime import timedelta
-from hashlib import sha256
 from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, TypeVar
@@ -23,7 +21,10 @@ from vigi_vision.recording_search_d2_evidence import (
     D2SourceRevision,
     D2SupportGroup,
 )
-from vigi_vision.recording_search_d2_identity import evidence_snapshot_digest
+from vigi_vision.recording_search_d2_identity import (
+    authoritative_source_digest,
+    evidence_snapshot_digest,
+)
 from vigi_vision.recording_search_d2_publication_models import (
     PublishedFoundResult,
     PublishedInconclusiveResult,
@@ -217,24 +218,8 @@ def _validate_source_digest(
 def authoritative_evidence_digest(
     root: Path, run_path: Path, predecessor: RecordingSearchManifestV3
 ) -> str:
-    """Return the canonical digest of the schema-3 manifest and indexed children."""
-    acquisition, frames, requests = read_schema2_children(root, run_path, predecessor.as_schema2())
-    _baseline, _operations, observations, aliases = read_schema3_children(
-        root, run_path, predecessor
-    )
-    payload = {
-        "manifest": predecessor.model_dump(mode="json"),
-        "operations": [acquisition[key].model_dump(mode="json") for key in sorted(acquisition)],
-        "requests": [requests[key].model_dump(mode="json") for key in sorted(requests)],
-        "frames": [frames[key].model_dump(mode="json") for key in sorted(frames)],
-        "observations": [observations[key].model_dump(mode="json") for key in sorted(observations)],
-        "aliases": [aliases[key].model_dump(mode="json") for key in sorted(aliases)],
-    }
-    return sha256(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
-            "utf-8"
-        )
-    ).hexdigest()
+    """Return the versioned digest of every strict indexed source record."""
+    return authoritative_source_digest(root, run_path, predecessor)
 
 
 def _validate_children(  # noqa: PLR0913
@@ -526,6 +511,11 @@ def _reconstruct_result(  # noqa: PLR0913
             lower_reference=lower,
             upper_support=support,
             narrowing_evidence=narrowing,
+            d1_input_bracket_id=terminal.d1_input_bracket_id,
+            history_digest=terminal.history_digest,
+            iterations=terminal.iterations,
+            stop_reason=terminal.stop_reason,
+            upper_support_group_id=terminal.upper_support_group_id,
         )
         return result, (base, *coarse, *narrowing, *support)
     refs = tuple(
@@ -668,7 +658,7 @@ def _validate_not_found(
         _fail(RecordingSearchTerminalReopenCategory.SUPPORT_ORDER_VIOLATION)
 
 
-def _validate_found(
+def _validate_found(  # noqa: C901 - strict terminal field and reference checks
     manifest: RecordingSearchManifestV4,
     lower: D2EvidenceReference,
     support: tuple[D2EvidenceReference, ...],
@@ -677,6 +667,15 @@ def _validate_found(
     policy = manifest.policy.to_acquisition_policy()
     terminal = manifest.terminal_result
     if not isinstance(terminal, PublishedFoundResult):
+        _fail(RecordingSearchTerminalReopenCategory.TERMINAL_CONTRADICTION)
+    if (
+        terminal.source_bracket_id != terminal.source_d1_bracket_id
+        or terminal.d1_input_bracket_id is None
+        or terminal.history_digest is None
+        or terminal.iterations is None
+        or terminal.stop_reason != "target_precision_reached"
+        or terminal.upper_support_group_id is None
+    ):
         _fail(RecordingSearchTerminalReopenCategory.TERMINAL_CONTRADICTION)
     if lower.classification is not ClassificationOutcome.PRESENT or lower.alias_id is not None:
         _fail(RecordingSearchTerminalReopenCategory.TERMINAL_CONTRADICTION)
@@ -697,6 +696,23 @@ def _validate_found(
         left.requested_time_utc >= right.requested_time_utc for left, right in pairwise(support)
     ):
         _fail(RecordingSearchTerminalReopenCategory.SUPPORT_ORDER_VIOLATION)
+    if (
+        terminal.lower_bound_requested_time_utc != lower.requested_time_utc
+        or not support
+        or terminal.upper_bound_requested_time_utc != support[0].requested_time_utc
+        or terminal.upper_support_group_id != support[0].support_group_id
+        or any(item.support_group_id != terminal.upper_support_group_id for item in support)
+        or terminal.achieved_precision_seconds
+        != int(
+            (
+                terminal.upper_bound_requested_time_utc - terminal.lower_bound_requested_time_utc
+            ).total_seconds()
+        )
+        or terminal.lower_reference != _as_terminal_reference(lower)
+        or terminal.upper_support != tuple(_as_terminal_reference(item) for item in support)
+        or terminal.narrowing_evidence != tuple(_as_terminal_reference(item) for item in narrowing)
+    ):
+        _fail(RecordingSearchTerminalReopenCategory.TERMINAL_CONTRADICTION)
     if any(
         left[0] >= right[0] or left[1] >= right[1] or left[2] >= right[2]
         for left, right in pairwise(decoded)
@@ -714,6 +730,28 @@ def _validate_found(
         _fail(RecordingSearchTerminalReopenCategory.TERMINAL_CONTRADICTION)
     if any(item.alias_id is not None for item in narrowing):
         _fail(RecordingSearchTerminalReopenCategory.SUPPORT_ORDER_VIOLATION)
+
+
+def _as_terminal_reference(value: D2EvidenceReference) -> TerminalEvidenceReference:
+    """Project a reopened reference into the persisted allowlisted shape."""
+    return TerminalEvidenceReference(
+        role=value.role,
+        target_id=value.target_id,
+        requested_time_utc=value.requested_time_utc,
+        acquisition_operation_id=value.acquisition_operation_id,
+        probe_request_id=value.probe_request_id,
+        classification_operation_id=value.classification_operation_id,
+        observation_id=value.observation_id or "",
+        canonical_frame_id=value.canonical_frame_id,
+        alias_id=value.alias_id,
+        decode_session_id=value.decode_session_id,
+        decoded_frame_utc=value.decoded_frame_utc,
+        decoded_pts=value.decoded_pts,
+        decoded_ordinal=value.decoded_ordinal,
+        support_group_id=value.support_group_id,
+        support_index=value.support_index,
+        is_phase6_baseline=value.is_phase6_baseline,
+    )
 
 
 def _validate_inconclusive(

@@ -131,6 +131,11 @@ class PublishedFoundResult(_PublishedCommon):
     lower_reference: TerminalEvidenceReference
     upper_support: tuple[TerminalEvidenceReference, ...]
     narrowing_evidence: tuple[TerminalEvidenceReference, ...]
+    d1_input_bracket_id: StrictStr | None = None
+    history_digest: StrictStr | None = None
+    iterations: StrictInt | None = Field(default=None, ge=0)
+    stop_reason: StrictStr | None = None
+    upper_support_group_id: StrictStr | None = None
 
 
 class PublishedNotFoundResult(_PublishedCommon):
