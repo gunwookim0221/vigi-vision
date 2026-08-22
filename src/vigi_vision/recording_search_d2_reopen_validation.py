@@ -36,6 +36,7 @@ from vigi_vision.recording_search_d2_terminal_models import (
     InconclusiveResult,
     NotFoundResult,
     TerminalLimitation,
+    TerminalResult,
     TerminalResultKind,
 )
 from vigi_vision.recording_search_models import (
@@ -67,7 +68,19 @@ def reopen_terminal(
     run_path: object,
     manifest: RecordingSearchManifestV4,
 ) -> RecordingSearchStatusV4:
-    """Reopen one terminal manifest under the repository lock boundary."""
+    """Reopen one terminal manifest and expose its safe status projection."""
+    _ = reopen_terminal_result(root, run_path, manifest)
+    if terminal_status(manifest).result.result_id != manifest.terminal_result.result_id:
+        _fail(RecordingSearchTerminalReopenCategory.VALIDATOR_FAILURE)
+    return terminal_status(manifest)
+
+
+def reopen_terminal_result(
+    root: object,
+    run_path: object,
+    manifest: RecordingSearchManifestV4,
+) -> TerminalResult:
+    """Reopen one terminal manifest and return its strictly reconstructed result."""
     try:
         if not isinstance(root, Path) or not isinstance(run_path, Path):
             _fail(RecordingSearchTerminalReopenCategory.FOREIGN_OWNERSHIP)
@@ -94,15 +107,14 @@ def reopen_terminal(
         _validate_evidence_digest(manifest, references, baseline)
         if terminal_result_id(result) != manifest.terminal_result.result_id:
             _fail(RecordingSearchTerminalReopenCategory.IDENTITY_MISMATCH)
-        if terminal_status(manifest).result.result_id != manifest.terminal_result.result_id:
-            _fail(RecordingSearchTerminalReopenCategory.VALIDATOR_FAILURE)
-        return terminal_status(manifest)
     except RecordingSearchTerminalReopenError:
         raise
     except RecordingSearchManifestCorruptError:
         _fail(RecordingSearchTerminalReopenCategory.MALFORMED_RECORD)
     except (OSError, ValueError, TypeError, KeyError):
         _fail(RecordingSearchTerminalReopenCategory.VALIDATOR_FAILURE)
+    else:
+        return result
 
 
 def _validate_source_digest(

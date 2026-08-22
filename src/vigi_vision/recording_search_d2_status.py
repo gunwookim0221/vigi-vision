@@ -122,17 +122,21 @@ class RecordingSearchStatusV4(BaseModel):
             raise ValueError
         if self.result.kind is not expected:
             raise ValueError
-        expected_handoff = (
-            Phase8HandoffStatus.PENDING
+        allowed_handoff = (
+            {Phase8HandoffStatus.PENDING, Phase8HandoffStatus.READY}
             if expected is TerminalResultKind.FOUND
-            else Phase8HandoffStatus.NOT_APPLICABLE
+            else {Phase8HandoffStatus.NOT_APPLICABLE}
         )
-        if self.phase8_handoff_status is not expected_handoff:
+        if self.phase8_handoff_status not in allowed_handoff:
             raise ValueError
         return self
 
 
-def terminal_status(manifest: RecordingSearchManifestV4) -> RecordingSearchStatusV4:
+def terminal_status(
+    manifest: RecordingSearchManifestV4,
+    *,
+    phase8_handoff_status: Phase8HandoffStatus = Phase8HandoffStatus.PENDING,
+) -> RecordingSearchStatusV4:
     """Project a validated terminal manifest into the public status contract."""
     terminal = manifest.terminal_result
     if isinstance(terminal, PublishedFoundResult):
@@ -176,7 +180,7 @@ def terminal_status(manifest: RecordingSearchManifestV4) -> RecordingSearchStatu
         target_alias_ids=manifest.target_alias_ids,
         result=projection,
         phase8_handoff_status=(
-            Phase8HandoffStatus.PENDING
+            phase8_handoff_status
             if projection.kind is TerminalResultKind.FOUND
             else Phase8HandoffStatus.NOT_APPLICABLE
         ),

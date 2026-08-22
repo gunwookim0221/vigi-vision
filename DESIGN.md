@@ -202,7 +202,8 @@ or glass effects are used.
   terminal state. Phase 7D-2 now has a corrected closed terminal-result,
   schema-4 atomic-publication, strict-reopen, status, and Phase 8 request design;
   D2-3 implements atomic terminal publication; D2-4 implements the strict
-  process-restart reopen and safe status-projection boundary.
+  process-restart reopen and safe status-projection boundary; D2-5 implements
+  the strict FOUND-only Phase 8 request handoff and durable persistence.
   Phase 7E validation and the Phase 8/9 review workflow remain later work.
   Advanced recovery analysis is retained only as
   [non-normative future reference](docs/future/recording-search-resilience.md).

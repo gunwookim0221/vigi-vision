@@ -48,13 +48,22 @@ from vigi_vision.recording_search_c2_models import (
 from vigi_vision.recording_search_c2_service import capture_coarse_evidence_snapshot
 from vigi_vision.recording_search_d1_repository import RepositoryNarrowingEvidenceStore
 from vigi_vision.recording_search_d1_service import execute_binary_narrowing
+from vigi_vision.recording_search_d2_5_handoff import (
+    Phase8HandoffArtifactError,
+    Phase8HandoffNotApplicableError,
+    Phase8HandoffResult,
+    build_phase8_handoff_request,
+    phase8_handoff_status,
+)
 from vigi_vision.recording_search_d2_publication import (
     TerminalPublicationOutcome,
     TerminalPublicationResult,
     build_schema4_successor,
 )
 from vigi_vision.recording_search_d2_publication_models import RecordingSearchManifestV4
-from vigi_vision.recording_search_d2_reopen_validation import reopen_terminal
+from vigi_vision.recording_search_d2_reopen_validation import reopen_terminal_result
+from vigi_vision.recording_search_d2_status import terminal_status
+from vigi_vision.recording_search_d2_terminal_models import FoundResult
 from vigi_vision.recording_search_lock import LocalInvestigationLock
 from vigi_vision.recording_search_models import (
     Phase8HandoffStatus,
@@ -764,19 +773,11 @@ class RecordingSearchService:
                     investigation_id, search_run_id, include_terminal=True
                 )
                 if isinstance(persisted, RecordingSearchManifestV4):
-                    return reopen_terminal(
-                        self.repository.root,
-                        self.repository.run_path(investigation_id, search_run_id),
-                        persisted,
-                    )
+                    return self._terminal_status(persisted, investigation_id, search_run_id)
                 return _status_value(persisted)
             persisted = self.repository.load(investigation_id, search_run_id, include_terminal=True)
             if isinstance(persisted, RecordingSearchManifestV4):
-                return reopen_terminal(
-                    self.repository.root,
-                    self.repository.run_path(investigation_id, search_run_id),
-                    persisted,
-                )
+                return self._terminal_status(persisted, investigation_id, search_run_id)
             manifest = _status_value(persisted)
             if manifest.state in (RecordingSearchState.PENDING, RecordingSearchState.RUNNING):
                 return _status_manifest(
@@ -793,7 +794,6 @@ class RecordingSearchService:
 
     def reopen_terminal(self, investigation_id: str, search_run_id: str) -> RecordingSearchStatusV4:
         """Strictly reopen and project one persisted Schema 4 terminal run."""
-        run_path = self.repository.run_path(investigation_id, search_run_id)
         lock = LocalInvestigationLock(self.repository.lock_path(investigation_id))
         if not lock.try_acquire(self.lock_timeout_seconds):
             raise RecordingSearchPublicationInProgressError
@@ -801,9 +801,62 @@ class RecordingSearchService:
             persisted = self.repository.load(investigation_id, search_run_id, include_terminal=True)
             if not isinstance(persisted, RecordingSearchManifestV4):
                 raise RecordingSearchManifestCorruptError
-            return reopen_terminal(self.repository.root, run_path, persisted)
+            return self._terminal_status(persisted, investigation_id, search_run_id)
         finally:
             lock.release()
+
+    def create_phase8_handoff(
+        self, investigation_id: str, search_run_id: str
+    ) -> Phase8HandoffResult:
+        """Create or reuse a Phase 8 request after strict FOUND reconstruction."""
+        run_path = self.repository.run_path(investigation_id, search_run_id)
+        lock = LocalInvestigationLock(self.repository.lock_path(investigation_id))
+        if not lock.try_acquire(self.lock_timeout_seconds):
+            raise RecordingSearchPublicationInProgressError
+        try:
+            persisted = self.repository.load(investigation_id, search_run_id, include_terminal=True)
+            if not isinstance(persisted, RecordingSearchManifestV4):
+                raise Phase8HandoffNotApplicableError
+            result = reopen_terminal_result(self.repository.root, run_path, persisted)
+            if type(result) is not FoundResult:
+                raise Phase8HandoffNotApplicableError
+            request = build_phase8_handoff_request(
+                result,
+                channel_id=persisted.confirmation.channel_id,
+                source_timezone=persisted.confirmation.source_timezone,
+                search_start_utc=persisted.policy.search_start_utc,
+                search_end_utc=persisted.policy.search_end_utc,
+                created_at_utc=_canonical_now(self.now_utc()),
+            )
+            return self.repository.create_or_reuse_phase8_request(request)
+        except Phase8HandoffArtifactError:
+            raise RecordingSearchArtifactError from None
+        finally:
+            lock.release()
+
+    def _terminal_status(
+        self, manifest: RecordingSearchManifestV4, investigation_id: str, search_run_id: str
+    ) -> RecordingSearchStatusV4:
+        run_path = self.repository.run_path(investigation_id, search_run_id)
+        result = reopen_terminal_result(self.repository.root, run_path, manifest)
+        if type(result) is FoundResult:
+            expected_request = build_phase8_handoff_request(
+                result,
+                channel_id=manifest.confirmation.channel_id,
+                source_timezone=manifest.confirmation.source_timezone,
+                search_start_utc=manifest.policy.search_start_utc,
+                search_end_utc=manifest.policy.search_end_utc,
+                created_at_utc=manifest.completed_at_utc,
+            )
+            handoff = phase8_handoff_status(
+                self.repository.root,
+                run_path,
+                manifest.terminal_result.result_id,
+                expected_handoff_request_id=expected_request.handoff_request_id,
+            )
+        else:
+            handoff = Phase8HandoffStatus.NOT_APPLICABLE
+        return terminal_status(manifest, phase8_handoff_status=handoff)
 
     def close(self) -> None:
         """Release all locks owned by this process instance."""

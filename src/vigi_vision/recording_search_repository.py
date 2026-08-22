@@ -45,6 +45,11 @@ from vigi_vision.recording_search_b2_validation import (
     validate_authoritative_baseline,
     validate_schema3_tree,
 )
+from vigi_vision.recording_search_d2_5_handoff import (
+    Phase8HandoffRequestV1,
+    Phase8HandoffResult,
+    create_or_reuse_phase8_request,
+)
 from vigi_vision.recording_search_d2_publication_models import RecordingSearchManifestV4
 from vigi_vision.recording_search_models import (
     RecordingSearchArtifactError,
@@ -412,6 +417,13 @@ class RecordingSearchRepository:
     def write_schema4_manifest(self, manifest: RecordingSearchManifestV4, directory: Path) -> None:
         """Write one schema-4 manifest through the existing atomic writer."""
         self._write_any_manifest_to_directory(manifest, directory)
+
+    def create_or_reuse_phase8_request(
+        self, request: Phase8HandoffRequestV1
+    ) -> Phase8HandoffResult:
+        """Create or reuse the request artifact within this repository's run."""
+        run_path = self.run_path(request.investigation_id, request.search_run_id)
+        return create_or_reuse_phase8_request(self.root, run_path, request)
 
     def _write_manifest(self, manifest: SearchManifest) -> None:
         directory = self.run_path(manifest.investigation_id, manifest.search_run_id)

@@ -35,9 +35,9 @@ documentation route is added, removed, or relocated.
   chronological coarse execution foundation and the non-persistent deterministic
   transition interpretation handoff. Phase 7D-1 and D2-1's in-memory
   narrowing history/identity reconstruction are implemented locally but remain
-  uncommitted. Phase 7D-2's D2-2 terminal-result/schema-4 design is approved;
-  its runtime, terminal disappearance persistence, and the Phase 8 request
-  boundary remain unimplemented. Read
+  uncommitted. Phase 7D-2's D2-2 terminal-result/schema-4 design and D2-5
+  Phase 8 request boundary are implemented; Phase 8 clip processing remains
+  unimplemented. Read
   [design/object-presence-classification.md](design/object-presence-classification.md)
   for the normative Phase 7B single-probe input, geometry, classifier, outcome,
   schema-3 observation, publication, idempotency, and strict-reopen contract.

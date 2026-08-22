@@ -3,8 +3,9 @@
 ## Status
 
 Accepted as the implementation decision for the Phase 7 MVP. Phase 7D-2's
-corrected terminal schema and publication design is awaiting follow-up review;
-its runtime is not yet implemented.
+terminal schema, publication, strict reopen/status, and FOUND-only Phase 8
+request handoff are implemented. Phase 7E validation and Phase 8 media remain
+future work.
 
 ## Context
 

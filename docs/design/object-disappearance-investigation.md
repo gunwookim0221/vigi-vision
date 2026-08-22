@@ -15,9 +15,10 @@ handoff. Phase 7D-1 now implements deterministic non-terminal binary narrowing
 through the existing A2/B4 boundaries. Phase 7D-2 D2-2 now implements the pure
 terminal outcome interpreter, strict reconstruction, and in-memory result
 identities; D2-3 now implements canonical lock-ordered schema-4 terminal
-publication and strict readback. Phase 7E real-NVR policy validation remains
-unimplemented.
-Phase 8 and Phase 9 remain unimplemented. Phase 7C-1 and 7C-2 together are not
+publication and strict readback; D2-4 adds strict terminal reopen/status
+projection; D2-5 adds the strict FOUND-only Phase 8 request handoff and durable
+request persistence. Phase 7E real-NVR policy validation remains unimplemented.
+Phase 8 clip processing and Phase 9 remain unimplemented. Phase 7C-1 and 7C-2 together are not
 a completed disappearance-search workflow.**
 
 This document defines the first bounded use case for VIGI Vision's longer-term
@@ -304,7 +305,8 @@ non-persistent transition interpretation handoff. Phase 7D-1 now adds
 deterministic non-terminal binary narrowing and a typed in-memory bracket;
 Phase 7D-2 D2-2 now adds pure terminal interpretation and in-memory result
 identity construction; D2-3 now adds strict schema-4 `FOUND`, `NOT_FOUND`, or
-`INCONCLUSIVE` persistence and a separate Phase 8 request for `FOUND` only. Existing
+`INCONCLUSIVE` persistence, D2-4 adds strict reopen/status projection, and D2-5
+adds a separate durable Phase 8 request for `FOUND` only. Existing
 single-target callers remain unchanged. Requested time never substitutes for
 stable authoritative decoded-frame provenance. Phase 7A-2
 now provides the decoder-boundary source-time capability that retains the
@@ -338,8 +340,9 @@ version after Phase 7E evidence.
    pure non-persistent transition interpretation handoff, and deterministic
    non-terminal binary narrowing to a one-second in-memory bracket. Phase 7D-2
    D2-2 now provides pure terminal interpretation and identity construction;
-   D2-3 now provides atomic terminal persistence and strict readback, while the
-   Phase 8 handoff remains pending. Phase 7E
+   D2-3 now provides atomic terminal persistence and strict readback, D2-4
+   provides strict reopen/status projection, and D2-5 provides the durable
+   FOUND-only Phase 8 handoff request. Phase 7E
    real-NVR policy validation remains pending.
 4. **Phase 8 (future):** boundary images, evidence timeline, and review video.
 5. **Phase 9 (future):** user-facing review and final human decision.
