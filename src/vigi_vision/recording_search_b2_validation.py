@@ -21,7 +21,12 @@ from vigi_vision.recording_search_a2_models import (  # noqa: TC001
     CanonicalProbeFrameRecord,
     ProbeFrameRequestRecord,
 )
-from vigi_vision.recording_search_a2_repository import read_schema2_children, validate_schema2_tree
+from vigi_vision.recording_search_a2_repository import (
+    read_schema2_children,
+    read_schema2_children_read_only_for_schema3,
+    validate_schema2_tree,
+    validate_schema2_tree_read_only_for_schema3,
+)
 from vigi_vision.recording_search_b2_models import RecordingSearchManifestV3
 from vigi_vision.recording_search_b2_records import (
     ClassificationOperationRecord,
@@ -34,9 +39,11 @@ from vigi_vision.recording_search_models import RecordingSearchManifestCorruptEr
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from vigi_vision.object_presence_evidence import RawComparison
+    from vigi_vision.recording_search_a2_models import RecordingSearchManifestV2
 
 
 def parse_schema3_manifest(raw: str) -> RecordingSearchManifestV3:
@@ -60,11 +67,49 @@ def validate_schema3_tree(
     root: Path, run_path: Path, manifest: RecordingSearchManifestV3
 ) -> ConfirmedReferenceBaselineRecord:
     """Validate every schema-2 and Phase 7B indexed relationship."""
+    return _validate_schema3_tree(
+        root,
+        run_path,
+        manifest,
+        schema2_validator=validate_schema2_tree,
+        schema2_reader=read_schema2_children,
+    )
+
+
+def validate_schema3_tree_read_only(
+    root: Path, run_path: Path, manifest: RecordingSearchManifestV3
+) -> ConfirmedReferenceBaselineRecord:
+    """Validate schema 3 without invoking active A2 recovery."""
+    return _validate_schema3_tree(
+        root,
+        run_path,
+        manifest,
+        schema2_validator=validate_schema2_tree_read_only_for_schema3,
+        schema2_reader=read_schema2_children_read_only_for_schema3,
+    )
+
+
+def _validate_schema3_tree(
+    root: Path,
+    run_path: Path,
+    manifest: RecordingSearchManifestV3,
+    *,
+    schema2_validator: Callable[[Path, Path, RecordingSearchManifestV2], None],
+    schema2_reader: Callable[
+        [Path, Path, RecordingSearchManifestV2],
+        tuple[
+            dict[str, AcquisitionOperationRecord],
+            dict[str, CanonicalProbeFrameRecord],
+            dict[str, ProbeFrameRequestRecord],
+        ],
+    ],
+) -> ConfirmedReferenceBaselineRecord:
+    """Shared schema-3 relationship validation with an explicit reader boundary."""
     try:
         if not is_safe_contained_path(root, run_path, require_target=True) or run_path.is_symlink():
             _raise_corrupt()
-        validate_schema2_tree(root, run_path, manifest.as_schema2())
-        operations, frames, requests = read_schema2_children(root, run_path, manifest.as_schema2())
+        schema2_validator(root, run_path, manifest.as_schema2())
+        operations, frames, requests = schema2_reader(root, run_path, manifest.as_schema2())
         _validate_directories(root, run_path)
         baseline = _read_child(
             root,
@@ -161,6 +206,30 @@ def read_schema3_children(
 ]:
     """Return the strictly reopened Phase 7B children for duplicate lookup."""
     _ = validate_schema3_tree(root, run_path, manifest)
+    return _read_schema3_children(root, run_path, manifest)
+
+
+def read_schema3_children_read_only(
+    root: Path, run_path: Path, manifest: RecordingSearchManifestV3
+) -> tuple[
+    ConfirmedReferenceBaselineRecord,
+    dict[str, ClassificationOperationRecord],
+    dict[str, RecordingProbeObservationRecord],
+    dict[str, TargetAliasRecord],
+]:
+    """Read schema-3 children without invoking active A2 recovery."""
+    _ = validate_schema3_tree_read_only(root, run_path, manifest)
+    return _read_schema3_children(root, run_path, manifest)
+
+
+def _read_schema3_children(
+    root: Path, run_path: Path, manifest: RecordingSearchManifestV3
+) -> tuple[
+    ConfirmedReferenceBaselineRecord,
+    dict[str, ClassificationOperationRecord],
+    dict[str, RecordingProbeObservationRecord],
+    dict[str, TargetAliasRecord],
+]:
     baseline = _read_child(
         root,
         run_path / "observations" / f"{manifest.baseline_observation_id}.json",

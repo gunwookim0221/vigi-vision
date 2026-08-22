@@ -2538,6 +2538,14 @@ second V4 successor. Raw parser errors, paths, handles, claims, and native I/O
 details are diagnostics only and never cross the public boundary or enter an
 identity.
 
+The distinction is explicit in the repository boundary: active schema-3
+admission may perform only its narrowly authorized A2 residue recovery while
+holding the active mutation lock. Schema-4 status, duplicate/conflict
+inspection, restart reopen, digest/D1 reconstruction, and Phase 8 handoff all
+use the separate read-only validator. It enumerates the allowlisted root and
+child entries and rejects staging, unindexed, unsupported, symlink, foreign, or
+nested residue; it never repairs, removes, renames, or rewrites a terminal tree.
+
 ### Idempotency, conflict, and strict reopen
 
 An exact existing V4 result ID returns the strictly reopened result without
@@ -2810,8 +2818,9 @@ Acceptance tests must cover:
    and no handle/lock leak, all with deterministic events/barriers and bounded
    joins rather than sleeps;
 6. compatible status, hidden raw evidence, truthful interval/uncertainty,
-   eligible/ineligible Phase 8 request, handoff failure preserving `FOUND`, and
-   idempotent request retry; and
+   eligible/ineligible Phase 8 request, handoff failure preserving `FOUND`,
+   idempotent request retry, and public-service handoff coverage for delayed,
+   restarted, concurrent, conflicting, corrupt, non-FOUND, and residue cases; and
 7. no Phase 8 media, real-NVR work, human adjudication, identity/person tracking,
    ownership/theft inference, production-accuracy claim, or new transport.
 

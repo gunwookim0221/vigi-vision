@@ -25,7 +25,10 @@ from vigi_vision.recording_search_a2_models import (
     canonical_frame_id_for,
     decoded_frame_utc_for,
 )
-from vigi_vision.recording_search_a2_repository import parse_schema2_manifest
+from vigi_vision.recording_search_a2_repository import (
+    parse_schema2_manifest,
+    validate_schema2_tree_read_only,
+)
 from vigi_vision.recording_search_a2_service import validate_successful_request
 from vigi_vision.recording_search_models import (
     RecordingSearchArtifactError,
@@ -41,6 +44,101 @@ from vigi_vision.replay import ReplayClip
 _JPEG_BYTES = cast("bytes", confirmation_fixture.__dict__["_JPEG_BYTES"])
 _NOW = datetime(2026, 8, 2, 4, 5, 6, tzinfo=timezone.utc)
 _ORIGIN = datetime(2026, 7, 20, 3, 34, 0, tzinfo=timezone.utc)
+
+
+def test_read_only_schema2_validation_rejects_admission_residue_without_mutation(
+    tmp_path: Path,
+) -> None:
+    service, investigation_id, handle, manifest, _ = _successful_a2_run(tmp_path)
+    try:
+        run_path = service.repository.run_path(investigation_id, manifest.search_run_id)
+        operation_path = run_path / "operations" / f"{manifest.acquisition_operation_ids[0]}.json"
+        operation = AcquisitionOperationRecord.model_validate_json(
+            operation_path.read_text(encoding="utf-8"), strict=True
+        )
+        residue = run_path / ".phase7a2-admission-read-only-residue"
+        residue.mkdir()
+        marker = residue / "operation.json"
+        _ = marker.write_text(
+            operation.model_copy(
+                update={"operation_id": "acquisition-op-read-only"}
+            ).model_dump_json(),
+            encoding="utf-8",
+        )
+        before = marker.read_bytes()
+
+        with pytest.raises(RecordingSearchManifestCorruptError):
+            validate_schema2_tree_read_only(
+                tmp_path,
+                run_path,
+                manifest,
+            )
+
+        assert residue.is_dir()
+        assert marker.read_bytes() == before
+    finally:
+        handle.release()
+        service.close()
+
+
+@pytest.mark.parametrize(
+    ("entry_kind", "entry_name"),
+    [
+        ("root_file", "foreign.bin"),
+        ("staging_directory", ".phase7a2-terminal-staging"),
+        ("foreign_directory", "foreign-directory"),
+        ("schema3_directory", "classification-operations"),
+        ("request", "probe-request-unindexed.json"),
+        ("frame", "frame-unindexed.json"),
+        ("jpeg", "frame-unindexed.jpg"),
+    ],
+)
+def test_read_only_schema2_rejects_unexpected_entries_without_mutation(
+    tmp_path: Path, entry_kind: str, entry_name: str
+) -> None:
+    service, investigation_id, handle, manifest, request = _successful_a2_run(tmp_path)
+    try:
+        run_path = service.repository.run_path(investigation_id, manifest.search_run_id)
+        if entry_kind == "root_file":
+            entry = run_path / entry_name
+            _ = entry.write_bytes(b"foreign")
+        elif entry_kind in {"staging_directory", "foreign_directory", "schema3_directory"}:
+            entry = run_path / entry_name
+            entry.mkdir()
+            _ = (entry / "unexpected.txt").write_bytes(b"foreign")
+        elif entry_kind == "request":
+            source = run_path / "requests" / f"{request.probe_request_id}.json"
+            entry = run_path / "requests" / entry_name
+            _ = entry.write_bytes(source.read_bytes())
+        elif entry_kind == "frame":
+            frame_id = request.canonical_frame_id
+            assert frame_id is not None
+            source = run_path / "frames" / f"{frame_id}.json"
+            entry = run_path / "frames" / entry_name
+            _ = entry.write_bytes(source.read_bytes())
+        else:
+            frame_id = request.canonical_frame_id
+            assert frame_id is not None
+            source = run_path / "evidence" / "frames" / f"{frame_id}.jpg"
+            entry = run_path / "evidence" / "frames" / entry_name
+            _ = entry.write_bytes(source.read_bytes())
+        before = {
+            path.relative_to(run_path): (None if path.is_dir() else path.read_bytes())
+            for path in run_path.rglob("*")
+        }
+
+        with pytest.raises(RecordingSearchManifestCorruptError):
+            validate_schema2_tree_read_only(tmp_path, run_path, manifest)
+
+        after = {
+            path.relative_to(run_path): (None if path.is_dir() else path.read_bytes())
+            for path in run_path.rglob("*")
+        }
+        assert entry.exists()
+        assert after == before
+    finally:
+        handle.release()
+        service.close()
 
 
 def test_source_time_mapping_rounds_ties_to_even_and_rejects_unreduced_base() -> None:

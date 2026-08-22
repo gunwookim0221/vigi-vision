@@ -168,6 +168,17 @@ terminal/result hashes. The A2 loader also
 requires exact child-directory membership for indexed frames, requests, and
 evidence JPEGs; unindexed extras are corruption.
 
+The active schema-2/3 admission loader is the only boundary allowed to perform
+the narrowly authorized schema-3 crash recovery under its mutation lock. Every
+schema-4 consumer instead uses the explicit read-only tree validator: status,
+duplicate/conflict inspection, process-restart reopen, source-digest and D1
+reconstruction, and the public Phase 8 handoff reject staging directories,
+unindexed operations/requests/frames/JPEGs/classification records,
+observations, aliases, symlinks, and foreign entries without repairing or
+deleting anything. The Phase 8 service tests cover creation, delayed and
+restart retry, deterministic concurrent reuse, conflict/corrupt request
+handling, non-FOUND rejection, and terminal residue rejection.
+
 For a closed-handle duplicate, the existing
 `LocalInvestigationLock(repository.lock_path(investigation_id))` is reacquired
 directly after validated `run_path(investigation_id, search_run_id)` resolution;

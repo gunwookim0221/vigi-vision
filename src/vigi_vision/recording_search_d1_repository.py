@@ -11,9 +11,15 @@ from vigi_vision.object_presence_values import ClassificationOutcome
 from vigi_vision.recording_search_a2_models import (
     ProbeRequestStatus,
 )
-from vigi_vision.recording_search_a2_repository import read_schema2_children
+from vigi_vision.recording_search_a2_repository import (
+    read_schema2_children,
+    read_schema2_children_read_only_for_schema3,
+)
 from vigi_vision.recording_search_b2_models import RecordingSearchManifestV3
-from vigi_vision.recording_search_b2_validation import read_schema3_children
+from vigi_vision.recording_search_b2_validation import (
+    read_schema3_children,
+    read_schema3_children_read_only,
+)
 from vigi_vision.recording_search_c1_models import CoarseSampleStatus
 from vigi_vision.recording_search_c1_planner import build_coarse_sampling_plan
 from vigi_vision.recording_search_d1_identity import source_bracket_identity
@@ -27,6 +33,7 @@ from vigi_vision.recording_search_d2_identity import authoritative_source_digest
 from vigi_vision.recording_search_models import RecordingSearchManifestCorruptError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import datetime
     from pathlib import Path
 
@@ -193,27 +200,11 @@ class RepositoryNarrowingEvidenceStore(NarrowingEvidenceStore[NarrowingHandle]):
         return self._snapshot(handle).digest
 
     def _snapshot(self, handle: NarrowingHandle) -> _Snapshot:
-        manifest = self.repository.load(handle.investigation_id, handle.search_run_id)
-        if not isinstance(manifest, RecordingSearchManifestV3):
-            raise RecordingSearchManifestCorruptError
-        run_path = self.repository.run_path(handle.investigation_id, handle.search_run_id)
-        operations, frames, requests = read_schema2_children(
-            self.repository.root, run_path, manifest.as_schema2()
-        )
-        baseline, class_ops, observations, aliases = read_schema3_children(
-            self.repository.root, run_path, manifest
-        )
-        digest = authoritative_source_digest(self.repository.root, run_path, manifest)
-        return _Snapshot(
-            manifest,
-            operations,
-            frames,
-            requests,
-            baseline,
-            class_ops,
-            observations,
-            aliases,
-            digest,
+        return _load_snapshot(
+            self.repository,
+            handle,
+            schema2_reader=read_schema2_children,
+            schema3_reader=read_schema3_children,
         )
 
     def _validate_lower(self, snapshot: _Snapshot, bracket: CoarseCandidateBracket) -> None:
@@ -366,6 +357,62 @@ class RepositoryNarrowingEvidenceStore(NarrowingEvidenceStore[NarrowingHandle]):
             decoded_pts=frame.decoded_pts,
             decoded_ordinal=frame.decoded_ordinal,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ReadOnlyRepositoryNarrowingEvidenceStore(RepositoryNarrowingEvidenceStore):
+    """Repository narrowing store whose snapshot reader is strictly read-only."""
+
+    @override
+    def _snapshot(self, handle: NarrowingHandle) -> _Snapshot:
+        return _load_snapshot(
+            self.repository,
+            handle,
+            schema2_reader=read_schema2_children_read_only_for_schema3,
+            schema3_reader=read_schema3_children_read_only,
+        )
+
+
+def _load_snapshot(
+    repository: D1Repository,
+    handle: NarrowingHandle,
+    *,
+    schema2_reader: Callable[
+        ...,
+        tuple[
+            dict[str, AcquisitionOperationRecord],
+            dict[str, CanonicalProbeFrameRecord],
+            dict[str, ProbeFrameRequestRecord],
+        ],
+    ],
+    schema3_reader: Callable[
+        ...,
+        tuple[
+            ConfirmedReferenceBaselineRecord,
+            dict[str, ClassificationOperationRecord],
+            dict[str, RecordingProbeObservationRecord],
+            dict[str, TargetAliasRecord],
+        ],
+    ],
+) -> _Snapshot:
+    manifest = repository.load(handle.investigation_id, handle.search_run_id)
+    if not isinstance(manifest, RecordingSearchManifestV3):
+        raise RecordingSearchManifestCorruptError
+    run_path = repository.run_path(handle.investigation_id, handle.search_run_id)
+    operations, frames, requests = schema2_reader(repository.root, run_path, manifest.as_schema2())
+    baseline, class_ops, observations, aliases = schema3_reader(repository.root, run_path, manifest)
+    digest = authoritative_source_digest(repository.root, run_path, manifest)
+    return _Snapshot(
+        manifest,
+        operations,
+        frames,
+        requests,
+        baseline,
+        class_ops,
+        observations,
+        aliases,
+        digest,
+    )
 
 
 def _bound(evidence: NarrowingProbeEvidence) -> NarrowingBoundEvidence:

@@ -47,6 +47,11 @@ _REQUEST_DIR: Final = "requests"
 _EVIDENCE_DIR: Final = "evidence"
 _FRAME_EVIDENCE_DIR: Final = "frames"
 _ADMISSION_STAGING_PREFIX: Final = ".phase7a2-admission-"
+_READ_ONLY_ROOT_FILES: Final = frozenset({_MANIFEST_NAME, "phase8-request.json"})
+_READ_ONLY_SCHEMA2_DIRECTORIES: Final = frozenset(
+    {_OPERATION_DIR, _FRAME_DIR, _REQUEST_DIR, _EVIDENCE_DIR, "observations"}
+)
+_READ_ONLY_SCHEMA3_DIRECTORIES: Final = frozenset({"observations", "classification-operations"})
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
 
 
@@ -184,6 +189,128 @@ def read_schema2_children(
     frames = _read_frames(root, run_path, manifest, operations, validate_media=True)
     requests = _read_requests(root, run_path, manifest, operations, frames)
     return operations, frames, requests
+
+
+def validate_schema2_tree_read_only(
+    root: Path, run_path: Path, manifest: RecordingSearchManifestV2
+) -> None:
+    """Validate one schema-2 tree without recovery or filesystem mutation.
+
+    This boundary is reserved for terminal schema-4 consumers.  Active schema
+    2/3 admission retains ``validate_schema2_tree`` and its narrowly scoped
+    crash-recovery behavior; terminal reopen must treat every entry as input.
+    """
+    _validate_schema2_tree_read_only(root, run_path, manifest, _READ_ONLY_SCHEMA2_DIRECTORIES)
+
+
+def validate_schema2_tree_read_only_for_schema3(
+    root: Path, run_path: Path, manifest: RecordingSearchManifestV2
+) -> None:
+    """Validate schema-2 children while allowing the enclosing schema-3 directories."""
+    _validate_schema2_tree_read_only(
+        root,
+        run_path,
+        manifest,
+        _READ_ONLY_SCHEMA2_DIRECTORIES | _READ_ONLY_SCHEMA3_DIRECTORIES,
+    )
+
+
+def _validate_schema2_tree_read_only(
+    root: Path,
+    run_path: Path,
+    manifest: RecordingSearchManifestV2,
+    allowed_root_directories: frozenset[str],
+) -> None:
+    if not is_safe_contained_path(root, run_path, require_target=True) or run_path.is_symlink():
+        raise RecordingSearchManifestCorruptError
+    expected_directories = (
+        run_path / _OPERATION_DIR,
+        run_path / _FRAME_DIR,
+        run_path / _REQUEST_DIR,
+        run_path / _EVIDENCE_DIR,
+        run_path / _EVIDENCE_DIR / _FRAME_EVIDENCE_DIR,
+    )
+    try:
+        if any(
+            not is_safe_contained_path(root, path, require_target=True)
+            or path.is_symlink()
+            or not path.is_dir()
+            for path in expected_directories
+        ):
+            _raise_corrupt()
+        _validate_read_only_root_entries(
+            root, run_path, expected_directories, allowed_root_directories
+        )
+        operations = _read_operations(root, run_path, manifest)
+        frames = _read_frames(root, run_path, manifest, operations, validate_media=True)
+        requests = _read_requests(root, run_path, manifest, operations, frames)
+        _reject_orphan_files(run_path, manifest, operations, frames, requests)
+    except RecordingSearchManifestCorruptError:
+        raise
+    except (ConfirmationArtifactError, OSError, ValueError, ValidationError, DurableJsonError):
+        raise RecordingSearchManifestCorruptError from None
+
+
+def read_schema2_children_read_only(
+    root: Path, run_path: Path, manifest: RecordingSearchManifestV2
+) -> tuple[
+    dict[str, AcquisitionOperationRecord],
+    dict[str, CanonicalProbeFrameRecord],
+    dict[str, ProbeFrameRequestRecord],
+]:
+    """Read indexed schema-2 children without invoking admission recovery."""
+    validate_schema2_tree_read_only(root, run_path, manifest)
+    operations = _read_operations(root, run_path, manifest)
+    frames = _read_frames(root, run_path, manifest, operations, validate_media=True)
+    requests = _read_requests(root, run_path, manifest, operations, frames)
+    return operations, frames, requests
+
+
+def read_schema2_children_read_only_for_schema3(
+    root: Path, run_path: Path, manifest: RecordingSearchManifestV2
+) -> tuple[
+    dict[str, AcquisitionOperationRecord],
+    dict[str, CanonicalProbeFrameRecord],
+    dict[str, ProbeFrameRequestRecord],
+]:
+    """Read schema-2 children under the explicit schema-3 root contract."""
+    validate_schema2_tree_read_only_for_schema3(root, run_path, manifest)
+    operations = _read_operations(root, run_path, manifest)
+    frames = _read_frames(root, run_path, manifest, operations, validate_media=True)
+    requests = _read_requests(root, run_path, manifest, operations, frames)
+    return operations, frames, requests
+
+
+def _validate_read_only_root_entries(
+    root: Path,
+    run_path: Path,
+    expected_directories: tuple[Path, ...],
+    allowed_root_directories: frozenset[str],
+) -> None:
+    expected = set(allowed_root_directories) | set(_READ_ONLY_ROOT_FILES)
+    actual = {path.name for path in run_path.iterdir()}
+    if (
+        not actual.issubset(expected)
+        or not {path.name for path in expected_directories} <= actual
+        or _MANIFEST_NAME not in actual
+    ):
+        _raise_corrupt()
+    for name in actual & allowed_root_directories:
+        path = run_path / name
+        if (
+            path.is_symlink()
+            or not path.is_dir()
+            or not is_safe_contained_path(root, path, require_target=True)
+        ):
+            _raise_corrupt()
+    for name in _READ_ONLY_ROOT_FILES:
+        path = run_path / name
+        if path.exists() and (
+            path.is_symlink()
+            or not path.is_file()
+            or not is_safe_contained_path(root, path, require_target=True)
+        ):
+            _raise_corrupt()
 
 
 def read_schema2_children_for_probe_admission(

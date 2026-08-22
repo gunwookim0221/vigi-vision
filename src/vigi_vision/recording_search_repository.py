@@ -44,6 +44,7 @@ from vigi_vision.recording_search_b2_validation import (
     parse_schema3_manifest,
     validate_authoritative_baseline,
     validate_schema3_tree,
+    validate_schema3_tree_read_only,
 )
 from vigi_vision.recording_search_d2_5_handoff import (
     Phase8HandoffRequestV1,
@@ -197,7 +198,7 @@ class RecordingSearchRepository:
                 validate_authoritative_baseline(self.confirmation_loader, manifest, baseline)
             elif isinstance(manifest, RecordingSearchManifestV4):
                 predecessor = manifest.as_schema3()
-                baseline = validate_schema3_tree(self.root, path, predecessor)
+                baseline = validate_schema3_tree_read_only(self.root, path, predecessor)
                 validate_authoritative_baseline(self.confirmation_loader, predecessor, baseline)
         except RecordingSearchManifestCorruptError:
             raise

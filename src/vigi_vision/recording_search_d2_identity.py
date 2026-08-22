@@ -43,14 +43,16 @@ def authoritative_source_digest(
     result or evidence-snapshot digest.
     """
     from vigi_vision.recording_search_a2_repository import (  # noqa: PLC0415
-        read_schema2_children,
+        read_schema2_children_read_only_for_schema3,
     )
     from vigi_vision.recording_search_b2_validation import (  # noqa: PLC0415
-        read_schema3_children,
+        read_schema3_children_read_only,
     )
 
-    acquisition, frames, requests = read_schema2_children(root, run_path, predecessor.as_schema2())
-    baseline, classification_operations, observations, aliases = read_schema3_children(
+    acquisition, frames, requests = read_schema2_children_read_only_for_schema3(
+        root, run_path, predecessor.as_schema2()
+    )
+    baseline, classification_operations, observations, aliases = read_schema3_children_read_only(
         root, run_path, predecessor
     )
     payload = {

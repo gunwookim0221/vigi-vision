@@ -15,6 +15,8 @@ from tests.recording_search_b4_support import (
     install_executor,
 )
 
+import vigi_vision.recording_search_a2_repository as a2_repository
+from vigi_vision.recording_search_a2_models import AcquisitionOperationRecord
 from vigi_vision.recording_search_b2_models import RecordingSearchManifestV3
 from vigi_vision.recording_search_d2_publication import build_schema4_successor
 from vigi_vision.recording_search_d2_publication_models import RecordingSearchManifestV4
@@ -22,6 +24,7 @@ from vigi_vision.recording_search_d2_reopen_validation import reopen_terminal
 from vigi_vision.recording_search_d2_status import terminal_status
 from vigi_vision.recording_search_d2_terminal import TerminalInputSnapshot, TerminalResult
 from vigi_vision.recording_search_models import (
+    RecordingSearchManifestCorruptError,
     RecordingSearchTerminalReopenCategory,
     RecordingSearchTerminalReopenError,
 )
@@ -143,3 +146,117 @@ def test_reopen_rejects_run_path_outside_repository_root(tmp_path: Path) -> None
         assert str(raised.value) == ""
     finally:
         harness.service.close()
+
+
+def test_schema4_reopen_rejects_residue_without_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_if_called(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError
+
+    harness, manifest = _published_harness(tmp_path)
+    run_path = harness.service.repository.run_path(harness.investigation_id, manifest.search_run_id)
+    operation_id = manifest.as_schema3().acquisition_operation_ids[0]
+    operation_path = run_path / "operations" / f"{operation_id}.json"
+    operation = AcquisitionOperationRecord.model_validate_json(
+        operation_path.read_text(encoding="utf-8"), strict=True
+    )
+    residue = run_path / ".phase7a2-admission-terminal-residue"
+    residue.mkdir()
+    marker = residue / "operation.json"
+    _ = marker.write_text(
+        operation.model_copy(
+            update={"operation_id": "acquisition-op-terminal-residue"}
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
+    manifest_path = run_path / "manifest.json"
+    manifest_bytes = manifest_path.read_bytes()
+    marker_bytes = marker.read_bytes()
+    harness.service.close()
+    monkeypatch.setattr(a2_repository, "_recover_admission_residue", fail_if_called)
+    replacement = replace(harness.service)
+    try:
+        with pytest.raises(RecordingSearchManifestCorruptError):
+            _ = replacement.status(harness.investigation_id, manifest.search_run_id)
+        assert residue.is_dir()
+        assert marker.read_bytes() == marker_bytes
+        assert manifest_path.read_bytes() == manifest_bytes
+    finally:
+        replacement.close()
+
+
+@pytest.mark.parametrize(
+    "entry_kind",
+    [
+        "classification-operation",
+        "observation",
+        "alias",
+        "nested-directory",
+        "unsupported-extension",
+    ],
+)
+def test_schema4_reopen_rejects_unindexed_schema3_entries_without_mutation(
+    tmp_path: Path, entry_kind: str
+) -> None:
+    harness, manifest = _published_harness(tmp_path)
+    run_path = harness.service.repository.run_path(harness.investigation_id, manifest.search_run_id)
+    if entry_kind == "classification-operation":
+        source = next((run_path / "classification-operations").iterdir())
+        entry = run_path / "classification-operations" / "foreign-operation.json"
+        _ = entry.write_bytes(source.read_bytes())
+    elif entry_kind in {"observation", "alias"}:
+        source = next((run_path / "observations").iterdir())
+        entry = run_path / "observations" / f"foreign-{entry_kind}.json"
+        _ = entry.write_bytes(source.read_bytes())
+    elif entry_kind == "nested-directory":
+        entry = run_path / "observations" / "foreign-nested"
+        entry.mkdir()
+        _ = (entry / "record.json").write_bytes(b"foreign")
+    else:
+        entry = run_path / "observations" / "foreign.txt"
+        _ = entry.write_bytes(b"foreign")
+    before = {
+        path.relative_to(run_path): (None if path.is_dir() else path.read_bytes())
+        for path in run_path.rglob("*")
+    }
+    manifest_bytes = (run_path / "manifest.json").read_bytes()
+    harness.service.close()
+    replacement = replace(harness.service)
+    try:
+        with pytest.raises(RecordingSearchManifestCorruptError):
+            _ = replacement.status(harness.investigation_id, manifest.search_run_id)
+        after = {
+            path.relative_to(run_path): (None if path.is_dir() else path.read_bytes())
+            for path in run_path.rglob("*")
+        }
+        assert entry.exists()
+        assert after == before
+        assert (run_path / "manifest.json").read_bytes() == manifest_bytes
+    finally:
+        replacement.close()
+
+
+def test_schema4_reopen_rejects_symlink_entry_without_mutation(tmp_path: Path) -> None:
+    harness, manifest = _published_harness(tmp_path)
+    run_path = harness.service.repository.run_path(harness.investigation_id, manifest.search_run_id)
+    outside = tmp_path / "foreign.txt"
+    _ = outside.write_bytes(b"foreign")
+    link = run_path / "observations" / "foreign-link.json"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        harness.service.close()
+        pytest.skip("symlink creation is unavailable")
+    manifest_path = run_path / "manifest.json"
+    manifest_bytes = manifest_path.read_bytes()
+    harness.service.close()
+    replacement = replace(harness.service)
+    try:
+        with pytest.raises(RecordingSearchManifestCorruptError):
+            _ = replacement.status(harness.investigation_id, manifest.search_run_id)
+        assert link.is_symlink()
+        assert manifest_path.read_bytes() == manifest_bytes
+        assert outside.read_bytes() == b"foreign"
+    finally:
+        replacement.close()

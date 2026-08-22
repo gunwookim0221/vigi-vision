@@ -11,9 +11,15 @@ from typing import TYPE_CHECKING, NoReturn, TypeVar
 
 from vigi_vision.durable_io import is_safe_contained_path
 from vigi_vision.object_presence_values import ClassificationOutcome
-from vigi_vision.recording_search_a2_repository import read_schema2_children
+from vigi_vision.recording_search_a2_repository import (
+    read_schema2_children,
+    read_schema2_children_read_only_for_schema3,
+)
 from vigi_vision.recording_search_b2_models import RecordingSearchManifestV3
-from vigi_vision.recording_search_b2_validation import read_schema3_children
+from vigi_vision.recording_search_b2_validation import (
+    read_schema3_children,
+    read_schema3_children_read_only,
+)
 from vigi_vision.recording_search_c1_planner import (
     baseline_identity_for,
     build_coarse_sampling_plan,
@@ -21,7 +27,9 @@ from vigi_vision.recording_search_c1_planner import (
 from vigi_vision.recording_search_c2_support import coarse_target_id
 from vigi_vision.recording_search_d1_identity import policy_identity, source_bracket_identity
 from vigi_vision.recording_search_d1_models import NarrowingStatus
-from vigi_vision.recording_search_d1_repository import RepositoryNarrowingEvidenceStore
+from vigi_vision.recording_search_d1_repository import (
+    ReadOnlyRepositoryNarrowingEvidenceStore,
+)
 from vigi_vision.recording_search_d1_service import execute_binary_narrowing
 from vigi_vision.recording_search_d2_enums import D2EvidenceRole
 from vigi_vision.recording_search_d2_evidence import (
@@ -122,10 +130,10 @@ def reopen_terminal_result(
         ):
             _fail(RecordingSearchTerminalReopenCategory.FOREIGN_OWNERSHIP)
         predecessor = manifest.as_schema3()
-        baseline, operations, observations, aliases = read_schema3_children(
+        baseline, operations, observations, aliases = read_schema3_children_read_only(
             root, run_path, predecessor
         )
-        acquisition, frames, requests = read_schema2_children(
+        acquisition, frames, requests = read_schema2_children_read_only_for_schema3(
             root, run_path, predecessor.as_schema2()
         )
         _validate_children(
@@ -288,7 +296,9 @@ def _validate_found_reconstruction(  # noqa: PLR0913 - explicit authority inputs
     if narrowed.manifest_digest != source_digest:
         _fail(RecordingSearchTerminalReopenCategory.IDENTITY_MISMATCH)
     try:
-        store = RepositoryNarrowingEvidenceStore(_RepositoryView(root, run_path, predecessor))
+        store = ReadOnlyRepositoryNarrowingEvidenceStore(
+            _RepositoryView(root, run_path, predecessor)
+        )
         current_source = replace(source_bracket, manifest_digest=source_digest)
         store.validate_bracket(
             _ReopenHandle(
@@ -370,7 +380,7 @@ class _RepositoryView:
 class _ReopenEvidenceStore:
     """Adapt the live store while retaining the original C2 revision identity."""
 
-    store: RepositoryNarrowingEvidenceStore
+    store: ReadOnlyRepositoryNarrowingEvidenceStore
     source_digest: str
 
     def validate_bracket(
@@ -440,7 +450,9 @@ def _replay_requests(
     root: Path, run_path: Path, predecessor: RecordingSearchManifestV3
 ) -> tuple[ProbeFrameRequestRecord, ...]:
     """Load the immutable request records needed by the read-only D1 replay."""
-    _, _, requests = read_schema2_children(root, run_path, predecessor.as_schema2())
+    _, _, requests = read_schema2_children_read_only_for_schema3(
+        root, run_path, predecessor.as_schema2()
+    )
     return tuple(requests.values())
 
 
