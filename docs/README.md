@@ -38,8 +38,21 @@ documentation route is added, removed, or relocated.
   now includes the production terminalization composition, terminal-result and
   schema-4 publication, strict reopen/status projection, and D2-5 Phase 8
   request boundary. FOUND reopen independently rebuilds the persisted D1
-  reconstruction against the live schema-3 evidence; Phase 8 clip processing
-  remains unimplemented. Read
+  reconstruction against the live schema-3 evidence. The same document now
+  contains the single Phase 7E normative design: request-relative timing, one
+  replay/decode session and SDK segment, a five-minute default and 600-second
+  maximum, pre-acquisition schema 5, incremental schema 6, immutable schema 7,
+  26 domain-separated identity families with full classifier evidence, a
+  binary-complete conformance fixture, an exact 2,520-second deadline, and a
+  closed-state Phase 8 repository whose semantic clip ID is separate from MP4
+  integrity. Slice ownership is fixed: 7E-1A identities/models/matrices/validation;
+  1B schema-5/6 persistence; 1C one-session media and exact target-to-frame
+  selection; 1D the Phase 7E C1 planner adapter and terminal composition
+  and schema 7; 2 CLI and Phase 8 projection; 3 bounded acceptance. Read
+  [ADR-0007](adr/ADR-0007-validated-recording-search.md) for the durable
+  provenance/executor decision. Phase 7E runtime implementation, terminal
+  real-NVR acceptance, and Phase 8 review-media processing remain unimplemented.
+  Read
   [design/object-presence-classification.md](design/object-presence-classification.md)
   for the normative Phase 7B single-probe input, geometry, classifier, outcome,
   schema-3 observation, publication, idempotency, and strict-reopen contract.

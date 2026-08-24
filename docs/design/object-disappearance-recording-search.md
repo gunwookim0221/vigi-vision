@@ -23,8 +23,13 @@ non-sensitive schema-4 status projection. D2-5 now implements the strict
 FOUND-only Phase 8 handoff request model, canonical identity, and atomic
 run-owned persistence. The final D2 safety correction persists a lossless D1
 reconstruction envelope for `FOUND` and independently rebuilds it from the
-schema-3 authority during reopen. Phase 7E real-NVR validation and Phase 8 review-media
-generation also remain unimplemented. The required Phase 6C
+ schema-3 authority during reopen. Phase 7E feasibility work proved that the
+ current VIGI RTSP/SDK/FFmpeg path exposes request-relative, per-replay
+ timestamps but no authoritative physical frame UTC. The normative section
+ below defines the versioned request-relative schema 5–7 contract while keeping
+ schemas 1–4 readable under their original strict physical-UTC semantics. The
+ ordered Phase 7E-1A/1B/1C/1D, 7E-2, and 7E-3 implementation/validation and
+ Phase 8 review-media generation remain unimplemented. The required Phase 6C
 schema 3 compatibility increment is complete.**
 
 This document is the current implementation and review contract for Phase 7.
@@ -68,7 +73,1030 @@ ownership, declare theft, determine cause or intent, or claim an exact event
 instant. `ABSENT` means only that the confirmed object is not sufficiently
 supported as visible in the confirmed region for that observation.
 
-## Existing boundaries to reuse
+## Phase 7E normative contract
+
+This section is the only normative Phase 7E specification. The later sections
+describe the implemented schemas 1–4 and remain normative only for that legacy
+`AUTHORITATIVE_SOURCE_UTC` family. They must not be used to fill a schema 5–7
+gap.
+
+### Fixed product boundary
+
+Production VIGI recording search uses `REQUEST_RELATIVE_ESTIMATE` with
+`UNKNOWN_UNBOUNDED` physical-origin bias. One synchronous CLI invocation uses
+one SDK segment, one replay/remux, one retained MP4, and one common decode
+session. Every C1, C2, D1, D2, support, and terminal frame comes from that
+session. No second replay, cross-session match, migration, fallback parser,
+worker, lease, takeover, resume, frontend, Phase 8 executor, or Phase 9 behavior
+is authorized.
+
+The requested interval is half-open `[S,E)`. The default duration is `300`
+seconds and the exact maximum is `600` seconds. Duration is a positive integer;
+strings, fractions, alternate units, zero, and values above `600` fail before a
+run directory is created. Exactly one SDK segment must satisfy
+`segment_start <= S < E <= segment_end`. A touching next segment is never read.
+
+The Phase 6 schema-3 confirmation supplies the historical baseline and
+source-pixel ROI. Start validates its resource through the existing strict
+confirmation loader, reads the JPEG once, and verifies path confinement,
+stored-byte SHA-256 and length, dimensions, decode, and ROI before schema 5.
+The baseline is not common-session evidence. Automatic `FOUND` requires a
+same-session `PRESENT` lower observation and a same-session supported `ABSENT`
+upper group. Baseline plus first recording `ABSENT` is terminal
+`INCONCLUSIVE/BASELINE_ONLY_LOWER_BOUND`, never `FOUND`. Operational failure is
+never visual `INCONCLUSIVE`.
+
+### Repository roots, staging, and locks
+
+Let `R` be the configured recording-search repository root. Published Phase 7
+runs live only at `R/<investigation_id>/<run_id>/`. Session media lives outside
+that immutable tree at
+`R/.media/<investigation_id>/<run_id>/<common_session_id>.mp4`. Phase 8
+projections live only at `R/.phase8/<investigation_id>/<run_id>/`. Atomic-write
+staging lives only under `R/.staging/...` or `R/.phase8-staging/...`; a staging
+directory records its invocation ID and exact final target and is owned only by
+the process holding `R/.locks/<investigation_id>.lock`.
+
+The lock order is confined-path validation → per-investigation OS lock →
+in-process registry guard → active-run mutation mutex. Release is the reverse.
+No code follows symlinks, junctions, reparse points, or a path outside `R`.
+Published run and Phase 8 directories never contain staging names. Strict
+reopen rejects staging, unknown, foreign, unindexed, duplicate, unsupported,
+symlink, junction, and reparse residue. After a crash, a lock-owning inspector
+re-reads the manifest before changing a still-running schema 5 or 6 to
+`INTERRUPTED/interrupted`; a held lock leaves `RUNNING` untouched.
+It removes only safe staging whose recorded final target is that exact run.
+
+### Schemas 5 → 6 → 7
+
+Every record is strict JSON: duplicate/missing/unknown keys, coercion, invalid
+UTC, invalid integer/rational, noncanonical ordering, and foreign ownership are
+rejected. The manifest is the only mutable publication pointer; children are
+immutable and become authoritative only after atomic write, strict readback,
+and inclusion in a successor manifest identity.
+
+| Schema | Required published entries | Optional published entries | Forbidden |
+| --- | --- | --- | --- |
+| 5 | `manifest.json`; `policy/<policy_id>.json`; `plans/<plan_id>.json`; ordered coarse `requests/<target_request_id>.json` | `operations/<replay_operation_id>.json`; one closed failure record for that operation; during transition, one byte-identical `manifests/<schema5_manifest_id>.json` copy of the current manifest | `sessions/`, `.media` references, decoder/classification operations, frames/JPEGs, observations, aliases, support, C2/D1, terminal, Phase 8, other manifest archives, and staging |
+| 6 | `manifests/<schema5_manifest_id>.json`; all strict schema-5 bindings; one successful replay operation; `classifier-policies/<classifier_policy_id>.json`; `sessions/<common_session_id>.json`; a schema-6 `manifest.json` whose initial frame/observation indexes may both be empty | target requests; decoder operations; `frames/<frame_id>.json` and deterministic `frames/<frame_id>.jpg`; classification operations; observations; aliases; support; C2/D1; closed operation failures; during terminal transition, one byte-identical `manifests/<schema6_manifest_id>.json` copy of the current manifest | terminal/result/snapshot/source-set records, Phase 8 records, legacy children, any other manifest archive, unindexed children, and staging |
+| 7 | both strict transition archives under `manifests/`; the complete strictly reopened schema-6 tree; `terminal/source-record-set.json`; `terminal/evidence-snapshot.json`; `terminal/result.json`; one schema-7 `manifest.json` | none | Phase 8/source-clip/deletion records, post-terminal evidence, second terminal records, legacy children, foreign/unindexed children or archives, and staging |
+
+Schemas 5 and 6 use one closed lifecycle field, `run_state=RUNNING | FAILED |
+INTERRUPTED`; `INTERRUPTED` is not a visual result and never appears in schema
+7. Their manifest envelopes always contain the full state-key set shown below;
+"forbidden" means the key is present with JSON `null`, never omitted. State
+fields are strict envelope metadata around the stable manifest identity payload.
+
+| Schema-5 `phase_state` | `run_state` | Required non-null envelope fields | Forbidden/null fields | Attempt | Predecessor → successor | Terminal/evidence/reopen rule |
+| --- | --- | --- | --- | --- | --- | --- |
+| `PLANNED` | `RUNNING` | none beyond the state keys | replay operation, reason | `0` | start → `ACQUIRING` | not terminal; no evidence; exact schema-5 base membership |
+| `ACQUIRING` | `RUNNING` | `active_replay_operation_id` | reason | `1` | `PLANNED` → `ACQUIRED`, `ACQUISITION_FAILED`, or `INTERRUPTED` | not terminal; operation intent must strictly reopen and be the only optional child |
+| `ACQUISITION_FAILED` | `FAILED` | replay operation, canonical `reason_code` | none | `1` | `ACQUIRING` → none | terminal operational; no visual evidence; failed operation and reason must agree |
+| `ACQUIRED` | `RUNNING` | successful replay operation | reason | `1` | `ACQUIRING` → schema 6 `REQUESTED` | transition-only; operation, MP4, session, and archive all strictly reopen before replacement |
+| `INTERRUPTED` | `INTERRUPTED` | `reason_code=interrupted`; replay operation iff predecessor was `ACQUIRING` | any operation absent in the predecessor | predecessor attempt (`0` or `1`) | `PLANNED`/`ACQUIRING` → none | terminal operational; exact predecessor refs only; no evidence |
+
+The schema-5 envelope key set is exactly `run_state`, `phase_state`,
+`active_replay_operation_id`, `reason_code`, and `attempt_count`. A state/key
+combination outside the matrix, a second attempt, or a replay child not bound by
+the current envelope is corrupt residue.
+
+Schema 5 is atomically created before replay and contains only validated
+request, baseline, policy, plan, and coarse target bindings. It does not require
+a selected stream, time base, MP4 digest, `CommonSession`, frame,
+classification, or observation. Replay failure atomically publishes schema-5
+`FAILED/<canonical reason>`; Ctrl+C publishes
+`INTERRUPTED/interrupted`. No evidence child is admitted.
+
+After the one replay exits successfully, the executor strictly probes the
+retained MP4, requires exactly one selected video stream, validates the positive
+reduced time base, monotonic PTS, duration, size, and segment coverage, hashes
+the MP4, atomically publishes it to `.media`, constructs `CommonSession`, and
+strictly reads both back. It then no-overwrite publishes and strictly reads the
+byte-identical schema-5 manifest archive named by the current manifest ID. Only
+then does one atomic manifest replacement create schema 6 with zero frames and
+zero observations. Probe, media, or archive admission failure leaves schema 5
+`FAILED` and removes only invocation-owned temporary media.
+
+Schema 6 admits evidence incrementally in this exact production order:
+
+1. Admit one target request and decoder-operation intent in a successor
+   manifest.
+2. Decode only from the admitted common MP4.
+3. Atomically persist the frame record and JPEG, strictly reopen them, verify
+   JPEG bytes/dimensions/RGB24, then index the frame in a successor manifest.
+4. Invoke B4 only with that persisted and reopened frame.
+5. Persist either the completed operational classification record alone or the
+   completed visual classification record plus observation atomically, strictly
+   reopen the admitted children, and index them in a successor manifest.
+6. Revalidate the active handle, lock ownership, expected current manifest ID,
+   schema-5 transition predecessor, session, target, frame, and classifier
+   authority before exposing the observation.
+
+The schema-6 target envelope key set is exactly `run_state`, `target_state`,
+`active_target_request_id`, `active_decoder_operation_id`, `active_frame_id`,
+`active_classification_attempt_id`, `active_classification_operation_id`,
+`active_observation_id`, `reason_code`, `attempt_count`, and
+`predecessor_target_state`. A classification attempt ID is invocation-local,
+strict, and never a persisted evidence identity; it exists only while the
+output-dependent classification-operation ID cannot yet be computed. All states
+bind one target request. The following matrix is exhaustive; a dash means the
+field is null.
+
+| `target_state` | `run_state` | Decoder | Frame | Class attempt | Class operation | Observation | Reason | Attempt | Predecessor → successor | Terminal for target / visual evidence / strict reopen |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `REQUESTED` | `RUNNING` | — | — | — | — | — | — | `0` | new target after schema-5 transition or prior `OBSERVED` → `DECODING` | no / no / request indexed and strictly reopened |
+| `DECODING` | `RUNNING` | required | — | — | — | — | — | `1` | `REQUESTED` → `FRAME_READY`, `ACQUISITION_FAILED`, or `INTERRUPTED` | no / no / decoder intent and request strictly reopen |
+| `ACQUISITION_FAILED` | `FAILED` | required | — | — | — | — | canonical acquisition reason | `1` | `DECODING` → none | yes / no / failed decoder and reason agree |
+| `FRAME_READY` | `RUNNING` | required | required | — | — | — | — | `1` | `DECODING` → `CLASSIFYING` or `INTERRUPTED` | no / no / frame record and JPEG are indexed and strictly read back |
+| `CLASSIFYING` | `RUNNING` | required | required | required | — | — | — | `1` | `FRAME_READY` → `OBSERVED`, `CLASSIFICATION_FAILED`, or `INTERRUPTED` | no / no / B4 input is the reopened frame; no output identity is guessed |
+| `CLASSIFICATION_FAILED` | `FAILED` | required | required | — | required completed operational result | — | canonical classifier reason | `1` | `CLASSIFYING` → none | yes / no / operation is OPERATIONAL and has no visual payload |
+| `OBSERVED` | `RUNNING` | required | required | — | required completed visual result | required | — | `1` | `CLASSIFYING` → next `REQUESTED` or terminal build | yes / yes / operation and observation strictly reopen and match exactly |
+| `INTERRUPTED` | `INTERRUPTED` | exact predecessor ref if any | exact predecessor ref if any | required only when predecessor is `CLASSIFYING` | — | — | `interrupted` | predecessor attempt | any nonterminal target state → none | yes / no new evidence / only the predecessor's admitted prefix is legal |
+
+`persist frame → strict readback → FRAME_READY → CLASSIFYING → persist visual
+operation and observation → strict readback → OBSERVED` is therefore legal
+without requiring an observation early. An operational classification result
+uses `CLASSIFICATION_FAILED` and never creates an observation. An indexed frame
+without `OBSERVED` cannot count as PRESENT, ABSENT, support, C2/D1 evidence, or
+a terminal input.
+
+Every atomic crash has one interpretation: before `manifest.json` replacement,
+strict reopen sees the prior matrix row and removes only invocation-owned
+staging; after replacement, it sees and validates the new row. A lock-free
+inspector must first acquire the OS-backed lock and re-read the manifest before
+publishing `INTERRUPTED`; if the live process still holds the lock it changes
+nothing. Restart never resumes decoding or classification and never converts a
+frame or late result into visual evidence. Status projection reports RUNNING,
+FAILED, or INTERRUPTED from the same field, and CLI interruption exits `130`.
+
+Schema 7 is built only from a complete strict schema-6 reconstruction. Before
+terminal staging, the executor no-overwrite publishes and strictly reads the
+byte-identical final schema-6 manifest archive named by its ID. Its three
+terminal children are then written to invocation-owned staging, strictly read
+back together, and published by one atomic schema-7 manifest replacement.
+Strict schema-7 readback occurs before handle retirement. Publication is
+irreversible and the entire run tree is read-only thereafter. A failed
+post-commit readback reports `readback_failed` but cannot rewrite or downgrade
+the committed result. Identical publication reuses the byte-identical terminal
+tree; a different proposal is `publication_conflict` and preserves the winner.
+
+### Deterministic target and support selection
+
+For a frame with raw PTS `p`, the only ordering offset is the exact rational
+`(p - container_start_pts) * time_base_num / time_base_den`. It must be
+nonnegative, in the selected stream, and inside the probed session duration.
+Its request-relative estimate is `replay_start_requested_time_utc + offset`;
+this is never physical UTC. Selection, distance, monotonicity, and interval
+membership compare that exact rational value without floating point. The
+identity field `estimated_requested_time_utc` stores the UTC whole-second floor
+for display/indexing, while `raw_pts`, `container_start_pts`, and `time_base`
+reconstruct the exact value and therefore prevent subsecond aliasing.
+
+The coarse plan contains `S`, then `S+n*coarse_interval_seconds` while strictly
+less than `E`, and one logical end-boundary target exactly equal to `E` unless
+the interval is otherwise invalid. That logical target uses
+`FINAL_STRICTLY_BEFORE_END`: it selects the eligible decoded frame with the
+greatest PTS whose derived request-relative estimate is strictly less than `E`.
+A frame at or after `E` is never eligible. All other targets use
+`NEAREST_IN_HALF_OPEN_SESSION`; exact distance ties select the earlier frame.
+Candidates are first confined to the admitted stream/session and `[S,E)`.
+For either rule, the selected estimate must be no farther from its target than
+the policy `support_cadence_seconds`; comparison uses exact rational ticks and
+the inclusive bound. This derived one-second default is the decoder-alignment
+tolerance and is not an independently configurable or implicit default.
+
+For a normal target `t`, absence support requests
+`[t,t+cadence,...]`. For the end-boundary target, support is the final
+backward-safe sequence
+`[E-support_count*cadence,...,E-cadence]`; its last canonical frame is also the
+end target's selected frame. Requested times are never clamped. If a short
+window places a support request before `S`, or sparse media cannot provide every
+requested member within that exact decoder-alignment tolerance, the group is
+`insufficient_support`. Support beyond `E`, a touching segment, or a frame at
+or after `E` is rejected.
+
+All support members must have strictly increasing PTS and ordinals and distinct
+frame IDs, observation IDs, and RGB24 digests. An alias may map a request to an
+existing frame/observation for ordinary reuse, but an aliased member never
+counts twice. A recording gap, duplicate content, reset, decode failure, or
+missing member supplies no `ABSENT` evidence.
+
+This is a new Phase 7E-specific adapter; it does not alter the existing C1
+implementation, schemas 1–4, or Phase 7D behavior. Slice 7E-1C owns the
+same-session decoded-frame selector, exact rational target-to-frame mapping,
+logical-`E` strict-before rule, distance/tie rules, and duplicate/alias
+rejection. Slice 7E-1D owns the Phase 7E C1 planner/composition adapter: include
+`S`, append logical `E`, build backward final support
+`[E-count×cadence,...,E-cadence]`, never invoke legacy forward final support,
+and translate missing/sparse/duplicate/aliased/out-of-range support to
+`insufficient_support` or `duplicate_frame` without clamping.
+
+With cadence one second and support count three, the deterministic examples are:
+
+| Window/decoded estimates | Planned end support and result |
+| --- | --- |
+| `[00,10)`, frames at every second | plan includes `00` and logical `10`; support is `[07,08,09]`; logical `10` selects frame `09` |
+| `[00,02)`, frames `00,01` | backward support would include `-01`; reject `insufficient_support`, never clamp to `00` |
+| `[00,04)`, no eligible frame before `04` | logical `04` is unavailable; no terminal ABSENT |
+| `[00,04)`, only frames `00,03` | `[01,02,03]` cannot all resolve within tolerance to distinct frames; reject sparse support |
+| `[00,04)`, targets `02` and `03` both select frame `03` | duplicate frame/RGB24 identity; neither supplies two confirmations |
+| `[00,04)`, support alias maps `03` to the logical-end observation | alias is useful for reuse but counts once; group remains insufficient |
+| `[00,03)`, frames `00,01,02` | requested support `[00,01,02]` contains three distinct frames and is sufficient; otherwise reject, never reduce the required count |
+
+### Canonical identities and B4 evidence
+
+Every deterministic record uses a strict envelope whose computed ID is outside
+its canonical payload. The digest is lowercase SHA-256 of
+`ASCII(domain) + NUL + UTF8(canonical_payload)`. Canonical JSON uses
+`ensure_ascii=false`, sorted keys, separators `(',', ':')`, whole-second UTC,
+reduced positive integer rationals, exact integers, and documented array order.
+Decimal metrics are six-place strings, never binary floats. Validation removes
+the envelope ID, requires the exact payload allowlist, recomputes the ID, and
+compares it. A payload containing its own computed identity, or any unknown
+payload key, is invalid.
+
+The 26 persisted identity families are acyclic. The search `policy`, full
+`classifier-policy`, and `media-generation-policy` are distinct. A mutable
+classifier label is display metadata only and is never an identity. The full
+classifier policy binds the upstream source commit, official checkpoint
+identity and digest, resolved runtime/backend versions, CPU device and dtypes,
+RGB/channel normalization, prompt tensor shapes, upstream-owned resize and
+interpolation, source-grid mask selection and quality gates, luma/NCC arithmetic
+and rounding, visual thresholds, timeout, one-attempt ceiling, concurrency,
+revocation, retry, and unknown-result behavior. The search policy separately
+binds the consecutive-INDETERMINATE ceiling. Host paths, cache paths, wall-clock
+publication timestamps, scheduling order, hardware serials, and sanitized
+native diagnostics are excluded because they neither change admitted input
+bytes nor the validated classification result; they remain strict envelope or
+operational metadata.
+
+`classification-operation` has one exact payload key set. `result_kind=VISUAL`
+requires `outcome=PRESENT|ABSENT|INDETERMINATE`, the exact evidence object below,
+`operational_reason=null`, and a canonical reason only for visual
+`INDETERMINATE`. `result_kind=OPERATIONAL` requires `outcome`, `reason_code`, and
+`classifier_evidence` all null and one closed operational reason. Only VISUAL
+operations create observations. An observation repeats and therefore binds the
+operation ID, classifier-policy ID, visual outcome, canonical reason,
+comparability, `unusable_reason`, and every typed evidence field; any mismatch
+rejects strict reopen.
+
+The production vocabulary is closed and is copied here exactly. `VisualStatus`
+is `comparable | unusable`; `ClassificationOutcome` is `PRESENT | ABSENT |
+INDETERMINATE`; and `VisualReason` is `invalid_mask | background_dominant |
+insufficient_mask_overlap | insufficient_comparison_area | zero_luma_variance |
+insufficient_visual_evidence`. The classifier's operational failure enum is
+`invalid_input_shape | invalid_geometry | invalid_mask_structure |
+invalid_numeric_input | invalid_classifier_output | unsupported_channel_layout |
+preprocessing_failed`; those failures publish no `RawComparison` and are mapped
+to the closed Phase 7E `operational_reason` vocabulary by the B4 adapter. The
+only visual classifier-evidence union member is the strict `RawComparison`
+object below. Operational operations carry `classifier_evidence=null`.
+
+| Evidence field | Type and rule |
+| --- | --- |
+| `baseline_mask_pixel_count`, `probe_mask_pixel_count`, `roi_pixel_count`, `mask_intersection_pixel_count`, `mask_union_pixel_count`, `effective_comparison_area` | strict nonnegative integers; `roi_pixel_count` is always required; every key is present, and a key outside the selected row is explicitly `null` |
+| `baseline_mask_coverage`, `probe_mask_coverage`, `mask_iou`, `roi_luma_ncc` | finite `StrictFloat` values quantized with `half_even` to six places, then encoded in the Phase 7E identity payload as canonical six-place decimal strings; each row below closes which values may be non-null |
+| `visual_status` | exactly `comparable` or `unusable`; the separate operation/observation outcome is `PRESENT`, `ABSENT`, or `INDETERMINATE` |
+| `unusable_reason` | always `null` for `comparable`; for `unusable` it is exactly one of `invalid_mask`, `background_dominant`, `insufficient_mask_overlap`, `insufficient_comparison_area`, or `zero_luma_variance`; `insufficient_visual_evidence` is forbidden here |
+
+The exact B4 field matrix is closed as follows. `C` means all nine metric
+fields are required (`baseline_mask_pixel_count`, `probe_mask_pixel_count`,
+`mask_intersection_pixel_count`, `mask_union_pixel_count`, both coverages,
+`mask_iou`, `effective_comparison_area`, and `roi_luma_ncc`), with the B4
+equalities and minima; `I` requires only `roi_pixel_count` and has every other
+metric null; `B` requires both mask counts and both coverages, with pairwise,
+effective-area, and NCC fields null; `O` requires both mask counts, their
+intersection and union, both coverages, and `mask_iou`, with effective area and
+NCC null; `A` requires the `O` fields plus `effective_comparison_area`, with NCC
+null; and `Z` requires the `A` fields with NCC null. Every matrix row still
+contains all keys.
+
+| B4 evidence variant | Comparable | Classification / `reason_code` | `unusable_reason` | Required / forbidden classifier evidence | Comparison fields | Visual / operational | Phase 7E adapter outcome |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Comparable `PRESENT` | true | `PRESENT` / `null` | `null` | `RawComparison` / none beyond the `C` row | `C`; policy PRESENT thresholds hold | may contribute visual evidence / no | visual PRESENT evidence |
+| Comparable `ABSENT` | true | `ABSENT` / `null` | `null` | `RawComparison` / none beyond the `C` row | `C`; policy ABSENT thresholds hold | may contribute visual evidence / no | visual ABSENT evidence |
+| Comparable visual `INDETERMINATE` | true | `INDETERMINATE` / exactly `insufficient_visual_evidence` | `null` | typed comparable `RawComparison` / no unusable fields | `C`; valid bounded metrics but neither terminal threshold pair | may contribute visual evidence only as visual inadequacy / no | only the existing closed visual-inadequacy path; never FOUND or NOT_FOUND |
+| Unusable `invalid_mask` | false | `INDETERMINATE` / `invalid_mask` | `invalid_mask` | typed unusable `RawComparison` / all fields outside `I` | `I` | no visual evidence / input failure | operationally unusable; no FOUND, NOT_FOUND, or visual INCONCLUSIVE |
+| Unusable `background_dominant` | false | `INDETERMINATE` / `background_dominant` | `background_dominant` | typed unusable `RawComparison` / all fields outside `B` | `B`; at least one coverage is at or above the policy maximum | no visual evidence / input failure takes precedence | operationally unusable; no FOUND, NOT_FOUND, or visual INCONCLUSIVE |
+| Unusable `insufficient_mask_overlap` | false | `INDETERMINATE` / `insufficient_mask_overlap` | `insufficient_mask_overlap` | typed unusable `RawComparison` / all fields outside `O` | `O`; IoU is below the persisted minimum | no visual evidence / input failure takes precedence | operationally unusable; no FOUND, NOT_FOUND, or visual INCONCLUSIVE |
+| Unusable `insufficient_comparison_area` | false | `INDETERMINATE` / `insufficient_comparison_area` | `insufficient_comparison_area` | typed unusable `RawComparison` / all fields outside `A` | `A`; effective area or ROI is below the persisted minimum | no visual evidence / input failure takes precedence | operationally unusable; no FOUND, NOT_FOUND, or visual INCONCLUSIVE |
+| Unusable `zero_luma_variance` | false | `INDETERMINATE` / `zero_luma_variance` | `zero_luma_variance` | typed unusable `RawComparison` / `roi_luma_ncc` and all fields outside `Z` | `Z`; all mask metrics are complete but NCC is unavailable | no visual evidence / input failure takes precedence | operationally unusable; no FOUND, NOT_FOUND, or visual INCONCLUSIVE |
+
+`insufficient_visual_evidence` is therefore a comparable visual reason only; it
+is never a valid `unusable_reason`. Operational/input failure takes precedence
+over visual insufficiency: an operational failure publishes no `RawComparison`,
+while an unusable `RawComparison` remains a closed non-terminal observation and
+cannot be promoted to `FOUND`, `NOT_FOUND`, or terminal visual `INCONCLUSIVE`.
+
+Operational timeout/failure and invalid/unknown classifier output carry no
+visual evidence and no terminal candidate. Changing checkpoint, threshold,
+preprocessing, runtime arithmetic, evidence value, outcome, or reason changes
+its canonical payload and therefore the classifier-policy, operation,
+observation, and every transitive support/C2/D1/source-set/snapshot/terminal ID.
+
+The following array is the complete one-per-family golden-vector inventory.
+Each `expected_id` is independently reproducible from its displayed domain and
+payload; the ID itself is not hashed. Together with the base conformance array
+and the isolated B4 `unusable` vectors below, the normative inventory contains
+59 identity instances across the same 26 identity families.
+
+```json
+[{"family":"policy","domain":"vigi.recording-search.request-relative.policy.v1","expected_id":"rr-policy-v1-3e976cea4523523b81762351983a19d50a3febe036413b165831f74edaa6904d","payload":{"schema_family":[5,6,7],"provenance_level":"REQUEST_RELATIVE_ESTIMATE","default_search_duration_seconds":300,"maximum_search_duration_seconds":600,"coarse_interval_seconds":300,"support_count":3,"support_cadence_seconds":1,"binary_stop_seconds":1,"maximum_consecutive_indeterminate_targets":3,"maximum_mp4_bytes":4294967296,"maximum_process_memory_bytes":2147483648,"maximum_selected_rgb24_frames":12,"maximum_targets_per_decoder_pass":32,"maximum_decoder_passes":11,"maximum_classifications":32,"replay_margin_seconds":40,"ffprobe_timeout_seconds":20,"decoder_timeout_seconds":120,"classifier_timeout_seconds":10,"classifier_total_budget_seconds":320,"terminal_interpretation_seconds":10,"publication_seconds":10,"strict_readback_seconds":20,"source_clip_timeout_seconds":120,"cleanup_reserve_seconds":60,"invocation_deadline_seconds":2520,"phase8_retry_deadline_seconds":180,"source_clip_pre_seconds":10,"source_clip_post_seconds":30,"maximum_found_interval_seconds":1,"maximum_source_clip_seconds":41,"maximum_source_clip_bytes":536870912,"maximum_source_frame_rate":[60,1]}},{"family":"classifier-policy","domain":"vigi.recording-search.request-relative.classifier-policy.v1","expected_id":"rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f","payload":{"classifier_family":"efficient-sam-ti-roi-ncc","implementation_version":1,"implementation_source_commit":"d525f622e6f640acf5a0fc37c7ca1f243da5bde0","checkpoint_logical_name":"efficient_sam_vitt.pt","checkpoint_sha256":"dff858b19600a46461cbb7de98f796b23a7a888d9f5e34c0b033f7d6eb9e4e6a","runtime":{"python":"3.11","torch":"2.10.0+cpu","torchvision":"0.25.0+cpu","pillow":"12.3.0","numpy":"2.4.6","device":"cpu","tensor_dtype":"float32","comparison_dtype":"float64"},"input":{"color_space":"RGB","channel_order":"RGB","normalization":"torchvision.to_tensor uint8/255","resize":"none before upstream model preprocessing","interpolation":"upstream commit-owned","positive_point_shape":[1,1,1,2],"point_label_shape":[1,1,1],"positive_point_label":1,"prompt":"confirmed_roi_center_v1"},"mask":{"logit_threshold":"0.000000","candidate_selection":"highest predicted_iou among valid candidates","must_contain_prompt":true,"minimum_width":4,"minimum_height":4,"minimum_pixel_count":64,"maximum_source_coverage":"0.950000","alignment":"source_pixel_grid"},"comparison":{"roi_preprocessing":"phase7b-roi-luma-v1","luma_coefficients":[299,587,114],"luma_divisor":1000,"luma_rounding":"add_500_then_floor","ncc_area":"mask_intersection","minimum_overlap_fraction":"0.100000","minimum_effective_area_pixels":64,"metric_rounding":"half_even","decimal_places":6},"decision":{"present_min_iou":"0.500000","present_min_ncc":"0.600000","absent_max_iou":"0.100000","absent_max_ncc":"0.200000","otherwise":"INDETERMINATE"},"execution":{"timeout_seconds":10,"maximum_attempts":1,"maximum_concurrent_attempts":1,"late_result":"revoked","timeout_result":"OPERATIONAL","unknown_result":"OPERATIONAL_INVALID","retry":"new_run_only"}}},{"family":"media-generation-policy","domain":"vigi.recording-search.request-relative.media-generation-policy.v1","expected_id":"rr-media-policy-v1-8d7800b18530b39d9f317015504a1cdfb5d8770c0427221fc0a00093070dd3d1","payload":{"container":"mp4","stream_copy":{"eligible":true,"requires_single_video":true,"requires_no_audio":true,"requires_same_codec_parameters":true,"requires_interval_bounds":true,"requires_metadata_allowlist":true},"reencode":{"codec":"h264","encoder":"libx264","profile":"High","level":"4.1","pixel_format":"yuv420p","preset":"medium","crf":23,"frame_rate_source":"selected_stream_avg_frame_rate","vfr_mode":"passthrough","faststart":true},"audio":"drop","chapters":"drop","copied_metadata":"drop","interval_tolerance":"one_source_frame","maximum_frame_rate":[60,1],"maximum_duration_seconds":41,"maximum_size_bytes":536870912,"timeout_seconds":120}},{"family":"coarse-plan","domain":"vigi.recording-search.request-relative.coarse-plan.v1","expected_id":"rr-coarse-plan-v1-a9bbe2254aa266ea09da306071f10773090ecdc83b61a9b0c2001e72a106dd09","payload":{"investigation_id":"inv-01","run_id":"run-01","channel_id":1,"policy_id":"rr-policy-v1-3e976cea4523523b81762351983a19d50a3febe036413b165831f74edaa6904d","start_requested_time_utc":"2026-07-20T03:00:00Z","end_requested_time_utc":"2026-07-20T03:00:04Z","target_requested_times_utc":["2026-07-20T03:00:00Z","2026-07-20T03:00:04Z"]}},{"family":"replay-operation","domain":"vigi.recording-search.request-relative.replay-operation.v1","expected_id":"rr-replay-operation-v1-8c40a71433666f2effb732bdd27bea6bb2eeac41f608172476a5168f2cc00e8b","payload":{"investigation_id":"inv-01","run_id":"run-01","policy_id":"rr-policy-v1-3e976cea4523523b81762351983a19d50a3febe036413b165831f74edaa6904d","plan_id":"rr-coarse-plan-v1-a9bbe2254aa266ea09da306071f10773090ecdc83b61a9b0c2001e72a106dd09","channel_id":1,"segment_id":"sdk-segment-01","replay_start_requested_time_utc":"2026-07-20T03:00:00Z","replay_end_requested_time_utc":"2026-07-20T03:00:04Z"}},{"family":"target-request","domain":"vigi.recording-search.request-relative.target-request.v1","expected_id":"rr-target-request-v1-6b76711f8587fc97bca79639fd78046008af774d32d7b5f2b14430970a413dfe","payload":{"investigation_id":"inv-01","run_id":"run-01","plan_id":"rr-coarse-plan-v1-a9bbe2254aa266ea09da306071f10773090ecdc83b61a9b0c2001e72a106dd09","sequence":1,"kind":"COARSE","requested_time_utc":"2026-07-20T03:00:04Z","selection_rule":"FINAL_STRICTLY_BEFORE_END"}},{"family":"schema5-manifest","domain":"vigi.recording-search.request-relative.schema5-manifest.v1","expected_id":"rr-schema5-manifest-v1-04ceedc152180f4b6b7f0428a4a6387ad1d4830cf0b696fed77f6d67b8229910","payload":{"schema_version":5,"investigation_id":"inv-01","run_id":"run-01","policy_id":"rr-policy-v1-3e976cea4523523b81762351983a19d50a3febe036413b165831f74edaa6904d","plan_id":"rr-coarse-plan-v1-a9bbe2254aa266ea09da306071f10773090ecdc83b61a9b0c2001e72a106dd09","coarse_target_request_ids":["rr-target-request-v1-8e9f9b5b872febf339b5d00573d8170ee7ae61373ce20bd78f6ebf64c13e0fd3","rr-target-request-v1-6b76711f8587fc97bca79639fd78046008af774d32d7b5f2b14430970a413dfe"]}},{"family":"common-session","domain":"vigi.recording-search.request-relative.common-session.v1","expected_id":"rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68","payload":{"investigation_id":"inv-01","run_id":"run-01","replay_operation_id":"rr-replay-operation-v1-8c40a71433666f2effb732bdd27bea6bb2eeac41f608172476a5168f2cc00e8b","policy_id":"rr-policy-v1-3e976cea4523523b81762351983a19d50a3febe036413b165831f74edaa6904d","segment_id":"sdk-segment-01","replay_start_requested_time_utc":"2026-07-20T03:00:00Z","replay_end_requested_time_utc":"2026-07-20T03:00:04Z","selected_video_stream_index":0,"container_start_pts":0,"time_base_num":1,"time_base_den":16384,"duration_ticks":65536,"mp4_size_bytes":2430,"mp4_sha256":"9e23896ae9d7d66b3473be0da74cf92f51752af0d1a7873f5921a7a4f712ceb3","provenance_level":"REQUEST_RELATIVE_ESTIMATE","physical_time_bias":"UNKNOWN_UNBOUNDED"}},{"family":"decoder-operation","domain":"vigi.recording-search.request-relative.decoder-operation.v1","expected_id":"rr-decoder-operation-v1-919e827fce156d94333c644ac2679be08d157068564d6fde14ace0edc1b83d39","payload":{"investigation_id":"inv-01","run_id":"run-01","common_session_id":"rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68","pass_number":1,"target_request_ids":["rr-target-request-v1-8e9f9b5b872febf339b5d00573d8170ee7ae61373ce20bd78f6ebf64c13e0fd3","rr-target-request-v1-6b76711f8587fc97bca79639fd78046008af774d32d7b5f2b14430970a413dfe","rr-target-request-v1-176d155fccb02e3060da3972110e261ac443bfff6a27e6a8b8042e0d9567a7d1","rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc","rr-target-request-v1-ed0439c15cdb502a8ad06a401aeb68811c340bc2bf408025760bb6eba0cca1d1"]}},{"family":"frame","domain":"vigi.recording-search.request-relative.frame.v1","expected_id":"rr-frame-v1-c6b7854820cf398de16b7b232853e47c9d1eba968541fd4f74e70f1f44695b14","payload":{"investigation_id":"inv-01","run_id":"run-01","common_session_id":"rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68","decoder_operation_id":"rr-decoder-operation-v1-919e827fce156d94333c644ac2679be08d157068564d6fde14ace0edc1b83d39","selected_video_stream_index":0,"target_request_id":"rr-target-request-v1-6b76711f8587fc97bca79639fd78046008af774d32d7b5f2b14430970a413dfe","raw_pts":49152,"container_start_pts":0,"time_base_num":1,"time_base_den":16384,"estimated_requested_time_utc":"2026-07-20T03:00:03Z","ordinal":3,"width":32,"height":32,"jpeg_size_bytes":657,"jpeg_sha256":"632b544f4ff8b66549bb1922d91c7c5b9000aeeddd4ecf61ebc2f630b49ee008","rgb24_sha256":"4f6bf378a3934fe2ea630778bb0fbfc537586986588215ca0adb0855b8b2e3ae"}},{"family":"classification-operation","domain":"vigi.recording-search.request-relative.classification-operation.v1","expected_id":"rr-classification-operation-v1-356c1566974a38a08df5964ff0c91482ea86afb0cadbda88dfab352c8a145e7c","payload":{"investigation_id":"inv-01","run_id":"run-01","frame_id":"rr-frame-v1-c6b7854820cf398de16b7b232853e47c9d1eba968541fd4f74e70f1f44695b14","target_request_id":"rr-target-request-v1-6b76711f8587fc97bca79639fd78046008af774d32d7b5f2b14430970a413dfe","baseline_identity":"baseline-v3-01","classifier_policy_id":"rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f","attempt":1,"result_kind":"VISUAL","outcome":"ABSENT","reason_code":null,"classifier_evidence":{"baseline_mask_pixel_count":640,"probe_mask_pixel_count":64,"roi_pixel_count":1024,"mask_intersection_pixel_count":64,"mask_union_pixel_count":640,"baseline_mask_coverage":"0.625000","probe_mask_coverage":"0.062500","mask_iou":"0.100000","effective_comparison_area":64,"roi_luma_ncc":"0.200000","visual_status":"comparable","unusable_reason":null},"operational_reason":null}},{"family":"observation","domain":"vigi.recording-search.request-relative.observation.v1","expected_id":"rr-observation-v1-053d07b83c9f93de17abecd1fc3a8d395a98d13c95cf667abd57b50bc6999a5e","payload":{"investigation_id":"inv-01","run_id":"run-01","common_session_id":"rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68","classification_operation_id":"rr-classification-operation-v1-356c1566974a38a08df5964ff0c91482ea86afb0cadbda88dfab352c8a145e7c","frame_id":"rr-frame-v1-c6b7854820cf398de16b7b232853e47c9d1eba968541fd4f74e70f1f44695b14","target_request_id":"rr-target-request-v1-6b76711f8587fc97bca79639fd78046008af774d32d7b5f2b14430970a413dfe","classifier_policy_id":"rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f","outcome":"ABSENT","reason_code":null,"classifier_evidence":{"baseline_mask_pixel_count":640,"probe_mask_pixel_count":64,"roi_pixel_count":1024,"mask_intersection_pixel_count":64,"mask_union_pixel_count":640,"baseline_mask_coverage":"0.625000","probe_mask_coverage":"0.062500","mask_iou":"0.100000","effective_comparison_area":64,"roi_luma_ncc":"0.200000","visual_status":"comparable","unusable_reason":null}}},{"family":"alias","domain":"vigi.recording-search.request-relative.alias.v1","expected_id":"rr-alias-v1-5876a25663f95914a59500dd415dd92dd99265182c5add46ddeb55770c72df9f","payload":{"investigation_id":"inv-01","run_id":"run-01","target_request_id":"rr-target-request-v1-ed0439c15cdb502a8ad06a401aeb68811c340bc2bf408025760bb6eba0cca1d1","frame_id":"rr-frame-v1-c6b7854820cf398de16b7b232853e47c9d1eba968541fd4f74e70f1f44695b14","alias_of_target_request_id":"rr-target-request-v1-6b76711f8587fc97bca79639fd78046008af774d32d7b5f2b14430970a413dfe"}},{"family":"support-group","domain":"vigi.recording-search.request-relative.support-group.v1","expected_id":"rr-support-group-v1-b74a00269ee2558d6e4e4186c689c3cd803b217a1d13eb20091290dde321acac","payload":{"investigation_id":"inv-01","run_id":"run-01","origin_target_request_id":"rr-target-request-v1-6b76711f8587fc97bca79639fd78046008af774d32d7b5f2b14430970a413dfe","member_target_request_ids":["rr-target-request-v1-176d155fccb02e3060da3972110e261ac443bfff6a27e6a8b8042e0d9567a7d1","rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc","rr-target-request-v1-ed0439c15cdb502a8ad06a401aeb68811c340bc2bf408025760bb6eba0cca1d1"],"member_frame_ids":["rr-frame-v1-3ca8359ce8fe1c1ea13bf54cd7c8a065ce75afa7e57d5947e503c4715a35ad64","rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec","rr-frame-v1-c6b7854820cf398de16b7b232853e47c9d1eba968541fd4f74e70f1f44695b14"],"member_observation_ids":["rr-observation-v1-b06a5fee72bee5dda98a6cc9c057368bbe5ce8d4340d9f482745c5b634ade662","rr-observation-v1-1aad91a3b66d9836fbcd9f2ab420c67a5788d3e465407987f724680b9d9370f8","rr-observation-v1-053d07b83c9f93de17abecd1fc3a8d395a98d13c95cf667abd57b50bc6999a5e"],"outcome":"SUPPORTED_ABSENT"}},{"family":"c2-bracket","domain":"vigi.recording-search.request-relative.c2-bracket.v1","expected_id":"rr-c2-bracket-v1-605a4ff202992cdc1e127275cec6ea0d9e2c58da3f20ca9300e4fff0f2d9aaf6","payload":{"investigation_id":"inv-01","run_id":"run-01","lower_observation_id":"rr-observation-v1-7fa534ffd846f3e7f1c734dc9c8fcc2581952ea6908609ec9f79c1c486c6d0c6","upper_observation_id":"rr-observation-v1-053d07b83c9f93de17abecd1fc3a8d395a98d13c95cf667abd57b50bc6999a5e","upper_support_group_id":"rr-support-group-v1-b74a00269ee2558d6e4e4186c689c3cd803b217a1d13eb20091290dde321acac","status":"BRACKET_READY"}},{"family":"d1-input","domain":"vigi.recording-search.request-relative.d1-input.v1","expected_id":"rr-d1-input-v1-d919be8509c59e149a2d3a1fc958a3243b30f990e33c52bfa8f8c4b76cd74eb0","payload":{"investigation_id":"inv-01","run_id":"run-01","c2_bracket_id":"rr-c2-bracket-v1-605a4ff202992cdc1e127275cec6ea0d9e2c58da3f20ca9300e4fff0f2d9aaf6","policy_id":"rr-policy-v1-3e976cea4523523b81762351983a19d50a3febe036413b165831f74edaa6904d"}},{"family":"d1-history","domain":"vigi.recording-search.request-relative.d1-history.v1","expected_id":"rr-d1-history-v1-77894151e44323495532b19f1f4b34acdebda89cfa3ff1e17f4988c2b09cf620","payload":{"investigation_id":"inv-01","run_id":"run-01","d1_input_id":"rr-d1-input-v1-d919be8509c59e149a2d3a1fc958a3243b30f990e33c52bfa8f8c4b76cd74eb0","steps":[]}},{"family":"narrowed-bracket","domain":"vigi.recording-search.request-relative.narrowed-bracket.v1","expected_id":"rr-narrowed-bracket-v1-312bf3e18a344c4efb032d39069aad4023e3edaf9040435e3e06005634d7034f","payload":{"investigation_id":"inv-01","run_id":"run-01","d1_input_id":"rr-d1-input-v1-d919be8509c59e149a2d3a1fc958a3243b30f990e33c52bfa8f8c4b76cd74eb0","d1_history_id":"rr-d1-history-v1-77894151e44323495532b19f1f4b34acdebda89cfa3ff1e17f4988c2b09cf620","lower_observation_id":"rr-observation-v1-7fa534ffd846f3e7f1c734dc9c8fcc2581952ea6908609ec9f79c1c486c6d0c6","upper_observation_id":"rr-observation-v1-053d07b83c9f93de17abecd1fc3a8d395a98d13c95cf667abd57b50bc6999a5e","upper_support_group_id":"rr-support-group-v1-b74a00269ee2558d6e4e4186c689c3cd803b217a1d13eb20091290dde321acac","interval_start_requested_time_utc":"2026-07-20T03:00:00Z","interval_end_requested_time_utc":"2026-07-20T03:00:01Z","stop_reason":"TARGET_PRECISION_REACHED"}},{"family":"schema6-manifest","domain":"vigi.recording-search.request-relative.schema6-manifest.v1","expected_id":"rr-schema6-manifest-v1-0a3453da2830b5554eefb20cc3bfd5d7a01b847a0729ff48a692d2b2c4551287","payload":{"schema_version":6,"investigation_id":"inv-01","run_id":"run-01","schema5_predecessor_manifest_id":"rr-schema5-manifest-v1-04ceedc152180f4b6b7f0428a4a6387ad1d4830cf0b696fed77f6d67b8229910","policy_id":"rr-policy-v1-3e976cea4523523b81762351983a19d50a3febe036413b165831f74edaa6904d","classifier_policy_id":"rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f","plan_id":"rr-coarse-plan-v1-a9bbe2254aa266ea09da306071f10773090ecdc83b61a9b0c2001e72a106dd09","replay_operation_id":"rr-replay-operation-v1-8c40a71433666f2effb732bdd27bea6bb2eeac41f608172476a5168f2cc00e8b","common_session_id":"rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68","indexes":{"target_request_ids":["rr-target-request-v1-8e9f9b5b872febf339b5d00573d8170ee7ae61373ce20bd78f6ebf64c13e0fd3","rr-target-request-v1-6b76711f8587fc97bca79639fd78046008af774d32d7b5f2b14430970a413dfe","rr-target-request-v1-176d155fccb02e3060da3972110e261ac443bfff6a27e6a8b8042e0d9567a7d1","rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc","rr-target-request-v1-ed0439c15cdb502a8ad06a401aeb68811c340bc2bf408025760bb6eba0cca1d1"],"decoder_operation_ids":["rr-decoder-operation-v1-919e827fce156d94333c644ac2679be08d157068564d6fde14ace0edc1b83d39"],"frame_ids":["rr-frame-v1-d1836b2be02712fb6816039805138ff75340dc39605c4fd7179f262d2b3bf807","rr-frame-v1-3ca8359ce8fe1c1ea13bf54cd7c8a065ce75afa7e57d5947e503c4715a35ad64","rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec","rr-frame-v1-c6b7854820cf398de16b7b232853e47c9d1eba968541fd4f74e70f1f44695b14"],"classification_operation_ids":["rr-classification-operation-v1-bedc084276cc78d9fc658b8d465e61d8f71e0acefecdb7a4cc92489dfbf15b13","rr-classification-operation-v1-dc6cfd9a2991f6e58c0f6f740aaded6f7973653face2aca8342de121d31d9ca1","rr-classification-operation-v1-11b9829607a2cc9afbe7ac44fa961232a225ff8f1a7ee78d882a1b5476a80f60","rr-classification-operation-v1-356c1566974a38a08df5964ff0c91482ea86afb0cadbda88dfab352c8a145e7c"],"observation_ids":["rr-observation-v1-7fa534ffd846f3e7f1c734dc9c8fcc2581952ea6908609ec9f79c1c486c6d0c6","rr-observation-v1-b06a5fee72bee5dda98a6cc9c057368bbe5ce8d4340d9f482745c5b634ade662","rr-observation-v1-1aad91a3b66d9836fbcd9f2ab420c67a5788d3e465407987f724680b9d9370f8","rr-observation-v1-053d07b83c9f93de17abecd1fc3a8d395a98d13c95cf667abd57b50bc6999a5e"],"alias_ids":["rr-alias-v1-5876a25663f95914a59500dd415dd92dd99265182c5add46ddeb55770c72df9f"],"support_group_ids":["rr-support-group-v1-b74a00269ee2558d6e4e4186c689c3cd803b217a1d13eb20091290dde321acac"],"c2_bracket_ids":["rr-c2-bracket-v1-605a4ff202992cdc1e127275cec6ea0d9e2c58da3f20ca9300e4fff0f2d9aaf6"],"d1_input_ids":["rr-d1-input-v1-d919be8509c59e149a2d3a1fc958a3243b30f990e33c52bfa8f8c4b76cd74eb0"],"d1_history_ids":["rr-d1-history-v1-77894151e44323495532b19f1f4b34acdebda89cfa3ff1e17f4988c2b09cf620"],"narrowed_bracket_ids":["rr-narrowed-bracket-v1-312bf3e18a344c4efb032d39069aad4023e3edaf9040435e3e06005634d7034f"]}}},{"family":"source-record-set","domain":"vigi.recording-search.request-relative.source-record-set.v1","expected_id":"rr-source-record-set-v1-b9016e9d717959f1a44ef9ab793f8ab33f36b54f7767e503e2bb4becb63eaba9","payload":{"schema_version":1,"investigation_id":"inv-01","run_id":"run-01","schema6_manifest_id":"rr-schema6-manifest-v1-0a3453da2830b5554eefb20cc3bfd5d7a01b847a0729ff48a692d2b2c4551287","record_groups":[{"type":"policy","ids":["rr-policy-v1-3e976cea4523523b81762351983a19d50a3febe036413b165831f74edaa6904d"]},{"type":"classifier_policy","ids":["rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f"]},{"type":"schema5_manifest","ids":["rr-schema5-manifest-v1-04ceedc152180f4b6b7f0428a4a6387ad1d4830cf0b696fed77f6d67b8229910"]},{"type":"coarse_plan","ids":["rr-coarse-plan-v1-a9bbe2254aa266ea09da306071f10773090ecdc83b61a9b0c2001e72a106dd09"]},{"type":"replay_operation","ids":["rr-replay-operation-v1-8c40a71433666f2effb732bdd27bea6bb2eeac41f608172476a5168f2cc00e8b"]},{"type":"common_session","ids":["rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68"]},{"type":"target_requests","ids":["rr-target-request-v1-8e9f9b5b872febf339b5d00573d8170ee7ae61373ce20bd78f6ebf64c13e0fd3","rr-target-request-v1-6b76711f8587fc97bca79639fd78046008af774d32d7b5f2b14430970a413dfe","rr-target-request-v1-176d155fccb02e3060da3972110e261ac443bfff6a27e6a8b8042e0d9567a7d1","rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc","rr-target-request-v1-ed0439c15cdb502a8ad06a401aeb68811c340bc2bf408025760bb6eba0cca1d1"]},{"type":"decoder_operations","ids":["rr-decoder-operation-v1-919e827fce156d94333c644ac2679be08d157068564d6fde14ace0edc1b83d39"]},{"type":"frames","ids":["rr-frame-v1-d1836b2be02712fb6816039805138ff75340dc39605c4fd7179f262d2b3bf807","rr-frame-v1-3ca8359ce8fe1c1ea13bf54cd7c8a065ce75afa7e57d5947e503c4715a35ad64","rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec","rr-frame-v1-c6b7854820cf398de16b7b232853e47c9d1eba968541fd4f74e70f1f44695b14"]},{"type":"classification_operations","ids":["rr-classification-operation-v1-bedc084276cc78d9fc658b8d465e61d8f71e0acefecdb7a4cc92489dfbf15b13","rr-classification-operation-v1-dc6cfd9a2991f6e58c0f6f740aaded6f7973653face2aca8342de121d31d9ca1","rr-classification-operation-v1-11b9829607a2cc9afbe7ac44fa961232a225ff8f1a7ee78d882a1b5476a80f60","rr-classification-operation-v1-356c1566974a38a08df5964ff0c91482ea86afb0cadbda88dfab352c8a145e7c"]},{"type":"observations","ids":["rr-observation-v1-7fa534ffd846f3e7f1c734dc9c8fcc2581952ea6908609ec9f79c1c486c6d0c6","rr-observation-v1-b06a5fee72bee5dda98a6cc9c057368bbe5ce8d4340d9f482745c5b634ade662","rr-observation-v1-1aad91a3b66d9836fbcd9f2ab420c67a5788d3e465407987f724680b9d9370f8","rr-observation-v1-053d07b83c9f93de17abecd1fc3a8d395a98d13c95cf667abd57b50bc6999a5e"]},{"type":"aliases","ids":["rr-alias-v1-5876a25663f95914a59500dd415dd92dd99265182c5add46ddeb55770c72df9f"]},{"type":"support_groups","ids":["rr-support-group-v1-b74a00269ee2558d6e4e4186c689c3cd803b217a1d13eb20091290dde321acac"]},{"type":"c2_brackets","ids":["rr-c2-bracket-v1-605a4ff202992cdc1e127275cec6ea0d9e2c58da3f20ca9300e4fff0f2d9aaf6"]},{"type":"d1_inputs","ids":["rr-d1-input-v1-d919be8509c59e149a2d3a1fc958a3243b30f990e33c52bfa8f8c4b76cd74eb0"]},{"type":"d1_histories","ids":["rr-d1-history-v1-77894151e44323495532b19f1f4b34acdebda89cfa3ff1e17f4988c2b09cf620"]},{"type":"narrowed_brackets","ids":["rr-narrowed-bracket-v1-312bf3e18a344c4efb032d39069aad4023e3edaf9040435e3e06005634d7034f"]}],"record_count":30}},{"family":"evidence-snapshot","domain":"vigi.recording-search.request-relative.evidence-snapshot.v1","expected_id":"rr-evidence-snapshot-v1-052a373fd741cb4fb6ae4b2709601e472cf792d1838f26a9bbbfafcd3b512a84","payload":{"schema_version":1,"investigation_id":"inv-01","run_id":"run-01","source_record_set_id":"rr-source-record-set-v1-b9016e9d717959f1a44ef9ab793f8ab33f36b54f7767e503e2bb4becb63eaba9","policy_id":"rr-policy-v1-3e976cea4523523b81762351983a19d50a3febe036413b165831f74edaa6904d","classifier_policy_id":"rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f","selected_observation_ids":["rr-observation-v1-7fa534ffd846f3e7f1c734dc9c8fcc2581952ea6908609ec9f79c1c486c6d0c6","rr-observation-v1-053d07b83c9f93de17abecd1fc3a8d395a98d13c95cf667abd57b50bc6999a5e"],"selected_support_group_ids":["rr-support-group-v1-b74a00269ee2558d6e4e4186c689c3cd803b217a1d13eb20091290dde321acac"],"narrowed_bracket_id":"rr-narrowed-bracket-v1-312bf3e18a344c4efb032d39069aad4023e3edaf9040435e3e06005634d7034f"}},{"family":"terminal-result","domain":"vigi.recording-search.request-relative.terminal-result.v1","expected_id":"rr-terminal-result-v1-6f85c982dbdf7719c9d1ffab160a3cfb2f4483652eced675138ae76bc027d1ce","payload":{"schema_version":1,"investigation_id":"inv-01","run_id":"run-01","source_record_set_id":"rr-source-record-set-v1-b9016e9d717959f1a44ef9ab793f8ab33f36b54f7767e503e2bb4becb63eaba9","evidence_snapshot_id":"rr-evidence-snapshot-v1-052a373fd741cb4fb6ae4b2709601e472cf792d1838f26a9bbbfafcd3b512a84","common_session_id":"rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68","result_kind":"FOUND","reason_code":"SUPPORTED_TRANSITION","interval_start_requested_time_utc":"2026-07-20T03:00:00Z","interval_end_requested_time_utc":"2026-07-20T03:00:01Z"}},{"family":"schema7-manifest","domain":"vigi.recording-search.request-relative.schema7-manifest.v1","expected_id":"rr-schema7-manifest-v1-49892b3edc13d70133ae1c3470fa6497f1f92841b0f6410cd37a25ffd857e75b","payload":{"schema_version":7,"investigation_id":"inv-01","run_id":"run-01","schema6_predecessor_manifest_id":"rr-schema6-manifest-v1-0a3453da2830b5554eefb20cc3bfd5d7a01b847a0729ff48a692d2b2c4551287","source_record_set_id":"rr-source-record-set-v1-b9016e9d717959f1a44ef9ab793f8ab33f36b54f7767e503e2bb4becb63eaba9","evidence_snapshot_id":"rr-evidence-snapshot-v1-052a373fd741cb4fb6ae4b2709601e472cf792d1838f26a9bbbfafcd3b512a84","terminal_result_id":"rr-terminal-result-v1-6f85c982dbdf7719c9d1ffab160a3cfb2f4483652eced675138ae76bc027d1ce"}},{"family":"source-clip","domain":"vigi.recording-search.request-relative.source-clip.v1","expected_id":"rr-source-clip-v1-ef4ea7d1847388b58bfc8de6cdef5f399dc57376ece2331d9ce07e3f3a685e4c","payload":{"schema_version":1,"investigation_id":"inv-01","run_id":"run-01","terminal_result_id":"rr-terminal-result-v1-6f85c982dbdf7719c9d1ffab160a3cfb2f4483652eced675138ae76bc027d1ce","common_session_id":"rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68","media_generation_policy_id":"rr-media-policy-v1-8d7800b18530b39d9f317015504a1cdfb5d8770c0427221fc0a00093070dd3d1","requested_interval_start_requested_time_utc":"2026-07-20T02:59:50Z","requested_interval_end_requested_time_utc":"2026-07-20T03:00:31Z","clipped_interval_start_requested_time_utc":"2026-07-20T03:00:00Z","clipped_interval_end_requested_time_utc":"2026-07-20T03:00:04Z","input_stream_index":0}},{"family":"phase8-request","domain":"vigi.recording-search.request-relative.phase8-request.v1","expected_id":"rr-phase8-request-v1-3bad179cba98c61ff52d903eb90793ae32198cc4722eefca2bd0f1f861611cff","payload":{"schema_version":1,"investigation_id":"inv-01","run_id":"run-01","terminal_result_id":"rr-terminal-result-v1-6f85c982dbdf7719c9d1ffab160a3cfb2f4483652eced675138ae76bc027d1ce","source_clip_id":"rr-source-clip-v1-ef4ea7d1847388b58bfc8de6cdef5f399dc57376ece2331d9ce07e3f3a685e4c","clip_integrity":{"sha256":"9e23896ae9d7d66b3473be0da74cf92f51752af0d1a7873f5921a7a4f712ceb3","size_bytes":2430,"observed_duration_ticks":65536,"observed_time_base_num":1,"observed_time_base_den":16384,"video_stream_index":0,"codec":"h264","profile":"High","level":41,"pixel_format":"yuv420p","width":32,"height":32,"average_frame_rate_num":1,"average_frame_rate_den":1,"audio_stream_count":0,"generation_outcome":"REENCODED"},"selected_observation_ids":["rr-observation-v1-7fa534ffd846f3e7f1c734dc9c8fcc2581952ea6908609ec9f79c1c486c6d0c6","rr-observation-v1-053d07b83c9f93de17abecd1fc3a8d395a98d13c95cf667abd57b50bc6999a5e"],"selected_support_group_ids":["rr-support-group-v1-b74a00269ee2558d6e4e4186c689c3cd803b217a1d13eb20091290dde321acac"]}},{"family":"phase8-manifest","domain":"vigi.recording-search.request-relative.phase8-manifest.v1","expected_id":"rr-phase8-manifest-v1-b32b69e00067d47b24f64b6911e74f5eb6dfed4c60de71099109ad3759f3c0ba","payload":{"schema_version":1,"state":"READY","investigation_id":"inv-01","run_id":"run-01","terminal_result_id":"rr-terminal-result-v1-6f85c982dbdf7719c9d1ffab160a3cfb2f4483652eced675138ae76bc027d1ce","common_session_id":"rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68","previous_phase8_manifest_id":"rr-phase8-manifest-v1-a1d15af225768d5efe270c4f19969fa85ea36550a39399920a43baa4e71770ff","source_clip_id":"rr-source-clip-v1-ef4ea7d1847388b58bfc8de6cdef5f399dc57376ece2331d9ce07e3f3a685e4c","clip_integrity":{"sha256":"9e23896ae9d7d66b3473be0da74cf92f51752af0d1a7873f5921a7a4f712ceb3","size_bytes":2430,"observed_duration_ticks":65536,"observed_time_base_num":1,"observed_time_base_den":16384,"video_stream_index":0,"codec":"h264","profile":"High","level":41,"pixel_format":"yuv420p","width":32,"height":32,"average_frame_rate_num":1,"average_frame_rate_den":1,"audio_stream_count":0,"generation_outcome":"REENCODED"},"phase8_request_id":"rr-phase8-request-v1-3bad179cba98c61ff52d903eb90793ae32198cc4722eefca2bd0f1f861611cff"}}]
+```
+
+These 23 base conformance vectors cover the remaining source-tree members, the
+comparable classifier result shapes, and every Phase 8 state. Together with the
+26 one-per-family entries above, the binary strict-reopen fixture contains 49
+identity instances. The five additional `unusable` operation/observation pairs
+in the isolated block below bring the normative inventory to 59; they are not
+members of the binary fixture and do not change its downstream fixture IDs.
+
+```json
+[{"family":"target-request","domain":"vigi.recording-search.request-relative.target-request.v1","expected_id":"rr-target-request-v1-8e9f9b5b872febf339b5d00573d8170ee7ae61373ce20bd78f6ebf64c13e0fd3","payload":{"investigation_id":"inv-01","run_id":"run-01","plan_id":"rr-coarse-plan-v1-a9bbe2254aa266ea09da306071f10773090ecdc83b61a9b0c2001e72a106dd09","sequence":0,"kind":"COARSE","requested_time_utc":"2026-07-20T03:00:00Z","selection_rule":"NEAREST_IN_HALF_OPEN_SESSION"}},{"family":"target-request","domain":"vigi.recording-search.request-relative.target-request.v1","expected_id":"rr-target-request-v1-176d155fccb02e3060da3972110e261ac443bfff6a27e6a8b8042e0d9567a7d1","payload":{"investigation_id":"inv-01","run_id":"run-01","plan_id":"rr-coarse-plan-v1-a9bbe2254aa266ea09da306071f10773090ecdc83b61a9b0c2001e72a106dd09","sequence":2,"kind":"SUPPORT","requested_time_utc":"2026-07-20T03:00:01Z","selection_rule":"NEAREST_IN_HALF_OPEN_SESSION","origin_target_request_id":"rr-target-request-v1-6b76711f8587fc97bca79639fd78046008af774d32d7b5f2b14430970a413dfe"}},{"family":"target-request","domain":"vigi.recording-search.request-relative.target-request.v1","expected_id":"rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc","payload":{"investigation_id":"inv-01","run_id":"run-01","plan_id":"rr-coarse-plan-v1-a9bbe2254aa266ea09da306071f10773090ecdc83b61a9b0c2001e72a106dd09","sequence":3,"kind":"SUPPORT","requested_time_utc":"2026-07-20T03:00:02Z","selection_rule":"NEAREST_IN_HALF_OPEN_SESSION","origin_target_request_id":"rr-target-request-v1-6b76711f8587fc97bca79639fd78046008af774d32d7b5f2b14430970a413dfe"}},{"family":"target-request","domain":"vigi.recording-search.request-relative.target-request.v1","expected_id":"rr-target-request-v1-ed0439c15cdb502a8ad06a401aeb68811c340bc2bf408025760bb6eba0cca1d1","payload":{"investigation_id":"inv-01","run_id":"run-01","plan_id":"rr-coarse-plan-v1-a9bbe2254aa266ea09da306071f10773090ecdc83b61a9b0c2001e72a106dd09","sequence":4,"kind":"SUPPORT","requested_time_utc":"2026-07-20T03:00:03Z","selection_rule":"NEAREST_IN_HALF_OPEN_SESSION","origin_target_request_id":"rr-target-request-v1-6b76711f8587fc97bca79639fd78046008af774d32d7b5f2b14430970a413dfe"}},{"family":"frame","domain":"vigi.recording-search.request-relative.frame.v1","expected_id":"rr-frame-v1-d1836b2be02712fb6816039805138ff75340dc39605c4fd7179f262d2b3bf807","payload":{"investigation_id":"inv-01","run_id":"run-01","common_session_id":"rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68","decoder_operation_id":"rr-decoder-operation-v1-919e827fce156d94333c644ac2679be08d157068564d6fde14ace0edc1b83d39","selected_video_stream_index":0,"target_request_id":"rr-target-request-v1-8e9f9b5b872febf339b5d00573d8170ee7ae61373ce20bd78f6ebf64c13e0fd3","raw_pts":0,"container_start_pts":0,"time_base_num":1,"time_base_den":16384,"estimated_requested_time_utc":"2026-07-20T03:00:00Z","ordinal":0,"width":32,"height":32,"jpeg_size_bytes":657,"jpeg_sha256":"c5330de6f4fd14cf995a8583581a65df3d8c1f739caf3ec6c1312b6e27fd053c","rgb24_sha256":"22218ffebb43cce5be7c991d4d2976a8645b45c67d6579383ae1704c4b6a56e7"}},{"family":"frame","domain":"vigi.recording-search.request-relative.frame.v1","expected_id":"rr-frame-v1-3ca8359ce8fe1c1ea13bf54cd7c8a065ce75afa7e57d5947e503c4715a35ad64","payload":{"investigation_id":"inv-01","run_id":"run-01","common_session_id":"rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68","decoder_operation_id":"rr-decoder-operation-v1-919e827fce156d94333c644ac2679be08d157068564d6fde14ace0edc1b83d39","selected_video_stream_index":0,"target_request_id":"rr-target-request-v1-176d155fccb02e3060da3972110e261ac443bfff6a27e6a8b8042e0d9567a7d1","raw_pts":16384,"container_start_pts":0,"time_base_num":1,"time_base_den":16384,"estimated_requested_time_utc":"2026-07-20T03:00:01Z","ordinal":1,"width":32,"height":32,"jpeg_size_bytes":657,"jpeg_sha256":"581b3bd0d4c41c510c994a5f2f9985b3b4d0f2129543b1d921e04f9a62b43c5d","rgb24_sha256":"2b8ac5dd3528ec15ed329b9dbd4e57d3813cfe4917752e2da3552a85bce1643c"}},{"family":"frame","domain":"vigi.recording-search.request-relative.frame.v1","expected_id":"rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec","payload":{"investigation_id":"inv-01","run_id":"run-01","common_session_id":"rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68","decoder_operation_id":"rr-decoder-operation-v1-919e827fce156d94333c644ac2679be08d157068564d6fde14ace0edc1b83d39","selected_video_stream_index":0,"target_request_id":"rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc","raw_pts":32768,"container_start_pts":0,"time_base_num":1,"time_base_den":16384,"estimated_requested_time_utc":"2026-07-20T03:00:02Z","ordinal":2,"width":32,"height":32,"jpeg_size_bytes":656,"jpeg_sha256":"86ee3bbcaa921459400c534a07284f7f8ab12d03a25c09d055c60694ebd4ecd2","rgb24_sha256":"ddd2e59b0774d836f4664fc570100e26919f96b634f9bc0dff4dcdc90c4b85d9"}},{"family":"classification-operation","domain":"vigi.recording-search.request-relative.classification-operation.v1","expected_id":"rr-classification-operation-v1-bedc084276cc78d9fc658b8d465e61d8f71e0acefecdb7a4cc92489dfbf15b13","payload":{"investigation_id":"inv-01","run_id":"run-01","frame_id":"rr-frame-v1-d1836b2be02712fb6816039805138ff75340dc39605c4fd7179f262d2b3bf807","target_request_id":"rr-target-request-v1-8e9f9b5b872febf339b5d00573d8170ee7ae61373ce20bd78f6ebf64c13e0fd3","baseline_identity":"baseline-v3-01","classifier_policy_id":"rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f","attempt":1,"result_kind":"VISUAL","outcome":"PRESENT","reason_code":null,"classifier_evidence":{"baseline_mask_pixel_count":256,"probe_mask_pixel_count":240,"roi_pixel_count":1024,"mask_intersection_pixel_count":220,"mask_union_pixel_count":276,"baseline_mask_coverage":"0.250000","probe_mask_coverage":"0.234375","mask_iou":"0.797101","effective_comparison_area":220,"roi_luma_ncc":"0.850000","visual_status":"comparable","unusable_reason":null},"operational_reason":null}},{"family":"classification-operation","domain":"vigi.recording-search.request-relative.classification-operation.v1","expected_id":"rr-classification-operation-v1-dc6cfd9a2991f6e58c0f6f740aaded6f7973653face2aca8342de121d31d9ca1","payload":{"investigation_id":"inv-01","run_id":"run-01","frame_id":"rr-frame-v1-3ca8359ce8fe1c1ea13bf54cd7c8a065ce75afa7e57d5947e503c4715a35ad64","target_request_id":"rr-target-request-v1-176d155fccb02e3060da3972110e261ac443bfff6a27e6a8b8042e0d9567a7d1","baseline_identity":"baseline-v3-01","classifier_policy_id":"rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f","attempt":1,"result_kind":"VISUAL","outcome":"ABSENT","reason_code":null,"classifier_evidence":{"baseline_mask_pixel_count":640,"probe_mask_pixel_count":64,"roi_pixel_count":1024,"mask_intersection_pixel_count":64,"mask_union_pixel_count":640,"baseline_mask_coverage":"0.625000","probe_mask_coverage":"0.062500","mask_iou":"0.100000","effective_comparison_area":64,"roi_luma_ncc":"0.200000","visual_status":"comparable","unusable_reason":null},"operational_reason":null}},{"family":"classification-operation","domain":"vigi.recording-search.request-relative.classification-operation.v1","expected_id":"rr-classification-operation-v1-11b9829607a2cc9afbe7ac44fa961232a225ff8f1a7ee78d882a1b5476a80f60","payload":{"investigation_id":"inv-01","run_id":"run-01","frame_id":"rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec","target_request_id":"rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc","baseline_identity":"baseline-v3-01","classifier_policy_id":"rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f","attempt":1,"result_kind":"VISUAL","outcome":"ABSENT","reason_code":null,"classifier_evidence":{"baseline_mask_pixel_count":640,"probe_mask_pixel_count":64,"roi_pixel_count":1024,"mask_intersection_pixel_count":64,"mask_union_pixel_count":640,"baseline_mask_coverage":"0.625000","probe_mask_coverage":"0.062500","mask_iou":"0.100000","effective_comparison_area":64,"roi_luma_ncc":"0.200000","visual_status":"comparable","unusable_reason":null},"operational_reason":null}},{"family":"observation","domain":"vigi.recording-search.request-relative.observation.v1","expected_id":"rr-observation-v1-7fa534ffd846f3e7f1c734dc9c8fcc2581952ea6908609ec9f79c1c486c6d0c6","payload":{"investigation_id":"inv-01","run_id":"run-01","common_session_id":"rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68","classification_operation_id":"rr-classification-operation-v1-bedc084276cc78d9fc658b8d465e61d8f71e0acefecdb7a4cc92489dfbf15b13","frame_id":"rr-frame-v1-d1836b2be02712fb6816039805138ff75340dc39605c4fd7179f262d2b3bf807","target_request_id":"rr-target-request-v1-8e9f9b5b872febf339b5d00573d8170ee7ae61373ce20bd78f6ebf64c13e0fd3","classifier_policy_id":"rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f","outcome":"PRESENT","reason_code":null,"classifier_evidence":{"baseline_mask_pixel_count":256,"probe_mask_pixel_count":240,"roi_pixel_count":1024,"mask_intersection_pixel_count":220,"mask_union_pixel_count":276,"baseline_mask_coverage":"0.250000","probe_mask_coverage":"0.234375","mask_iou":"0.797101","effective_comparison_area":220,"roi_luma_ncc":"0.850000","visual_status":"comparable","unusable_reason":null}}},{"family":"observation","domain":"vigi.recording-search.request-relative.observation.v1","expected_id":"rr-observation-v1-b06a5fee72bee5dda98a6cc9c057368bbe5ce8d4340d9f482745c5b634ade662","payload":{"investigation_id":"inv-01","run_id":"run-01","common_session_id":"rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68","classification_operation_id":"rr-classification-operation-v1-dc6cfd9a2991f6e58c0f6f740aaded6f7973653face2aca8342de121d31d9ca1","frame_id":"rr-frame-v1-3ca8359ce8fe1c1ea13bf54cd7c8a065ce75afa7e57d5947e503c4715a35ad64","target_request_id":"rr-target-request-v1-176d155fccb02e3060da3972110e261ac443bfff6a27e6a8b8042e0d9567a7d1","classifier_policy_id":"rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f","outcome":"ABSENT","reason_code":null,"classifier_evidence":{"baseline_mask_pixel_count":640,"probe_mask_pixel_count":64,"roi_pixel_count":1024,"mask_intersection_pixel_count":64,"mask_union_pixel_count":640,"baseline_mask_coverage":"0.625000","probe_mask_coverage":"0.062500","mask_iou":"0.100000","effective_comparison_area":64,"roi_luma_ncc":"0.200000","visual_status":"comparable","unusable_reason":null}}},{"family":"observation","domain":"vigi.recording-search.request-relative.observation.v1","expected_id":"rr-observation-v1-1aad91a3b66d9836fbcd9f2ab420c67a5788d3e465407987f724680b9d9370f8","payload":{"investigation_id":"inv-01","run_id":"run-01","common_session_id":"rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68","classification_operation_id":"rr-classification-operation-v1-11b9829607a2cc9afbe7ac44fa961232a225ff8f1a7ee78d882a1b5476a80f60","frame_id":"rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec","target_request_id":"rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc","classifier_policy_id":"rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f","outcome":"ABSENT","reason_code":null,"classifier_evidence":{"baseline_mask_pixel_count":640,"probe_mask_pixel_count":64,"roi_pixel_count":1024,"mask_intersection_pixel_count":64,"mask_union_pixel_count":640,"baseline_mask_coverage":"0.625000","probe_mask_coverage":"0.062500","mask_iou":"0.100000","effective_comparison_area":64,"roi_luma_ncc":"0.200000","visual_status":"comparable","unusable_reason":null}}},{"family":"classification-operation","domain":"vigi.recording-search.request-relative.classification-operation.v1","expected_id":"rr-classification-operation-v1-67b36e036b600b90275619a8849c203b305f3cb6ceaf7e42c80a543fe515211c","payload":{"investigation_id":"inv-01","run_id":"run-01","frame_id":"rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec","target_request_id":"rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc","baseline_identity":"baseline-v3-01","classifier_policy_id":"rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f","attempt":1,"result_kind":"VISUAL","outcome":"INDETERMINATE","reason_code":"insufficient_visual_evidence","classifier_evidence":{"baseline_mask_pixel_count":256,"probe_mask_pixel_count":180,"roi_pixel_count":1024,"mask_intersection_pixel_count":90,"mask_union_pixel_count":346,"baseline_mask_coverage":"0.250000","probe_mask_coverage":"0.175781","mask_iou":"0.260116","effective_comparison_area":90,"roi_luma_ncc":"0.400000","visual_status":"comparable","unusable_reason":null},"operational_reason":null}},{"family":"observation","domain":"vigi.recording-search.request-relative.observation.v1","expected_id":"rr-observation-v1-83155f4d069a375d088130add221a446f4041bb08ca10b55e056732342dfa901","payload":{"investigation_id":"inv-01","run_id":"run-01","common_session_id":"rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68","classification_operation_id":"rr-classification-operation-v1-67b36e036b600b90275619a8849c203b305f3cb6ceaf7e42c80a543fe515211c","frame_id":"rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec","target_request_id":"rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc","classifier_policy_id":"rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f","outcome":"INDETERMINATE","reason_code":"insufficient_visual_evidence","classifier_evidence":{"baseline_mask_pixel_count":256,"probe_mask_pixel_count":180,"roi_pixel_count":1024,"mask_intersection_pixel_count":90,"mask_union_pixel_count":346,"baseline_mask_coverage":"0.250000","probe_mask_coverage":"0.175781","mask_iou":"0.260116","effective_comparison_area":90,"roi_luma_ncc":"0.400000","visual_status":"comparable","unusable_reason":null}}},{"family":"classification-operation","domain":"vigi.recording-search.request-relative.classification-operation.v1","expected_id":"rr-classification-operation-v1-dfb2e789f85704f3286e2241450e380de721a3b7e2ca9ce8f5e4866864fed5d2","payload":{"investigation_id":"inv-01","run_id":"run-01","frame_id":"rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec","target_request_id":"rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc","baseline_identity":"baseline-v3-01","classifier_policy_id":"rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f","attempt":1,"result_kind":"OPERATIONAL","outcome":null,"reason_code":null,"classifier_evidence":null,"operational_reason":"classifier_timeout"}},{"family":"classification-operation","domain":"vigi.recording-search.request-relative.classification-operation.v1","expected_id":"rr-classification-operation-v1-2932dd0461441b4bc17afd9552be1277433aa70e6c83b58efea4a2be21e6ab56","payload":{"investigation_id":"inv-01","run_id":"run-01","frame_id":"rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec","target_request_id":"rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc","baseline_identity":"baseline-v3-01","classifier_policy_id":"rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f","attempt":1,"result_kind":"OPERATIONAL","outcome":null,"reason_code":null,"classifier_evidence":null,"operational_reason":"classification_failed"}},{"family":"classification-operation","domain":"vigi.recording-search.request-relative.classification-operation.v1","expected_id":"rr-classification-operation-v1-31101c7cb263822c8548aa936c1546bdfdbe7ad14677b392c2c75e2d546c79f6","payload":{"investigation_id":"inv-01","run_id":"run-01","frame_id":"rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec","target_request_id":"rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc","baseline_identity":"baseline-v3-01","classifier_policy_id":"rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f","attempt":1,"result_kind":"OPERATIONAL","outcome":null,"reason_code":null,"classifier_evidence":null,"operational_reason":"invalid_classifier_result"}},{"family":"phase8-manifest","domain":"vigi.recording-search.request-relative.phase8-manifest.v1","expected_id":"rr-phase8-manifest-v1-85b4f3ed1d3affb1580231044623bba7b7bd3e0a57ff24954170ff86582034c5","payload":{"schema_version":1,"state":"RETRYABLE","investigation_id":"inv-01","run_id":"run-01","terminal_result_id":"rr-terminal-result-v1-6f85c982dbdf7719c9d1ffab160a3cfb2f4483652eced675138ae76bc027d1ce","common_session_id":"rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68","previous_phase8_manifest_id":null,"source_clip_id":null,"clip_integrity":null,"phase8_request_id":null,"failure_reason":"phase8_clip_failed"}},{"family":"phase8-manifest","domain":"vigi.recording-search.request-relative.phase8-manifest.v1","expected_id":"rr-phase8-manifest-v1-a2198b059c93fe5907d3f4eec7e02ffc2b69028f7bcbbf719e43899388c6744b","payload":{"schema_version":1,"state":"RETRYABLE","investigation_id":"inv-01","run_id":"run-01","terminal_result_id":"rr-terminal-result-v1-6f85c982dbdf7719c9d1ffab160a3cfb2f4483652eced675138ae76bc027d1ce","common_session_id":"rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68","previous_phase8_manifest_id":"rr-phase8-manifest-v1-b32b69e00067d47b24f64b6911e74f5eb6dfed4c60de71099109ad3759f3c0ba","source_clip_id":"rr-source-clip-v1-ef4ea7d1847388b58bfc8de6cdef5f399dc57376ece2331d9ce07e3f3a685e4c","clip_integrity":{"sha256":"9e23896ae9d7d66b3473be0da74cf92f51752af0d1a7873f5921a7a4f712ceb3","size_bytes":2430,"observed_duration_ticks":65536,"observed_time_base_num":1,"observed_time_base_den":16384,"video_stream_index":0,"codec":"h264","profile":"High","level":41,"pixel_format":"yuv420p","width":32,"height":32,"average_frame_rate_num":1,"average_frame_rate_den":1,"audio_stream_count":0,"generation_outcome":"REENCODED"},"phase8_request_id":"rr-phase8-request-v1-3bad179cba98c61ff52d903eb90793ae32198cc4722eefca2bd0f1f861611cff","failure_reason":"phase8_media_corrupt"}},{"family":"phase8-manifest","domain":"vigi.recording-search.request-relative.phase8-manifest.v1","expected_id":"rr-phase8-manifest-v1-a1d15af225768d5efe270c4f19969fa85ea36550a39399920a43baa4e71770ff","payload":{"schema_version":1,"state":"CLIP_READY","investigation_id":"inv-01","run_id":"run-01","terminal_result_id":"rr-terminal-result-v1-6f85c982dbdf7719c9d1ffab160a3cfb2f4483652eced675138ae76bc027d1ce","common_session_id":"rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68","previous_phase8_manifest_id":null,"source_clip_id":"rr-source-clip-v1-ef4ea7d1847388b58bfc8de6cdef5f399dc57376ece2331d9ce07e3f3a685e4c","clip_integrity":{"sha256":"9e23896ae9d7d66b3473be0da74cf92f51752af0d1a7873f5921a7a4f712ceb3","size_bytes":2430,"observed_duration_ticks":65536,"observed_time_base_num":1,"observed_time_base_den":16384,"video_stream_index":0,"codec":"h264","profile":"High","level":41,"pixel_format":"yuv420p","width":32,"height":32,"average_frame_rate_num":1,"average_frame_rate_den":1,"audio_stream_count":0,"generation_outcome":"REENCODED"}}},{"family":"phase8-manifest","domain":"vigi.recording-search.request-relative.phase8-manifest.v1","expected_id":"rr-phase8-manifest-v1-3cba79d79480eceb674b1a3a038a7ba5367697bef308b3cb067ad19f8003e94c","payload":{"schema_version":1,"state":"DELETING","investigation_id":"inv-01","run_id":"run-01","terminal_result_id":"rr-terminal-result-v1-6f85c982dbdf7719c9d1ffab160a3cfb2f4483652eced675138ae76bc027d1ce","common_session_id":"rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68","previous_phase8_manifest_id":"rr-phase8-manifest-v1-b32b69e00067d47b24f64b6911e74f5eb6dfed4c60de71099109ad3759f3c0ba","source_clip_id":"rr-source-clip-v1-ef4ea7d1847388b58bfc8de6cdef5f399dc57376ece2331d9ce07e3f3a685e4c","clip_integrity":{"sha256":"9e23896ae9d7d66b3473be0da74cf92f51752af0d1a7873f5921a7a4f712ceb3","size_bytes":2430,"observed_duration_ticks":65536,"observed_time_base_num":1,"observed_time_base_den":16384,"video_stream_index":0,"codec":"h264","profile":"High","level":41,"pixel_format":"yuv420p","width":32,"height":32,"average_frame_rate_num":1,"average_frame_rate_den":1,"audio_stream_count":0,"generation_outcome":"REENCODED"},"phase8_request_id":"rr-phase8-request-v1-3bad179cba98c61ff52d903eb90793ae32198cc4722eefca2bd0f1f861611cff","common_media_tombstone_name":".delete-rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68.mp4","source_clip_tombstone_name":".delete-9e23896ae9d7d66b3473be0da74cf92f51752af0d1a7873f5921a7a4f712ceb3.mp4"}},{"family":"phase8-manifest","domain":"vigi.recording-search.request-relative.phase8-manifest.v1","expected_id":"rr-phase8-manifest-v1-2decf5b1e036cf41382f420209c64c69fe333074e12e7d940fae3d563400bfca","payload":{"schema_version":1,"state":"DELETED","investigation_id":"inv-01","run_id":"run-01","terminal_result_id":"rr-terminal-result-v1-6f85c982dbdf7719c9d1ffab160a3cfb2f4483652eced675138ae76bc027d1ce","common_session_id":"rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68","previous_phase8_manifest_id":"rr-phase8-manifest-v1-3cba79d79480eceb674b1a3a038a7ba5367697bef308b3cb067ad19f8003e94c","source_clip_id":"rr-source-clip-v1-ef4ea7d1847388b58bfc8de6cdef5f399dc57376ece2331d9ce07e3f3a685e4c","clip_integrity":{"sha256":"9e23896ae9d7d66b3473be0da74cf92f51752af0d1a7873f5921a7a4f712ceb3","size_bytes":2430,"observed_duration_ticks":65536,"observed_time_base_num":1,"observed_time_base_den":16384,"video_stream_index":0,"codec":"h264","profile":"High","level":41,"pixel_format":"yuv420p","width":32,"height":32,"average_frame_rate_num":1,"average_frame_rate_den":1,"audio_stream_count":0,"generation_outcome":"REENCODED"},"phase8_request_id":"rr-phase8-request-v1-3bad179cba98c61ff52d903eb90793ae32198cc4722eefca2bd0f1f861611cff","common_media_tombstone_name":".delete-rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68.mp4","source_clip_tombstone_name":".delete-9e23896ae9d7d66b3473be0da74cf92f51752af0d1a7873f5921a7a4f712ceb3.mp4","deletion_result":"DELETED"}}]
+
+```
+
+The following isolated vectors cover every production-shaped `unusable` `RawComparison` row. Each operation and observation is independently recomputed with the domain-plus-NUL rule; these vectors are not additional published members of the binary fixture.
+
+```json
+[
+  {
+    "family": "classification-operation",
+    "domain": "vigi.recording-search.request-relative.classification-operation.v1",
+    "expected_id": "rr-classification-operation-v1-1dbd66f45070625e3b30e253186fa816c6bc63311060c3aa58c97cb305513d39",
+    "payload": {
+      "investigation_id": "inv-01",
+      "frame_id": "rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec",
+      "target_request_id": "rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc",
+      "baseline_identity": "baseline-v3-01",
+      "classifier_policy_id": "rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f",
+      "attempt": 1,
+      "result_kind": "VISUAL",
+      "outcome": "INDETERMINATE",
+      "reason_code": "invalid_mask",
+      "classifier_evidence": {
+        "baseline_mask_pixel_count": null,
+        "probe_mask_pixel_count": null,
+        "roi_pixel_count": 1024,
+        "mask_intersection_pixel_count": null,
+        "mask_union_pixel_count": null,
+        "baseline_mask_coverage": null,
+        "probe_mask_coverage": null,
+        "mask_iou": null,
+        "effective_comparison_area": null,
+        "roi_luma_ncc": null,
+        "visual_status": "unusable",
+        "unusable_reason": "invalid_mask"
+      },
+      "operational_reason": null
+    }
+  },
+  {
+    "family": "observation",
+    "domain": "vigi.recording-search.request-relative.observation.v1",
+    "expected_id": "rr-observation-v1-67522438a4fd5a491c95213a8b017b727ec3d6f77d20f00f70a86e3e434d4513",
+    "payload": {
+      "investigation_id": "inv-01",
+      "common_session_id": "rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68",
+      "classification_operation_id": "rr-classification-operation-v1-1dbd66f45070625e3b30e253186fa816c6bc63311060c3aa58c97cb305513d39",
+      "frame_id": "rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec",
+      "target_request_id": "rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc",
+      "classifier_policy_id": "rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f",
+      "outcome": "INDETERMINATE",
+      "reason_code": "invalid_mask",
+      "classifier_evidence": {
+        "baseline_mask_pixel_count": null,
+        "probe_mask_pixel_count": null,
+        "roi_pixel_count": 1024,
+        "mask_intersection_pixel_count": null,
+        "mask_union_pixel_count": null,
+        "baseline_mask_coverage": null,
+        "probe_mask_coverage": null,
+        "mask_iou": null,
+        "effective_comparison_area": null,
+        "roi_luma_ncc": null,
+        "visual_status": "unusable",
+        "unusable_reason": "invalid_mask"
+      }
+    }
+  },
+  {
+    "family": "classification-operation",
+    "domain": "vigi.recording-search.request-relative.classification-operation.v1",
+    "expected_id": "rr-classification-operation-v1-6e019db4d6b91c39f268a33c42d65366d6b7be6e00048218da404226f0c6f34d",
+    "payload": {
+      "investigation_id": "inv-01",
+      "frame_id": "rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec",
+      "target_request_id": "rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc",
+      "baseline_identity": "baseline-v3-01",
+      "classifier_policy_id": "rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f",
+      "attempt": 1,
+      "result_kind": "VISUAL",
+      "outcome": "INDETERMINATE",
+      "reason_code": "background_dominant",
+      "classifier_evidence": {
+        "baseline_mask_pixel_count": 973,
+        "probe_mask_pixel_count": 800,
+        "roi_pixel_count": 1024,
+        "mask_intersection_pixel_count": null,
+        "mask_union_pixel_count": null,
+        "baseline_mask_coverage": "0.950195",
+        "probe_mask_coverage": "0.781250",
+        "mask_iou": null,
+        "effective_comparison_area": null,
+        "roi_luma_ncc": null,
+        "visual_status": "unusable",
+        "unusable_reason": "background_dominant"
+      },
+      "operational_reason": null
+    }
+  },
+  {
+    "family": "observation",
+    "domain": "vigi.recording-search.request-relative.observation.v1",
+    "expected_id": "rr-observation-v1-6da539f32e5ecf504c9350773b3ecda5cf974bb394e1adb0180d294c831984b3",
+    "payload": {
+      "investigation_id": "inv-01",
+      "common_session_id": "rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68",
+      "classification_operation_id": "rr-classification-operation-v1-6e019db4d6b91c39f268a33c42d65366d6b7be6e00048218da404226f0c6f34d",
+      "frame_id": "rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec",
+      "target_request_id": "rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc",
+      "classifier_policy_id": "rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f",
+      "outcome": "INDETERMINATE",
+      "reason_code": "background_dominant",
+      "classifier_evidence": {
+        "baseline_mask_pixel_count": 973,
+        "probe_mask_pixel_count": 800,
+        "roi_pixel_count": 1024,
+        "mask_intersection_pixel_count": null,
+        "mask_union_pixel_count": null,
+        "baseline_mask_coverage": "0.950195",
+        "probe_mask_coverage": "0.781250",
+        "mask_iou": null,
+        "effective_comparison_area": null,
+        "roi_luma_ncc": null,
+        "visual_status": "unusable",
+        "unusable_reason": "background_dominant"
+      }
+    }
+  },
+  {
+    "family": "classification-operation",
+    "domain": "vigi.recording-search.request-relative.classification-operation.v1",
+    "expected_id": "rr-classification-operation-v1-61ec3340f3e380a786956e0d3378faabf25c67c4f00d46a25673d8804a3913de",
+    "payload": {
+      "investigation_id": "inv-01",
+      "frame_id": "rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec",
+      "target_request_id": "rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc",
+      "baseline_identity": "baseline-v3-01",
+      "classifier_policy_id": "rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f",
+      "attempt": 1,
+      "result_kind": "VISUAL",
+      "outcome": "INDETERMINATE",
+      "reason_code": "insufficient_mask_overlap",
+      "classifier_evidence": {
+        "baseline_mask_pixel_count": 256,
+        "probe_mask_pixel_count": 256,
+        "roi_pixel_count": 1024,
+        "mask_intersection_pixel_count": 20,
+        "mask_union_pixel_count": 492,
+        "baseline_mask_coverage": "0.250000",
+        "probe_mask_coverage": "0.250000",
+        "mask_iou": "0.040650",
+        "effective_comparison_area": null,
+        "roi_luma_ncc": null,
+        "visual_status": "unusable",
+        "unusable_reason": "insufficient_mask_overlap"
+      },
+      "operational_reason": null
+    }
+  },
+  {
+    "family": "observation",
+    "domain": "vigi.recording-search.request-relative.observation.v1",
+    "expected_id": "rr-observation-v1-923d676e5e8e4165167b07ddb2e2b5b35c7e082a14a4fe5c12e9cbfe1420c808",
+    "payload": {
+      "investigation_id": "inv-01",
+      "common_session_id": "rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68",
+      "classification_operation_id": "rr-classification-operation-v1-61ec3340f3e380a786956e0d3378faabf25c67c4f00d46a25673d8804a3913de",
+      "frame_id": "rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec",
+      "target_request_id": "rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc",
+      "classifier_policy_id": "rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f",
+      "outcome": "INDETERMINATE",
+      "reason_code": "insufficient_mask_overlap",
+      "classifier_evidence": {
+        "baseline_mask_pixel_count": 256,
+        "probe_mask_pixel_count": 256,
+        "roi_pixel_count": 1024,
+        "mask_intersection_pixel_count": 20,
+        "mask_union_pixel_count": 492,
+        "baseline_mask_coverage": "0.250000",
+        "probe_mask_coverage": "0.250000",
+        "mask_iou": "0.040650",
+        "effective_comparison_area": null,
+        "roi_luma_ncc": null,
+        "visual_status": "unusable",
+        "unusable_reason": "insufficient_mask_overlap"
+      }
+    }
+  },
+  {
+    "family": "classification-operation",
+    "domain": "vigi.recording-search.request-relative.classification-operation.v1",
+    "expected_id": "rr-classification-operation-v1-fbe9f2a846491b17e9f7164c36268dc1cb4c37ced2f92ecef15f00155a0ed481",
+    "payload": {
+      "investigation_id": "inv-01",
+      "frame_id": "rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec",
+      "target_request_id": "rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc",
+      "baseline_identity": "baseline-v3-01",
+      "classifier_policy_id": "rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f",
+      "attempt": 1,
+      "result_kind": "VISUAL",
+      "outcome": "INDETERMINATE",
+      "reason_code": "insufficient_comparison_area",
+      "classifier_evidence": {
+        "baseline_mask_pixel_count": 64,
+        "probe_mask_pixel_count": 64,
+        "roi_pixel_count": 128,
+        "mask_intersection_pixel_count": 32,
+        "mask_union_pixel_count": 96,
+        "baseline_mask_coverage": "0.500000",
+        "probe_mask_coverage": "0.500000",
+        "mask_iou": "0.333333",
+        "effective_comparison_area": 32,
+        "roi_luma_ncc": null,
+        "visual_status": "unusable",
+        "unusable_reason": "insufficient_comparison_area"
+      },
+      "operational_reason": null
+    }
+  },
+  {
+    "family": "observation",
+    "domain": "vigi.recording-search.request-relative.observation.v1",
+    "expected_id": "rr-observation-v1-a0271ce84f9730913e03d58618fededd7af667f151e9c767c363bef1e2ed7505",
+    "payload": {
+      "investigation_id": "inv-01",
+      "common_session_id": "rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68",
+      "classification_operation_id": "rr-classification-operation-v1-fbe9f2a846491b17e9f7164c36268dc1cb4c37ced2f92ecef15f00155a0ed481",
+      "frame_id": "rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec",
+      "target_request_id": "rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc",
+      "classifier_policy_id": "rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f",
+      "outcome": "INDETERMINATE",
+      "reason_code": "insufficient_comparison_area",
+      "classifier_evidence": {
+        "baseline_mask_pixel_count": 64,
+        "probe_mask_pixel_count": 64,
+        "roi_pixel_count": 128,
+        "mask_intersection_pixel_count": 32,
+        "mask_union_pixel_count": 96,
+        "baseline_mask_coverage": "0.500000",
+        "probe_mask_coverage": "0.500000",
+        "mask_iou": "0.333333",
+        "effective_comparison_area": 32,
+        "roi_luma_ncc": null,
+        "visual_status": "unusable",
+        "unusable_reason": "insufficient_comparison_area"
+      }
+    }
+  },
+  {
+    "family": "classification-operation",
+    "domain": "vigi.recording-search.request-relative.classification-operation.v1",
+    "expected_id": "rr-classification-operation-v1-f1baeb9d9bcf565613b1550637ae8b143196b90fd039f01a69a2aef8f64e2c05",
+    "payload": {
+      "investigation_id": "inv-01",
+      "frame_id": "rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec",
+      "target_request_id": "rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc",
+      "baseline_identity": "baseline-v3-01",
+      "classifier_policy_id": "rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f",
+      "attempt": 1,
+      "result_kind": "VISUAL",
+      "outcome": "INDETERMINATE",
+      "reason_code": "zero_luma_variance",
+      "classifier_evidence": {
+        "baseline_mask_pixel_count": 256,
+        "probe_mask_pixel_count": 240,
+        "roi_pixel_count": 1024,
+        "mask_intersection_pixel_count": 220,
+        "mask_union_pixel_count": 276,
+        "baseline_mask_coverage": "0.250000",
+        "probe_mask_coverage": "0.234375",
+        "mask_iou": "0.797101",
+        "effective_comparison_area": 220,
+        "roi_luma_ncc": null,
+        "visual_status": "unusable",
+        "unusable_reason": "zero_luma_variance"
+      },
+      "operational_reason": null
+    }
+  },
+  {
+    "family": "observation",
+    "domain": "vigi.recording-search.request-relative.observation.v1",
+    "expected_id": "rr-observation-v1-3b3aa77484a8686ed1a53ebaf5887285156b71e54805403b7000cf22e8f7e88f",
+    "payload": {
+      "investigation_id": "inv-01",
+      "common_session_id": "rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68",
+      "classification_operation_id": "rr-classification-operation-v1-f1baeb9d9bcf565613b1550637ae8b143196b90fd039f01a69a2aef8f64e2c05",
+      "frame_id": "rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec",
+      "target_request_id": "rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc",
+      "classifier_policy_id": "rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f",
+      "outcome": "INDETERMINATE",
+      "reason_code": "zero_luma_variance",
+      "classifier_evidence": {
+        "baseline_mask_pixel_count": 256,
+        "probe_mask_pixel_count": 240,
+        "roi_pixel_count": 1024,
+        "mask_intersection_pixel_count": 220,
+        "mask_union_pixel_count": 276,
+        "baseline_mask_coverage": "0.250000",
+        "probe_mask_coverage": "0.234375",
+        "mask_iou": "0.797101",
+        "effective_comparison_area": 220,
+        "roi_luma_ncc": null,
+        "visual_status": "unusable",
+        "unusable_reason": "zero_luma_variance"
+      }
+    }
+  }
+]
+```
+
+### Reproducible binary strict-reopen fixture
+
+The compact fixture is a conformance fixture, not a production resolution or
+duration requirement. It contains four distinct decodable 32×32 JPEG frames, a
+four-frame one-fps H.264/MP4 common session, and a Phase 8 clip that intentionally
+reuses the same valid MP4 bytes. Every binary can be reconstructed from this
+document alone. Sizes, encoded-byte SHA-256 values, decoded RGB24 SHA-256 values,
+container fields, and record references are normative for this fixture.
+
+```json
+{"jpeg_files":[{"name":"frame-0.jpg","base64":"/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAAgACADAREAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD896908cKACgAoAKACgAoAKACgAoAKACgAoAKACgAoA//Z","size_bytes":657,"sha256":"c5330de6f4fd14cf995a8583581a65df3d8c1f739caf3ec6c1312b6e27fd053c","width":32,"height":32,"rgb24_sha256":"22218ffebb43cce5be7c991d4d2976a8645b45c67d6579383ae1704c4b6a56e7"},{"name":"frame-1.jpg","base64":"/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAAgACADAREAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD53r3TxwoAKACgAoAKACgAoAKACgAoAKACgAoAKACgD//Z","size_bytes":657,"sha256":"581b3bd0d4c41c510c994a5f2f9985b3b4d0f2129543b1d921e04f9a62b43c5d","width":32,"height":32,"rgb24_sha256":"2b8ac5dd3528ec15ed329b9dbd4e57d3813cfe4917752e2da3552a85bce1643c"},{"name":"frame-2.jpg","base64":"/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAAgACADAREAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwCvXunjhQAUAFABQAUAFABQAUAFABQAUAFABQAUAFAH/9k=","size_bytes":656,"sha256":"86ee3bbcaa921459400c534a07284f7f8ab12d03a25c09d055c60694ebd4ecd2","width":32,"height":32,"rgb24_sha256":"ddd2e59b0774d836f4664fc570100e26919f96b634f9bc0dff4dcdc90c4b85d9"},{"name":"frame-3.jpg","base64":"/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAAgACADAREAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD3ivdPHCgAoAKACgAoAKACgAoAKACgAoAKACgAoAKAP//Z","size_bytes":657,"sha256":"632b544f4ff8b66549bb1922d91c7c5b9000aeeddd4ecf61ebc2f630b49ee008","width":32,"height":32,"rgb24_sha256":"4f6bf378a3934fe2ea630778bb0fbfc537586986588215ca0adb0855b8b2e3ae"}],"retained_common_session_mp4":{"name":"session.mp4","base64":"AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAANibW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAD6AAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAox0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAD6AAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAACAAAAAgAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAA+gAACAAAABAAAAAAIEbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAABAAAABQABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABr21pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAW9zdGJsAAAAv3N0c2QAAAAAAAAAAQAAAK9hdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAACAAIABIAAAASAAAAAAAAAABFUxhdmM2Mi4yOC4xMDIgbGlieDI2NAAAAAAAAAAAAAAAGP//AAAANWF2Y0MBZAAp/+EAGGdkACms2UlsBEAAAAMAQAAAAwCDxgxlgAEABmjr48siwP34+AAAAAAQcGFzcAAAAAEAAAABAAAAFGJ0cnQAAAAAAAAL2AAAAAAAAAAYc3R0cwAAAAAAAAABAAAABAAAQAAAAAAUc3RzcwAAAAAAAAABAAAAAQAAAChjdHRzAAAAAAAAAAMAAAABAACAAAAAAAEAAQAAAAAAAgAAQAAAAAAcc3RzYwAAAAAAAAABAAAAAQAAAAQAAAABAAAAJHN0c3oAAAAAAAAAAAAAAAQAAATVAAAAaQAAAEgAAABmAAAAFHN0Y28AAAAAAAAAAQAAA5IAAABidWR0YQAAAFptZXRhAAAAAAAAACFoZGxyAAAAAAAAAABtZGlyYXBwbAAAAAAAAAAAAAAAAC1pbHN0AAAAJal0b28AAAAdZGF0YQAAAAEAAAAATGF2ZjYyLjEyLjEwMgAAAAhmcmVlAAAF9G1kYXQAAAKtBgX//6ncRem95tlIt5Ys2CDZI+7veDI2NCAtIGNvcmUgMTY1IHIzMjIzIDA0ODBjYjAgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDI1IC0gaHR0cDovL3d3dy52aWRlb2xhbi5vcmcveDI2NC5odG1sIC0gb3B0aW9uczogY2FiYWM9MSByZWY9MyBkZWJsb2NrPTE6MDowIGFuYWx5c2U9MHgzOjB4MTEzIG1lPWhleCBzdWJtZT03IHBzeT0xIHBzeV9yZD0xLjAwOjAuMDAgbWl4ZWRfcmVmPTEgbWVfcmFuZ2U9MTYgY2hyb21hX21lPTEgdHJlbGxpcz0xIDh4OGRjdD0xIGNxbT0wIGRlYWR6b25lPTIxLDExIGZhc3RfcHNraXA9MSBjaHJvbWFfcXBfb2Zmc2V0PS0yIHRocmVhZHM9MSBsb29rYWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWRzPTAgbnI9MCBkZWNpbWF0ZT0xIGludGVybGFjZWQ9MCBibHVyYXlfY29tcGF0PTAgY29uc3RyYWluZWRfaW50cmE9MCBiZnJhbWVzPTMgYl9weXJhbWlkPTIgYl9hZGFwdD0xIGJfYmlhcz0wIGRpcmVjdD0xIHdlaWdodGI9MSBvcGVuX2dvcD0wIHdlaWdodHA9MiBrZXlpbnQ9MjUwIGtleWludF9taW49MSBzY2VuZWN1dD00MCBpbnRyYV9yZWZyZXNoPTAgcmNfbG9va2FoZWFkPTQwIHJjPWNyZiBtYnRyZWU9MSBjcmY9MjMuMCBxY29tcD0wLjYwIHFwbWluPTAgcXBtYXg9NjkgcXBzdGVwPTQgaXBfcmF0aW89MS40MCBhcT0xOjEuMDAAgAAAAiBliIQAT3bsDOXx+59S9sFm6Kam0BLdmbMHaDNCI3AQMCWvzvvJodCmJcdLjegxYWEKG/vOYsJGU2d8NBPfRcrR/puqC4Pwnyv866QnEW6pjCvY0AHRGwk/ckeTfP3nDwtJLfbizlWt0s2J/DGQvefwgJTlXf1fUvbqAdQ60TiENGQGG/DFxzugoL6tjVmhOvfWJS+aX2zlIESNWC8HFi3Khy3CgwXiNmesAoxYuj9Z6wir9e4qZzf7Lt+4hQZoeCAkJrmkkP4hzDO82ezNFiVDr2Upi16RUIC5KSBCcQKShAV6GsfEKtWFV8n4HH2KIJrXAXdz4BezdgGZZ1PzR7kCLKPhr8CurJv5/bRzriaR1lwdfW/1ZpMqMPlfTngDZcQMsLF6NQ7lG6AsH4ol4FFJ1ER8KrdK9MF691x5u6ypToKrbUD+NlW+DK0rUaU6sHtyWhlgIcq8FcBQlDg+QoamAektveg2FgAtTBSgPU6sKgCCGfP1XdCILBpTjMAsB4y1zVyWaMULAkKj83SchaqQdIZ79lNnJhH/82vyTf2xwDD4yXbytAGfMcoDNQbdzSqWQKcvjghIPqoW9E+0hr5/QoAka7mMIGJKW3PdsSI5pKoNE4HaB2pn6eLo7aNBnroqPqFXTarbjIR0ZplwxAwghLoQxSKmT7Bqajo9jIpX5wWYmk61HB+Cpjtz0qFt46hwGBLEbqTNOYxzcjss6qRpAAAAZUGaI2x/2m/yf20RdnDrO4rIgsGkB2V1fXzPU30vdyBRytOme9IL0/kPw1fXdrjone12Gd39j90wOgu/lQEscOmezIf7LH1v2X6wlfqvHL5AhLGlvY0bi0mZGh5DYdYuVNKUcXrgAAAAREGeQXj/5im8CRM6foDpscjVpufnIFubImaVGwAwvYUcpt07DVi1dkjJg0BJbPIZ4qU5hIEw4zsgBtodu2vsksHX7D3BAAAAYgGeYmp/5lSjdgdiQAZGds3qkvghJd47/+M1EIgd7BPS/8FDd5PQon9CCbo+vT+OS2tRlULVHLHB5iltu8g2IlK30sJtuB0ZiJo8spbtmPm+Z4iwcrBdn5fvl+IDWtTdUNvA","size_bytes":2430,"sha256":"9e23896ae9d7d66b3473be0da74cf92f51752af0d1a7873f5921a7a4f712ceb3","container":"mp4","video_streams":1,"audio_streams":0,"codec":"h264","profile":"High","level":41,"pixel_format":"yuv420p","width":32,"height":32,"average_frame_rate":[1,1],"time_base":[1,16384],"start_pts":0,"duration_ticks":65536},"phase8_source_clip":{"reuse_fixture_bytes_from":"retained_common_session_mp4","size_bytes":2430,"sha256":"9e23896ae9d7d66b3473be0da74cf92f51752af0d1a7873f5921a7a4f712ceb3"}}
+```
+
+Strict reconstruction starts from `manifests/<schema6_manifest_id>.json`, never
+from a caller membership list. It verifies the archived schema-5 predecessor,
+the exact ordered indexes, all 30 source records, deterministic filenames,
+every identity and ownership edge, and the four referenced JPEGs. JPEGs are read
+once, length/digest checked, fully decoded as declared 32×32 RGB, and their
+RGB24 digests recomputed. It verifies the retained MP4 length/digest and the
+displayed structural probe facts. Schema 7 then recomputes source-set, snapshot,
+terminal, and manifest IDs. Phase 8 independently reconstructs each state from
+its exact payload and membership contract below.
+
+Required negative mutations are deterministic: flip one JPEG byte; truncate a
+JPEG; change only its recorded RGB24 digest; flip one MP4 byte; truncate the
+MP4; remove an indexed binary; add an unindexed binary; replace a binary with a
+path escape; or add a foreign binary. Every case must reject strict reopen
+without recovery, evidence inference, or cleanup outside invocation-owned
+staging. The fixture has 49 identity instances, 26 families,
+95 inter-family construction
+edges plus two strictly older same-family lineage edge types (support-origin
+target request and Phase 8 predecessor).
+The construction-family graph (lineage excluded) and the complete instance
+graph (lineage included) are both acyclic.
+
+### Closed operational reasons
+
+Operational precedence is Ctrl+C → invocation deadline → active operation
+timeout/failure → corruption/ownership → visual interpretation. The canonical
+persisted reason is always one value from this closed set:
+`replay_timeout | replay_authentication_failed | recording_unavailable |
+replay_failed | acquisition_timeout | acquisition_failed |
+media_resource_exceeded | media_probe_timeout | media_probe_failed |
+invalid_time_base | missing_pts | nonmonotonic_pts | timestamp_reset |
+recording_gap | segment_boundary | decoder_timeout | decoder_failed |
+target_unavailable | insufficient_support | duplicate_frame |
+classifier_timeout | classification_failed | invalid_classifier_result |
+interrupted | invocation_deadline_exhausted | capacity_exhausted |
+incomplete_evidence | stale_authority | inactive_authority |
+ownership_mismatch | publication_in_progress | publication_failed |
+publication_conflict | readback_failed | corrupt_persisted_evidence |
+unexpected_error | adapter_unknown_result | phase8_media_unavailable |
+phase8_media_corrupt | phase8_clip_failed`. No synonym is persisted.
+
+New executor causes map directly: replay timeout/authentication/unavailable/
+other failure map to the four `replay_*`/`recording_unavailable` values;
+ffprobe timeout/failure map to `media_probe_timeout`/`media_probe_failed`;
+decoder timeout/failure map to `decoder_timeout`/`decoder_failed`; missing,
+unordered, reset, discontinuous, or cross-segment timing maps respectively to
+`missing_pts`, `nonmonotonic_pts`, `timestamp_reset`, `recording_gap`, or
+`segment_boundary`; no eligible frame maps to `target_unavailable`; incomplete
+or duplicate support maps to `insufficient_support` or `duplicate_frame`.
+Resource and deadline failures map to `media_resource_exceeded`,
+`capacity_exhausted`, or `invocation_deadline_exhausted` according to the limit
+that was reached.
+
+The adapters must inspect the most specific source result before any outer
+status collapses it. The existing C1/C2/D1 unions map exactly as follows:
+
+| Source union | Source value | Canonical Phase 7E result |
+| --- | --- | --- |
+| C1 `CoarseSampleStatus` | `SUCCESS` | no operational reason |
+| C1 | `RECORDING_UNAVAILABLE` | `recording_unavailable` |
+| C1 | `ACQUISITION_FAILED` | `decoder_failed` when the safe cause is `decode_failed`; otherwise `acquisition_failed` |
+| C1 | `TIMEOUT` | `classifier_timeout` only when that safe cause is retained; otherwise `acquisition_timeout` |
+| C1 | `CLASSIFICATION_FAILED` | the B4 mapping below; if unavailable, `classification_failed` |
+| C1 | `INTERRUPTED` | `interrupted` |
+| C1 | `UNEXPECTED_ERROR` | `unexpected_error` |
+| C2 `CoarseInterpretationStatus` | `BRACKET_READY` | no operational reason |
+| C2 | `NO_CANDIDATE` or visual `INCONCLUSIVE` | terminal visual policy, not an operational reason |
+| C2 | `INCOMPLETE` | `incomplete_evidence` |
+| C2 | `INTERRUPTED` | `interrupted` |
+| C2 | `CORRUPT` | `corrupt_persisted_evidence` |
+| D1 `NarrowingStatus` | `NARROWED_BRACKET_READY` | no operational reason |
+| D1 | visual `INDETERMINATE` | terminal visual policy, not an operational reason |
+| D1 | `INTERRUPTED` | `interrupted` |
+| D1 | `CORRUPT` | `corrupt_persisted_evidence` |
+| D1 | `INCOMPLETE` | `incomplete_evidence` |
+| D1 | `RESOURCE_EXHAUSTED` | `capacity_exhausted` |
+| D1 `NarrowingStopReason` | `TARGET_PRECISION_REACHED` / `target_precision_reached` | no operational reason |
+| D1 stop reason | `NO_DISTINCT_MIDPOINT` / `no_distinct_midpoint` | `incomplete_evidence` |
+| D1 stop reason | `MAXIMUM_ITERATIONS` / `maximum_iterations` | `capacity_exhausted` |
+
+Every existing B4 `ClassificationOperationalReason` is mapped before returning
+to C1 or D1:
+
+| B4 source literals | Canonical reason |
+| --- | --- |
+| `invalid_classification_request`, `invalid_classifier_output` | `invalid_classifier_result` |
+| `probe_not_ready` | `incomplete_evidence` |
+| `invalid_baseline`, `baseline_corrupt`, `acquisition_state_corrupt`, `probe_artifact_corrupt`, `invalid_media_input` | `corrupt_persisted_evidence` |
+| `foreign_input` | `ownership_mismatch` |
+| `classifier_unavailable`, `classifier_execution_failed` | `classification_failed` |
+| `classifier_timeout` | `classifier_timeout` |
+| `caller_abandoned` | `interrupted` |
+| `classification_in_progress` | `publication_in_progress` |
+| `stale_run_owner`, `stale_manifest`, `authoritative_state_changed` | `stale_authority` |
+| `lifecycle_invalid` | `inactive_authority` |
+| `publication_conflict` | `publication_conflict` |
+| `persistence_failure` | `publication_failed` |
+
+Existing D2 operational literals retain the same meaning, with
+`cancelled`→`interrupted`, `timeout`→`acquisition_timeout`,
+`classification_timeout`→`classifier_timeout`,
+`recording_coverage_gap`→`recording_gap`, `decode_failed`→`decoder_failed`,
+`publication_readback_failed`→`readback_failed`, and
+`publication_invariant_failure`→`publication_failed`; its other names already
+match the canonical set. Any unknown enum member, missing cause, or unmapped
+adapter result becomes `adapter_unknown_result`, never visual evidence.
+
+Schema lifecycle state is `RUNNING | FAILED | INTERRUPTED`; schema 7 state is
+`FOUND | NOT_FOUND | INCONCLUSIVE`. Public Phase 7 status adds `CORRUPT` and
+`UNAVAILABLE`. Terminal reasons are `SUPPORTED_TRANSITION`,
+`COMPLETE_PRESENT_GRID`, `BASELINE_ONLY_LOWER_BOUND`, `VISUAL_INDETERMINATE`,
+and `INCOMPLETE_VISUAL_EVIDENCE`. Operational reasons never create a terminal
+result.
+
+### Resource and deadline accounting
+
+The exact whole-invocation deadline is `2,520` monotonic seconds from preflight:
+
+```text
+640  = 600-second replay + existing 40-second startup/finalization margin
+20   = one strict ffprobe/media inspection
+1320 = 11 local decoder passes × 120 seconds
+320  = at most 32 B4 classifications × 10 seconds
+10   = terminal interpretation
+10   = atomic publication
+20   = strict readback and source reconstruction
+120  = optional Phase 8 source-clip operation
+60   = non-consumable cleanup/finalization reserve
+----
+2520 seconds
+```
+
+MP4 is limited to `4,294,967,296` bytes, investigation-owned memory to
+`2,147,483,648` bytes, simultaneously retained RGB24 frames to `12`, targets per
+decoder pass to `32`, decoder passes to `11`, and unique classifications to
+`32`. The classifier has a 10-second per-call ceiling and a 320-second total
+budget. These are ceilings, not allocations that must be consumed.
+
+For every blocking operation, define
+`remaining_invocation_time = max(0, deadline - monotonic_now - 60)` and pass
+`min(operation_ceiling, remaining_invocation_time)`. If the result is not
+positive, the operation does not start and the run fails
+`invocation_deadline_exhausted`. Decoder/classifier work does not start unless
+the remaining usable budget also leaves the fixed 40 seconds required for
+terminal interpretation, publication, and readback. Optional Phase 8 work
+starts only after schema-7 readback and only when its full 120-second ceiling
+remains; otherwise Phase 7 returns success with Phase 8 `RETRYABLE`.
+
+Ctrl+C revokes the active operation first, then publishes `INTERRUPTED` while
+the lock is owned. Deadline beats the active operation timeout. Late subprocess
+or classifier results lose publication authority. The final 60 seconds are
+reserved exclusively for child termination, safe staging removal, manifest
+failure/interruption publication when still legal, media ownership transfer,
+and lock release. A restart-only Phase 8 retry command has its own exact
+180-second deadline: 120 seconds for clip work plus 60 seconds cleanup.
+
+### Immutable Phase 7 and separate Phase 8 repository
+
+Schema 7 contains no Phase 8 field, directory, media status, clip, or request.
+Public status is a read-only join of immutable schema 7 and the separate Phase
+8 repository. Phase 8 manifest states are `RETRYABLE | CLIP_READY | READY |
+DELETING | DELETED`; public states are `NOT_REQUESTED | RETRYABLE | READY |
+MEDIA_MISSING | MEDIA_CORRUPT | DELETING | DELETED`. None changes the Phase 7
+terminal kind.
+Public `MEDIA_MISSING` carries `phase8_media_unavailable`, `MEDIA_CORRUPT`
+carries `phase8_media_corrupt`, and clip execution/validation retry carries
+`phase8_clip_failed`; other retry causes retain their canonical publication or
+readback reason.
+
+For `FOUND` only, the same executor may, after strict schema-7 readback, create
+`R/.phase8/<investigation_id>/<run_id>/`. It continues to hold the same
+per-investigation OS lock. A restart command reacquires that lock, strictly
+reopens schema 7, requires `FOUND`, and resolves the common MP4 only through the
+schema-7 `common_session_id` at `.media`. `NOT_FOUND`, `INCONCLUSIVE`, corrupt,
+or foreign terminal state is refused. No retry opens the NVR or creates a new
+search run.
+
+The source interval is
+`[max(session_start, lower-10s), min(session_end, upper+30s))`. Since a valid
+FOUND interval is nonzero and at most one second, the unclipped maximum is
+`10 + 1 + 30 = 41` seconds. Session clipping may shorten it but never expand
+it. Stream copy is accepted only if strict output probing shows exactly one
+video stream, no audio, the same codec parameters, first/last presentation
+times inside the requested half-open interval, duration no more than the
+requested duration plus one source frame, size at most `536,870,912` bytes, and
+no unexpected metadata. Otherwise the copy is discarded before publication.
+
+Fallback re-encoding uses the selected stream's positive reduced ffprobe
+`avg_frame_rate`, which must be at most `60/1`. CFR input remains CFR. VFR input
+preserves presentation timestamps without duplication (`fps_mode=passthrough`)
+and records the source average rate only for the one-frame tolerance
+`denominator/numerator` seconds. Output is one H.264 `libx264` High Profile
+Level 4.1 video stream, `yuv420p`, preset `medium`, CRF `23`, no audio, no
+chapters or copied metadata, MP4 with `+faststart`. Strict output probe verifies
+codec/profile/level/pixel format, stream count, absence of audio, bounds,
+duration tolerance, frame-rate ceiling, and size. The clip ID binds those
+settings through `media_generation_policy_id`, not through encoded bytes.
+
+The source-clip ID is semantic. Its exact payload is the displayed golden
+vector: schema/domain version, investigation/run/terminal result, common
+session, media-generation policy, requested and clipped intervals, and selected
+input stream. It deliberately excludes output bytes and the downstream Phase 8
+request ID, which would create a cycle. `source-clip.json` stores that immutable
+payload and ID. Actual output integrity is a separate closed `clip_integrity`
+object: lowercase SHA-256, byte length, observed duration/time base, stream
+index, codec/profile/level/pixel format/dimensions/frame rate, audio stream
+count, and `STREAM_COPY|REENCODED`. The handoff request and Phase 8 manifest bind
+both the semantic clip ID and that exact integrity object. Thus independently
+valid encoder outputs may have different digests without having different
+semantic requests.
+
+The Phase 8 root is exactly
+`R/.phase8/<investigation_id>/<run_id>/`. Its only directory names are
+`manifests/` and `clips/`; its only root JSON names are `manifest.json`,
+`source-clip.json`, and `phase8-request.json`. A clip name is exactly
+`clips/<clip_integrity.sha256>.mp4`. Archived predecessor manifests are exactly
+`manifests/<phase8_manifest_id>.json`. No other file, nested directory, suffix,
+case variant, symlink, junction, reparse point, foreign owner, or unindexed
+entry is permitted. Transition staging is exactly
+`R/.phase8-staging/<investigation_id>/<run_id>/<invocation_id>/`; an invocation
+journal binds its final root, proposed predecessor, and complete membership.
+It may exist only while that invocation holds the OS lock or until the next
+lock-owning inspector removes that exact abandoned staging tree. Published
+membership never includes the journal or staging names.
+
+Every state uses `manifest.json`, schema version `1`, its literal `state`, and
+the exact keys below. Optional keys are none. Keys described as nullable are
+required and explicitly null when the stated condition applies. Any key listed
+for another state is forbidden.
+
+| State | Exact required payload keys and null rules | Exact published membership | Predecessor → successors; publication/reopen/duplicate rule |
+| --- | --- | --- | --- |
+| `RETRYABLE` | `schema_version,state,investigation_id,run_id,terminal_result_id,common_session_id,previous_phase8_manifest_id,source_clip_id,clip_integrity,phase8_request_id,failure_reason`; the three clip/request fields are all null for initial clip failure, or retain the prior values after READY/CLIP_READY media failure | current manifest; all predecessor archives; `source-clip.json`, request, and indexed clip only when their retained IDs are non-null (missing/corrupt retained media is allowed solely to project the safe retry reason) | none/`READY`/`CLIP_READY` → `CLIP_READY`; `READY`/`CLIP_READY` → `RETRYABLE`; atomic manifest replacement last; identical retry reuses, different semantic input conflicts |
+| `CLIP_READY` | `schema_version,state,investigation_id,run_id,terminal_result_id,common_session_id,previous_phase8_manifest_id,source_clip_id,clip_integrity`; all non-null except nullable predecessor | current manifest, predecessor archives, `source-clip.json`, exactly one indexed clip; no request | none/`RETRYABLE`/`READY` → `READY`, `RETRYABLE`, or `DELETING`; clip record and bytes strictly reopen before manifest replacement; identical valid bytes reuse |
+| `READY` | CLIP_READY keys plus non-null `phase8_request_id` | current manifest, predecessor archives, source clip JSON, exactly one indexed clip, `phase8-request.json` | `CLIP_READY` → `RETRYABLE` or `DELETING`; request strictly reopens before manifest replacement; identical package reuses |
+| `DELETING` | READY keys plus `common_media_tombstone_name` and `source_clip_tombstone_name`; request ID may be null only when predecessor is CLIP_READY | current manifest, predecessor archives, both JSON records when previously present, and for each indexed binary zero or one of its live name or exact same-directory tombstone; both at once are corrupt, while neither means that indexed deletion step already completed | `READY`/`CLIP_READY` → `DELETED`; publish manifest before renames; strict reopen examines only the two bound live/tombstone names and continues any remaining step; identical retry continues |
+| `DELETED` | DELETING keys plus `deletion_result=DELETED` | current manifest, all predecessor archives, immutable source-clip/request JSON when previously present; no MP4 and no tombstone | `DELETING` → none; publish only after both tombstones are durably absent; identical retry is read-only success |
+
+The five state families share one domain but have state-specific closed
+allowlists. The golden-vector inventory includes independently reproducible
+RETRYABLE (initial and post-READY), CLIP_READY, READY, DELETING, and DELETED
+payloads. `previous_phase8_manifest_id` binds every noninitial transition.
+Failure reasons are closed; retry timestamps, attempt wall times, native stderr,
+and paths are incidental envelope data and cannot change a stable retry ID.
+
+Publication always writes/fsyncs children in invocation staging, strictly reads
+them there, archives the strictly reopened predecessor without overwrite,
+moves only allowlisted children to deterministic final names, fsyncs the parent,
+and atomically replaces `manifest.json` last. Before replacement, the old state
+remains authoritative and abandoned staging is removable by its journal. After
+replacement, the successor is authoritative and strict reopen completes only
+successor-owned cleanup. A pending final child moved before replacement is
+recognized only through that same locked journal; after a crash it is removed
+before strict membership validation, never adopted by scanning.
+Interruption before replacement therefore reopens the predecessor; interruption
+after replacement reopens the successor. Neither case synthesizes a state or
+adopts an unindexed child.
+
+Retry first validates an existing indexed clip. If valid, it reuses the exact
+bytes and digest and never invokes FFmpeg. Missing/corrupt bytes publish or
+retain RETRYABLE with `phase8_media_unavailable` or `phase8_media_corrupt`.
+Explicit repair under the Phase 8 lock may generate a new candidate for the
+same semantic source-clip ID. It strictly validates the new bytes, removes an
+old corrupt clip only through the current manifest and journal, publishes the
+new digest-derived clip name, integrity object, and CLIP_READY successor, and
+never labels byte difference alone a conflict. A crash before replacement
+leaves RETRYABLE plus removable owned staging; after replacement it leaves the
+new CLIP_READY package. A valid committed clip is immutable and is never
+rewritten. A different terminal/session/interval/stream/media-policy semantic
+payload is `publication_conflict`.
+
+Clip failure leaves schema 7 and the common MP4 unchanged. Handoff failure
+retains CLIP_READY media and may publish RETRYABLE with the retained clip facts.
+No retry reopens the NVR. Missing or corrupt indexed media projects the safe
+public state and never becomes Phase 7 evidence.
+
+The explicit retention command is:
+
+```text
+vigi-vision delete-recording-search-media --investigation-id <ID> --run-id <RUN_ID> --yes
+```
+
+It validates confined IDs, acquires the per-investigation OS lock, strictly
+reopens immutable schema 7 and the Phase 8 package, requires `FOUND` and a
+strictly readable `READY` or `CLIP_READY` package, and permits deletion only of
+the exact `.media` common MP4 and indexed digest-named Phase 8 clip. It never
+deletes schema 7, request JSON, manifest JSON, unrelated files, directories with
+unknown entries, or foreign/corrupt paths. It atomically renames each media file
+to the exact same-directory tombstone bound by DELETING only after it has
+published and strictly reopened that successor with the prior manifest and two
+media identities. It
+then renames, fsyncs, unlinks without following indirection, and publishes
+`DELETED`. A crash therefore leaves `DELETING`; an identical invocation may
+reopen that state and resumes only its indexed files/tombstones. Repeating a
+completed deletion returns success without mutation. Missing unindexed media,
+corruption, missing `--yes`, active execution, or an initial state other than
+strict `READY`/`CLIP_READY` refuses deletion.
+
+| Command result | Exit |
+| --- | --- |
+| success, identical reuse, already deleted | `0` |
+| invalid arguments or missing `--yes` | `2` |
+| already running or publication conflict | `3` |
+| operational failure, deadline, or interruption | `4` (`130` for Ctrl+C) |
+| corrupt persistence/readback | `5` |
+| Phase 8 media missing/corrupt/clip failure | `6` |
+
+### CLI, API, and public projection
+
+Production commands are exactly:
+
+```text
+vigi-vision search-recordings --investigation-id <ID> --end <TIME> --timezone <IANA_ZONE> [--create-phase8-handoff]
+vigi-vision recording-search-status --investigation-id <ID> --run-id <RUN_ID>
+vigi-vision create-phase8-handoff --investigation-id <ID> --run-id <RUN_ID>
+vigi-vision delete-recording-search-media --investigation-id <ID> --run-id <RUN_ID> --yes
+```
+
+The Phase 6 confirmed anchor is `S`; `--end` is interpreted through the existing
+input boundary and persisted canonically as `E`. Output contains IDs, requested
+interval, Phase 7 status/reason, Phase 8 status/reason, and limitations only. It
+never exposes paths, hostnames, credentials, URLs, commands, stderr, claims,
+staging, or exception text.
+
+`POST /api/v1/recording-searches` retains its strict existing request shape:
+`investigation_id`, `search_end_time_text`, and `source_timezone`, with unknown
+fields rejected. Malformed JSON is HTTP 400 `invalid_request`; structural or
+domain validation is HTTP 422 `invalid_recording_search_request`; every valid
+request is HTTP 503 `recording_search_execution_requires_cli` with zero service
+start, directory, manifest, media, lock, handle, or background side effect.
+`GET /api/v1/recording-searches/{investigation_id}/{run_id}` is read-only and
+projects strict schema 1–4 legacy status or schema 5–7 Phase 7 status joined
+with the separate Phase 8 status.
+
+### Implementation slices and acceptance
+
+| Slice | Exact ownership |
+| --- | --- |
+| 7E-1A | All request-relative models, closed enums, search/classifier/media policies, 26 identity families and golden vectors, schema dispatch, exact schema-5/6 state matrices, and pure validators. No persistence, NVR, classifier, or CLI. |
+| 7E-1B | Schema-5 pre-acquisition publication, schema-5→6 zero-evidence transition, incremental schema-6 manifests/children, strict reopen, staging and interruption handling. No NVR acquisition. |
+| 7E-1C | One replay/remux, `.media` ownership, ffprobe, common session, sparse/adaptive local decoding, the Phase 7E same-session selector (including logical-E strict-before mapping and duplicate/alias rejection), RGB24, persisted-frame A2/B4 adapters, and deadline propagation. |
+| 7E-1D | The new Phase 7E C1 planner/composition adapter (`S` inclusion, logical `E`, backward final support, no clamp), C2/D1/D2 composition, complete source reconstruction, schema-7 atomic publication/reopen, and Phase 7 public status. It does not modify legacy C1/schemas 1–4 and performs no Phase 8 mutation. |
+| 7E-2 | Synchronous CLI, POST 503, cleanup reserve, separate Phase 8 clip/request/retry repository, status join, and deletion command. |
+| 7E-3 | Bounded real-NVR acceptance and local fault injection only after 1A–2 approval. |
+
+Dependency order is 1A → 1B → 1C → 1D → 2 → 3. Persistence precedes
+acquisition; media and B4 adapters cannot precede the zero-evidence schema-6
+contract; terminal publication cannot precede source reconstruction; Phase 8
+cannot precede immutable schema-7 readback.
+## Implemented schemas 1–4 contract and reusable boundaries
+
+Everything from this heading through the legacy Phase 8 handoff section records
+the implemented `AUTHORITATIVE_SOURCE_UTC` schemas 1–4 family. It remains
+normative for strict reopen of those records and for named service boundaries
+that Phase 7E reuses, but it is historical/non-normative for schemas 5–7. In
+particular, its 24-hour maximum, appended-`E` decoding, forward support window,
+normalized-decoded-UTC identity, schema-1→4 persistence, and schema-4 handoff
+must not be implemented in the request-relative family. Schemas 5–7 use only
+the Phase 7E lifecycle, 600-second ceiling, logical end-boundary selection,
+backward-safe final support, identity catalog, and separate Phase 8 repository
+above.
 
 The implementation composes existing services instead of copying them:
 
@@ -252,6 +1280,11 @@ and service result make duplicate starts deterministic across tabs or two local
 users.
 
 ### Phase 7A-1 HTTP boundary
+
+This records the implemented pre-7E lifecycle boundary. Phase 7E-2 must retain
+GET but replace valid POST start with the fail-closed HTTP 503 contract above;
+after that change, the HTTP 201 behavior below is historical schemas 1-4 context
+and not an authorized production execution path.
 
 The existing local FastAPI application exposes only the lifecycle boundary in this
 slice:
@@ -2645,6 +3678,10 @@ cannot be upgraded. Merely reading any version performs no migration.
 
 ### Public status projection
 
+This subsection defines the implemented schemas 1–4 projection. New schemas
+5–7 use the Phase 7 status and separate Phase 8 status defined in the normative
+Phase 7E section; neither projection is inferred from the other.
+
 No new HTTP route is required. The existing status route keeps all currently
 returned common lifecycle, confirmation, policy, and A2 index fields for
 schemas 1-3. Schema 4 projects those same compatible fields plus only:
@@ -2674,6 +3711,10 @@ result. Schemas 1-3 have no `result` and project
 administrative state.
 
 ### Phase 8 handoff request
+
+This subsection defines the implemented schema-4 `Phase8HandoffRequestV1`.
+Schema-7 FOUND uses the separately domain-separated request-relative handoff in
+the normative Phase 7E section; the two forms are not interchangeable.
 
 Only a strictly reopened schema-4 `FOUND` result is eligible. After the V4 commit,
 Phase 7 may create one separate immutable `phase8-request.json` containing a
@@ -2826,8 +3867,10 @@ Acceptance tests must cover:
 
 ## Phase 8 handoff
 
-After the search manifest is durably `FOUND`, Phase 7 may create the separate
-compact `phase8-request.json` defined by the D2 contract above. It contains:
+This section records only the implemented schema-4 D2 handoff. It is
+historical/non-normative for schemas 5–7; schema-7 FOUND uses only the separate
+Phase 8 repository, source-clip, request, retry, status, and deletion contract
+in the normative Phase 7E section above. The schema-4 request contains:
 
 ```text
 search_run_id
@@ -2843,9 +3886,10 @@ nominal_review_end_utc: anchor plus 30 seconds, clipped to the search window
 timing_precision_statuses and warnings
 ```
 
-Phase 8 revalidates the Phase 6/7 facts, resolves recording coverage, and creates
-review images and video. Phase 7 does not promise contiguous review coverage
-and does not extract or persist Phase 8 media.
+Future Phase 8 processing revalidates the schema-4 Phase 6/7 facts, resolves
+recording coverage, and creates review images and video. This legacy request
+does not promise contiguous review coverage and does not authorize schema-7
+storage or media behavior.
 
 A handoff write failure creates no request and leaves the immutable schema-4
 `FOUND` manifest unchanged. Status derives `PENDING` from that result until a
@@ -3059,21 +4103,22 @@ classification, filesystem write, manifest mutation, or schema change. Phase
 - **Exclude:** Phase 8 media, user judgment, automatic restart/resume, new
   transport, parallel repositories, and any identity/ownership/theft claim.
 
-### Phase 7E: real NVR validation
+### Phase 7E: request-relative production and real-NVR acceptance
 
-- **Inputs:** representative local clearly-present, clearly-absent, occluded,
-  lighting-change, viewpoint/image-quality-degraded, gap, and decode-failure
-  frames/recordings processed by the production classifier and complete search.
-- **Outputs:** credential-free measurements, limitations, safe outcomes, and a
-  policy-readiness decision.
-- **Files:** existing validation documentation or ignored local evidence only.
-- **Exclude:** weakened safety, footage upload, Phase 8/9, SDK changes.
-- **Tests:** automated gates, then bounded NVR runs covering all input classes,
-  cleanup, timing, geometry, latency, memory, and safe failures.
-- **Complete/document:** representative evidence supports or rejects the policy
-  and a normal run succeeds after controlled failure. Threshold tuning creates
-  a new documented policy version and never weakens the rule that uncertainty or
-  infrastructure failure cannot become `ABSENT`.
+Phase 7E is split into the ordered 7E-1A, 7E-1B, 7E-1C, 7E-1D, 7E-2, and
+7E-3 gates defined in the normative Phase 7E section above. 7E-3 may
+start only after the
+request-relative decoder/persistence path and synchronous CLI have passed their
+reviews. Its bounded matrix must exercise the 300- and 600-second windows, one
+segment and touching-segment rejection, end-boundary selection, same-session
+PRESENT→supported-ABSENT, baseline-only lower bound, complete-grid NOT_FOUND,
+gaps/resets/duplicates, every blocking-operation timeout, interruption/crash,
+schema-7 immutability, Phase 8 clip/retry/deletion, disabled POST, legacy reopen,
+and mixed-family rejection. Each case records public outcome, strict persisted
+evidence, cleanup, and a binary pass rule. A normal run must succeed after each
+controlled failure. Threshold tuning creates a named policy successor and never
+weakens the rule that uncertainty or infrastructure failure cannot become
+`ABSENT`.
 
 ## Deferred resilience reference
 

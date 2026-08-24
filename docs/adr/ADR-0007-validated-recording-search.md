@@ -2,10 +2,13 @@
 
 ## Status
 
-Accepted as the implementation decision for the Phase 7 MVP. Phase 7D-2's
-terminal schema, publication, strict reopen/status, and FOUND-only Phase 8
-request handoff are implemented. Phase 7E validation and Phase 8 media remain
-future work.
+Accepted for Phase 7D and amended by the Phase 7E request-relative normative
+contract. Phase 7D-2's strict physical-origin schema 1–4 family remains
+implemented, immutable, and readable. The Phase 7E feasibility investigations
+prove that production VIGI replay cannot supply authoritative frame UTC but can
+sustain one common replay/decode session for the bounded MVP. The schema 5–7
+runtime, terminal real-NVR validation, separate Phase 8 projection repository,
+and Phase 8 review-media processing remain unimplemented.
 
 ## Context
 
@@ -24,9 +27,76 @@ resume, cross-process takeover, full crash recovery, and a large event-sourced
 manifest. That complexity was disproportionate to the current product need and
 made the core recording-search feature harder to implement and verify.
 
+The bounded Phase 7E-0A investigation established a second constraint. VIGI
+recording metadata provides segment coverage, but replay starts at request-
+relative NPT zero and RTP/remuxed MP4 timestamps are rebased independently for
+each request. The exposed SDK/RTSP/FFmpeg path has no absolute frame UTC,
+RTCP/NTP map, `Range: clock`, program-date-time, SDP clock reference, or other
+verified frame-to-epoch relationship. Therefore `requested replay start + local
+PTS` is not authoritative physical time, and the implemented schema 1-4
+physical-origin admission contract cannot execute against current production
+VIGI recordings.
+
+### Phase 7E request-relative amendment
+
+The current VIGI boundary exposes request-relative media timing but no verified
+frame-to-epoch mapping. New production runs therefore use
+`REQUEST_RELATIVE_ESTIMATE` schemas 5→6→7 with
+`UNKNOWN_UNBOUNDED` physical-origin bias. Schemas 1–4 retain their strict
+`AUTHORITATIVE_SOURCE_UTC` meaning and are never migrated, mixed, or used as a
+fallback parser.
+
+One synchronous CLI invocation owns one SDK segment, one replay/remux, one
+retained MP4, and one common decode session. The five-minute default and exact
+600-second maximum remain fixed. Baseline confirmation is historical only:
+`FOUND` requires a recording-session `PRESENT` lower observation plus
+same-session distinct `ABSENT` support. Operational failure cannot become
+visual `INCONCLUSIVE`.
+
+Schema 5 is the pre-acquisition RUNNING request/policy/plan binding and contains
+no stream, session, frame, or observation facts. After successful replay,
+ffprobe, media publication, and strict readback, one atomic transition creates
+schema 6 with a `CommonSession` and zero evidence. Schema 6 then admits
+target/decoder intent, an atomically persisted and reopened frame, B4
+classification, and an atomically persisted observation in that order. Legal
+intermediate frames without observations cannot prove presence or absence.
+Schema 7 atomically publishes the complete reconstructed terminal evidence and
+is immutable thereafter.
+
+The exact schema-5/6 state matrices distinguish requested, decoding, admitted
+frame, classifying, completed visual observation, operational failure, and
+interruption. Restart never resumes or promotes a partial record. The B4
+operation and observation bind an immutable classifier-policy identity and the
+complete typed comparison evidence; a mutable implementation label is not an
+identity.
+
+Session media is stored outside the run tree. Optional FOUND-only source clip,
+handoff, retry, status, and retention state are stored under a distinct Phase 8
+repository and never mutate schema 7. A clip or handoff failure leaves FOUND
+unchanged and retryable without reopening the NVR. The source-clip identity
+binds the semantic request and media policy; actual MP4 digest, length, and
+observed stream facts are separate integrity data. The routed design defines
+all five exact Phase 8 state memberships and transitions, repository paths,
+lock order, repair/reuse/deletion rules, closed failure mapping, 26 acyclic
+identity families, 59 vectors, a byte-complete JPEG/MP4 fixture, and the exact
+2,520-second invocation budget.
+
+Production execution remains synchronous and CLI-only. The existing execution
+POST validates its request and returns HTTP 503
+`recording_search_execution_requires_cli` with zero side effects. No worker,
+lease, takeover, resume, frontend, Phase 8 executor, or Phase 9 behavior is
+authorized. Implementation order is 7E-1A identities/models/matrices/validation,
+1B schema-5/6 persistence, 1C one-session media plus exact logical-target frame
+selection and A2/B4 adapters, 1D the Phase 7E-specific C1 planner adaptation
+plus terminal composition/schema 7, 2 CLI and separate Phase 8
+projection/retention, then 3
+bounded acceptance. The complete normative contract is
+[Phase 7 Object-Disappearance Recording Search MVP](../design/object-disappearance-recording-search.md).
+
 ## Decision
 
-Phase 7 adopts a single-host, single-active-run model:
+Phase 7 adopts a single-host, single-active-run model for both provenance
+families:
 
 1. Each attempt receives a unique `search_run_id` and its own artifact
    directory.
@@ -41,7 +111,14 @@ Phase 7 adopts a single-host, single-active-run model:
 7. Evidence from a prior failed or interrupted run is never silently merged
    into a new run.
 
-The search policy is deliberately small:
+The following search-policy description records the implemented strict
+schemas 1–4 path. For schemas 5–7, the Phase 7E request-relative amendment and
+routed normative design replace every physical-origin, normalized-decoded-UTC,
+canonical-frame, persistence, identity, status, and executor assumption while
+retaining the common baseline, classifier, coarse-to-binary, terminal-kind,
+locking, and safety rules.
+
+The legacy strict search policy is deliberately small:
 
 1. Require the Phase 6 schema 3 `ConfirmedInvestigationInput`, recompute and
    compare its persisted JPEG SHA-256 and byte size, fully decode dimensions,
@@ -320,7 +397,18 @@ and clean up on one local host.
 - Duplicate starts and refreshes have deterministic behavior.
 - A reboot cannot silently complete or resume a run.
 - Interrupted and failed evidence remains isolated and inspectable.
-- Search results remain requested-time intervals with explicit decoder limits.
+- Current VIGI search results are explicitly request-relative intervals with an
+  unknown/unbounded physical-origin bias; they are useful for bounded human
+  review but cannot establish an exact physical event time.
+- The conservative single-session support rule may withhold FOUND or NOT_FOUND
+  from static, aliased, gapped, or poorly aligned recordings. This is an
+  intentional false-absence safeguard.
+- Schemas 5-7 and v2 identities add implementation work, but prevent old strict
+  evidence from being silently reinterpreted or colliding with weaker
+  provenance.
+- Disabling POST breaks the earlier start-over-HTTP behavior intentionally so a
+  durable RUNNING run cannot be created without an executor capable of owning
+  it to completion.
 - A handoff failure cannot retroactively change valid Phase 7 evidence.
 - The selected conservative classifier and numeric policy still require
   representative real-NVR validation before deployment; tuning creates a new

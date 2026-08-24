@@ -19,9 +19,14 @@ publication and strict readback; D2-4 adds strict terminal reopen/status
 projection; D2-5 adds the strict FOUND-only Phase 8 request handoff and durable
 request persistence. The terminal path reloads post-D1 schema-3 evidence under
 the mutation boundary and independently reconstructs persisted FOUND facts on
-reopen. Phase 7E real-NVR policy validation remains unimplemented.
-Phase 8 clip processing and Phase 9 remain unimplemented. Phase 7C-1 and 7C-2 together are not
-a completed disappearance-search workflow.**
+reopen. Phase 7E feasibility work proves that current VIGI replay timestamps
+are request-relative and cannot supply authoritative physical frame UTC. The
+single normative Phase 7E contract uses one replay/decode session, one SDK
+segment, a five-minute default, a hard 600-second search maximum, an exact
+2,520-second invocation ceiling, schemas 5→6→7, and a separate FOUND-only Phase
+8 projection repository. Runtime implementation, terminal search, Phase 8
+review-media processing, and Phase 9 remain unimplemented; schemas 1–4 retain
+their original strict meaning.**
 
 This document defines the first bounded use case for VIGI Vision's longer-term
 Event Discovery direction: a user investigates one selected object on one NVR
@@ -112,9 +117,9 @@ object-presence or disappearance classification.
 
 The repository does **not** currently provide:
 
-- terminal recording-search persistence or public result projection;
+- the schema 5-7 request-relative production path or synchronous search CLI;
 - Phase 8 boundary images, evidence timeline, or review clip; or
-- an operator transport or review surface for recording-search results.
+- a Phase 9 operator review surface for recording-search results.
 
 Phase 7B now provides a bounded single-probe classifier, deterministic outcomes,
 schema-3 observation publication, and strict reopening. Those outcomes describe
@@ -169,9 +174,12 @@ outcomes and must not be inferred from an `ABSENT` result.
   reference frame that contains the selected object.
 - **Original location:** the ROI's spatial position in the source frame; it is
   not a claim that the object remains stationary outside the observed evidence.
-- **Observation:** one time-stamped evaluation of the original location.
-- **Change interval:** the interval between the last confirmed `PRESENT`
-  observation and the first confirmed `ABSENT` observation.
+- **Observation:** one evaluation of the original location. Current VIGI
+  production binds it to a requested target and a request-relative decoder
+  estimate, not an authoritative physical UTC.
+- **Requested-time change interval:** the requested-time interval between the
+  last supported `PRESENT` bound and the first supported `ABSENT` group. It is
+  not an exact disappearance instant or physical-time confidence interval.
 - **Review clip:** intended footage spanning 10 seconds before through 30
   seconds after the candidate change.
 
@@ -186,6 +194,7 @@ validated channel and times
   -> Phase 7A-2 recording acquisition
   -> Phase 7B single-probe observations
   -> Phase 7C/7D candidate interval
+  -> Phase 7E durable source clip and handoff
   -> Phase 8 review images and video
   -> Phase 9 user decision
 ```
@@ -198,19 +207,32 @@ than embedding comparison or event logic into those boundaries.
 
 [Phase 7 Object-Disappearance Recording Search MVP](object-disappearance-recording-search.md)
 defines the current single-site policy. It samples chronologically from the
-confirmed requested time to the user-supplied search end at a five-minute coarse
-interval, always includes the search end, and looks for the first supported
-`PRESENT -> confirmed ABSENT` bracket. It then uses deterministic whole-second
-binary midpoints until the bracket is one second wide.
+confirmed requested time at a five-minute coarse interval and includes one
+logical end-boundary target. That target selects only the greatest eligible
+same-session decoded frame strictly before the half-open end; other targets use
+nearest-frame selection with earlier-tie preference. A supported
+`PRESENT -> confirmed ABSENT` bracket then narrows at deterministic whole-second
+midpoints until it is one second wide.
 
-A single `ABSENT` frame never proves disappearance. The absence rule requests
-the configured target cadence (one second by default) but requires those targets
-to resolve to the configured number of distinct canonical frames (three by
-default) in strictly increasing normalized decoded UTC order;
-multiple
-targets that decode the same frame count once. `INDETERMINATE`, a
-recording gap, or contradictory ordering stops narrowing safely. The MVP does
-not introduce adaptive grids, leases, fencing, automatic takeover, or resume.
+The complete half-open search interval must be no longer than 600 seconds and
+must fit entirely inside one indexed SDK recording segment. The complete coarse
+grid, all binary revalidation, support frames, terminal evidence, and the Phase
+7E source clip belong to one immutable common replay/decode session. A request
+that crosses a segment boundary, has ambiguous/touching coverage, or exceeds
+600 seconds fails before visual interpretation; independent sessions cannot be
+combined to establish a transition.
+
+A single `ABSENT` frame never proves disappearance. For current VIGI production,
+the absence rule acquires the policy count (three by default) at the requested
+cadence (one second by default) from one wider replay and one continuous decode
+session. Requested target, local PTS, normalized offset, decode ordinal, and
+request-relative estimate must increase strictly; frame/observation identities
+and canonical decoded RGB24 digests must be distinct. An alias, repeated
+content, session change,
+gap, incomplete support, or operational failure supplies no absence evidence.
+Overlapping independent requests are never treated as physical-frame identity.
+`INDETERMINATE` is visual only. The MVP does not introduce adaptive grids,
+leases, fencing, automatic takeover, or resume.
 
 ## Presence-state model
 
@@ -242,13 +264,15 @@ reaches a closed quality, comparability, or policy-gap outcome may be
 ## Intended artifacts and evidence
 
 The intended user-facing result is one closed `FOUND`, `NOT_FOUND`, or
-`INCONCLUSIVE` result. `FOUND` contains the last supported-present and first
-confirmed-absent requested-time interval and is the only kind eligible for a
-Phase 8 handoff request. `NOT_FOUND` means only that the complete configured
-distinct coarse grid remained `PRESENT`; `INCONCLUSIVE` preserves a validated
-visual limitation or contradiction. All kinds expose explicit limitations and
-keep Phase 9 human review authoritative. Operational failure is not a visual
-result.
+`INCONCLUSIVE` result. Under request-relative provenance, `FOUND` contains the
+last supported-present and first supported-absent requested-time bounds, labels
+physical-origin error as unknown/unbounded, and is the only kind eligible for a
+Phase 8 handoff request. It never claims an exact physical event time.
+`NOT_FOUND` means only that the complete configured, nonduplicated requested
+coarse grid remained `PRESENT`; it is not continuous-presence proof.
+`INCONCLUSIVE` preserves a validated visual limitation or contradiction. All
+kinds expose limitations and keep Phase 9 human review authoritative.
+Operational failure is not a visual result.
 
 Phase 7A-1 now defines and implements one run ID and directory, a compact
 lifecycle manifest, strict baseline validation, duplicate/interruption handling,
@@ -270,11 +294,12 @@ replay extraction failure, frame retrieval failure, invalid ROI/source-frame
 mapping, and insufficient or indeterminate visual evidence. A failure or
 uncertain observation must not be rendered as a confirmed disappearance.
 
-If a candidate interval cannot be supported, the result should remain
-review-required or incomplete with a safe category. It must not fabricate a
-time, location, cause, identity, or confidence level. Cleanup rules for future
-temporary clips and frames must remove only invocation-owned temporary files
-and preserve no authenticated paths in diagnostics.
+If a requested-time interval cannot be supported, the run is visual
+`INCONCLUSIVE` only for a validated visual limitation; otherwise it is an
+administrative safe failure or interruption. It must not fabricate a time,
+location, cause, identity, confidence level, or physical error bound. Cleanup
+rules remove only invocation-owned temporary files and preserve no authenticated
+paths in diagnostics.
 
 ## Privacy and safety boundaries
 
@@ -297,26 +322,42 @@ rejected. If a process exits, the next inspection marks its nonterminal run
 `INTERRUPTED`; no process automatically resumes or takes it over, and an
 explicit new attempt uses a new ID without adopting old evidence.
 
-The runtime then adds the schema 3 integrity gate, truthful recording-probe
-provenance, and the bounded continuous multi-target acquisition contract. That
-acquisition slice writes one request record per requested target and one
-canonical frame record per distinct authoritative decoded source frame. Phase
-7B adds bounded single-probe classification and immutable schema-3 observations;
-Phase 7C-1 adds chronological coarse target execution and Phase 7C-2 adds the
-non-persistent transition interpretation handoff. Phase 7D-1 now adds
-deterministic non-terminal binary narrowing and a typed in-memory bracket;
-Phase 7D-2 D2-2 now adds pure terminal interpretation and in-memory result
-identity construction; D2-3 now adds strict schema-4 `FOUND`, `NOT_FOUND`, or
-`INCONCLUSIVE` persistence, D2-4 adds strict reopen/status projection, and D2-5
-adds a separate durable Phase 8 request for `FOUND` only. Existing
-single-target callers remain unchanged. Requested time never substitutes for
-stable authoritative decoded-frame provenance. Phase 7A-2
-now provides the decoder-boundary source-time capability that retains the
-physical replay origin, raw source/container PTS, positive source time base,
-replay-local PTS/time base, and attempt-local ordinal; the current Phase 7A-1
-direct decoder remains unchanged and does not provide those absolute source-time
-facts. Missing or irreproducible mapping fails as `missing_provenance` before
-publication. A public transport or new frontend is not part of Phase 7.
+The implemented schemas 1-4 retain the original strict physical-origin
+contract, classification, coarse interpretation, narrowing, terminal result,
+  and FOUND-only Phase 8 request. Phase 7E feasibility work proved that the current VIGI
+SDK/RTSP/FFmpeg boundary cannot provide the required physical frame UTC, so new
+production runs must not enter or reinterpret that family.
+
+The Phase 7E successor begins with pre-acquisition
+`REQUEST_RELATIVE_ESTIMATE` schema 5, atomically creates zero-evidence schema 6
+after common-session media admission, incrementally persists/reopens frames
+before B4 observations, and atomically publishes immutable schema 7. Its decoder derives an estimate only from
+replay requested start plus normalized session-local offset, with exact rational
+conversion and unknown/unbounded physical-origin bias. A new domain-separated
+identity family binds request/session provenance without claiming cross-window
+physical-frame identity. The single-session support rule, strict distinctness,
+complete-grid NOT_FOUND rule, and operational-versus-visual separation fail
+closed when that evidence is insufficient.
+
+The normative schema-5/6 matrices never resume partial work. Phase 7E binds the
+full B4 classifier policy and typed evidence rather than a mutable label. Its
+26-family identity graph and inline binary JPEG/MP4 fixture prove strict reopen.
+Phase 8 uses exact closed state memberships and separates semantic source-clip
+identity from encoded-byte integrity.
+
+The Phase 6 baseline remains a historical `PRESENT` authorization and may seed
+planning, but it is not recording-session evidence. A baseline plus a first
+recording `ABSENT` cannot establish automatic `FOUND`; at least one recording
+`PRESENT` and the same-session policy-count `ABSENT` support are required.
+Otherwise the public outcome is non-FOUND `INCONCLUSIVE` with
+`BASELINE_ONLY_LOWER_BOUND` and human review is required.
+
+Execution will be one synchronous local `search-recordings` CLI invocation that
+retains the existing process-owned handle through terminalization. The existing
+GET status stays read-only; the existing POST will return a fixed HTTP 503 and
+create no run until a separately designed HTTP executor exists. No Phase 7
+frontend, background worker, lease, takeover, or resume behavior is part of the
+approved direction.
 
 The selected comparator uses the existing verified EfficientSAM-Ti point-mask
 path plus aligned source-ROI mask IoU and mean-centered luma correlation. Its
@@ -332,7 +373,7 @@ version after Phase 7E evidence.
 2. **Phase 6 (schema 2 and schema 3 compatibility implemented):** strict
    immutable confirmation publication, explicit legacy reconfirmation, and
    digest-bound typed Phase 7 loading.
-3. **Phase 7 (A-1, A-2, 7B, 7C-1, 7C-2, and 7D-1 implemented):** single-host run lifecycle,
+3. **Phase 7 (A-1 through 7D implemented; 7E design pending final approval):** single-host run lifecycle,
    interruption/new-run isolation, truthful baseline provenance, and
    acquisition-only request/frame records with canonical frame identities,
    run-relative JPEG publication, strict acquisition indexes, bounded
@@ -344,10 +385,20 @@ version after Phase 7E evidence.
    D2-2 now provides pure terminal interpretation and identity construction;
   D2-3 now provides atomic terminal persistence and strict readback, D2-4
   provides strict reopen/status projection, and D2-5 provides the durable
-  FOUND-only Phase 8 handoff request. FOUND terminalization persists a
+  FOUND-only Phase 8 handoff request. Phase 7E keeps its immutable schema-7
+  result separate from the FOUND-only Phase 8 source-clip/handoff repository;
+  Phase 8 owns later review-media processing. FOUND terminalization persists a
   validated lossless D1 reconstruction envelope and never downgrades schema 4
-  after its commit point. Phase 7E
-   real-NVR policy validation remains pending.
+  after its commit point. The Phase 7E contract preserves one common session,
+  one segment, a 600-second search ceiling, and a 2,520-second invocation
+  ceiling. Ordered 7E-1A/1B/1C/1D, 7E-2, and 7E-3 implementation/validation
+  remain pending. Slice ownership is: 1A identities/models/validation; 1B
+  pre-acquisition schema 5 and incremental schema 6; 1C retained MP4,
+  exact logical-target frame selection, RGB24, and A2/B4; 1D the Phase
+  7E-specific C1 adapter (`S`, logical `E`, backward final support), source
+  reconstruction, and immutable schema 7; 2 synchronous CLI and separate
+  Phase 8 projection/retention; 3
+  bounded real-NVR acceptance and fault injection.
 4. **Phase 8 (future):** boundary images, evidence timeline, and review video.
 5. **Phase 9 (future):** user-facing review and final human decision.
 6. **Later work:** object relocation, automatic detection, broader event types,
@@ -378,8 +429,10 @@ new policy version.
 
 ## Known risks and open questions
 
-- How accurately can future reference-frame and review-clip extraction map a
-  requested source time to decoded media on the target NVR?
+- Current VIGI replay provides no measured physical-origin accuracy. Validation
+  may measure target-selection distance and operational consistency, but must
+  retain `UNKNOWN_UNBOUNDED` physical-origin bias unless a new authoritative
+  transport capability is independently proven.
 - What sampling cadence and maximum search duration are operationally reliable?
 - How should ROI coordinates behave when future extraction outputs vary in
   resolution, rotation, or aspect ratio?

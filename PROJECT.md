@@ -191,8 +191,9 @@ resume, and crash-recovery analysis is preserved as non-normative future
 reference. Phase 7A-1 now implements the validated local run lifecycle,
 strict baseline gate, isolated artifact repository, duplicate/interruption
 handling, and safe start/status HTTP routes. Phase 7A-2 now implements
-acquisition-only schema-2 request/frame persistence, authoritative provenance,
-and strict reopen validation. Phase 7B now has a concrete normative design.
+acquisition-only schema-2 request/frame persistence, the strict physical-origin
+provenance contract, and strict reopen validation. Phase 7B now has a concrete
+normative design.
 Phase 7B-1 implements its pure immutable classification foundation. Phase
 7B-2 implements the strict schema-3 persistence foundation with deterministic
 indexes, atomic observation publication, idempotency, and strict reopening.
@@ -214,10 +215,23 @@ delayed-retry reuse. The production terminalization operation reconstructs its
 snapshot from indexed schema-2/3 evidence, reloads the post-D1 schema-3
 manifest under the mutation boundary, persists a validated D1 reconstruction
 envelope for FOUND, and publishes only after strict readback; a post-commit
-readback failure never downgrades schema 4. Phase 7E real-NVR validation, Phase 8 review
-media, and Phase 9 result UI remain unimplemented.
-Absolute source-time
-calibration remains deferred; Phase 4C-2
+readback failure never downgrades schema 4. Phase 7E request-relative runtime,
+Phase 7E-3 real-NVR acceptance, Phase 8 review-media processing, and Phase 9
+result UI remain unimplemented. The Phase 7E feasibility work proves that VIGI
+segment metadata supplies coverage only and that current replay exposes
+request-relative timestamps without authoritative frame UTC. The rewritten
+normative contract defines one common replay/decode session, one SDK segment, a
+five-minute default, a hard 600-second maximum, pre-acquisition schema 5,
+zero-evidence and incremental schema 6, immutable terminal schema 7, 26 acyclic
+identity families with full B4 classifier-policy/evidence binding, a binary-
+complete strict-reopen fixture, and a separate closed-state Phase 8
+media/handoff repository. Source-clip identity is semantic; encoded-byte digest
+and observed stream facts are separate integrity data. The exact synchronous invocation ceiling is 2,520
+seconds. Existing schemas 1–4 remain readable under their original strict
+semantics and are not migrated. The ordered 7E-1A/1B/1C/1D, 7E-2, and 7E-3
+increments remain pending final design approval; no terminal real-NVR search
+has been completed.
+Absolute source-time calibration remains unavailable; Phase 4C-2
 provides transient frontend-only selection of one
 successful candidate, and Phase 5-1/5-2 provide the transient source-space
 editing surface without altering the API or evidence semantics.
@@ -243,15 +257,20 @@ capability.
    desktop/mobile acceptance. Continue with Phase 6-4 real-NVR validation
    without changing recording or reference-frame
    ownership.
-6. Implement the scope-reviewed single-site object-disappearance MVP in bounded
-   slices: build on completed Phase 6C schema 3 compatibility, Phase 7A-1 local
-   lifecycle, Phase 7A-2 canonical multi-target acquisition, and completed Phase
-   7B production three-state classification/schema-3 observations, and the
-   completed Phase 7D terminal schema/publication/reopen/status/handoff
-   boundaries; next implement Phase 7E real-NVR validation. Preserve published Phase 6
-   package immutability, reject duplicate starts, never reuse interrupted-run
-   evidence, and defer Phase 8 media plus
-   Phase 9 judgment.
+6. After final design approval, implement Phase 7E in order: 7E-1A owns the 26
+   request-relative identity families, search/classifier/media policies, exact
+   schema-5/6 matrices, schema dispatch, vectors, and pure validation; 7E-1B owns pre-acquisition schema 5, the zero-evidence
+   schema-6 transition, incremental admission, and strict reopen; 7E-1C owns one
+   replay/remux, retained `.media` MP4, sparse/adaptive decoding, end-target
+   selection (including logical-E mapping), RGB24, A2/B4 integration, and deadline propagation; 7E-1D owns
+   the Phase 7E-specific C1 planning adapter with `S` and backward final support,
+   C2/D1/D2, complete source reconstruction, immutable schema 7, and Phase 7
+   status; 7E-2 owns the synchronous CLI, disabled POST, cleanup, and the
+   separate Phase 8 clip/handoff/retry/deletion repository; 7E-3 owns bounded
+   real-NVR acceptance and fault injection. Preserve the 600-second search
+   ceiling, 2,520-second invocation ceiling, one session/segment, schemas 1–4,
+   Phase 6 immutability, and the rule that operational failure cannot become
+   absence. Phase 8 processing and Phase 9 judgment remain future work.
 
 ## High-level roadmap
 
