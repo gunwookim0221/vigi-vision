@@ -50,8 +50,9 @@ documentation route is added, removed, or relocated.
   selection; 1D the Phase 7E C1 planner adapter and terminal composition
   and schema 7; 2 CLI and Phase 8 projection; 3 bounded acceptance. Read
   [ADR-0007](adr/ADR-0007-validated-recording-search.md) for the durable
-  provenance/executor decision. Phase 7E runtime implementation, terminal
-  real-NVR acceptance, and Phase 8 review-media processing remain unimplemented.
+  provenance/executor decision. The pure 7E-1A contract foundation is
+  implemented locally; 7E-1B onward, terminal real-NVR acceptance, and Phase 8
+  review-media processing remain unimplemented.
   Read
   [design/object-presence-classification.md](design/object-presence-classification.md)
   for the normative Phase 7B single-probe input, geometry, classifier, outcome,

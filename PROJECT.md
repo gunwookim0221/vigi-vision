@@ -228,9 +228,13 @@ complete strict-reopen fixture, and a separate closed-state Phase 8
 media/handoff repository. Source-clip identity is semantic; encoded-byte digest
 and observed stream facts are separate integrity data. The exact synchronous invocation ceiling is 2,520
 seconds. Existing schemas 1–4 remain readable under their original strict
-semantics and are not migrated. The ordered 7E-1A/1B/1C/1D, 7E-2, and 7E-3
-increments remain pending final design approval; no terminal real-NVR search
-has been completed.
+semantics and are not migrated. The approved 7E-1A pure contract increment is
+implemented locally: strict request-relative models, 26 identity families,
+canonical identities, B4 evidence validation, schema 5/6 transition
+validation, Phase 8 state models, and executable 59-vector conformance checks.
+Persistence, acquisition, decoding, classifier execution, terminal
+orchestration, CLI execution, and real-NVR acceptance remain unimplemented in
+later 7E slices; no terminal real-NVR search has been completed.
 Absolute source-time calibration remains unavailable; Phase 4C-2
 provides transient frontend-only selection of one
 successful candidate, and Phase 5-1/5-2 provide the transient source-space
@@ -257,8 +261,9 @@ capability.
    desktop/mobile acceptance. Continue with Phase 6-4 real-NVR validation
    without changing recording or reference-frame
    ownership.
-6. After final design approval, implement Phase 7E in order: 7E-1A owns the 26
-   request-relative identity families, search/classifier/media policies, exact
+6. Preserve the implemented Phase 7E-1A contract foundation, then implement
+   Phase 7E in order: 7E-1A owns the 26 request-relative identity families,
+   search/classifier/media policies, exact
    schema-5/6 matrices, schema dispatch, vectors, and pure validation; 7E-1B owns pre-acquisition schema 5, the zero-evidence
    schema-6 transition, incremental admission, and strict reopen; 7E-1C owns one
    replay/remux, retained `.media` MP4, sparse/adaptive decoding, end-target
