@@ -51,7 +51,7 @@ documentation route is added, removed, or relocated.
   and schema 7; 2 CLI and Phase 8 projection; 3 bounded acceptance. Read
   [ADR-0007](adr/ADR-0007-validated-recording-search.md) for the durable
   provenance/executor decision. The pure 7E-1A contract foundation is
-  implemented locally; 7E-1B onward, terminal real-NVR acceptance, and Phase 8
+  7E-1B persistence is implemented locally; 7E-1C onward, terminal real-NVR acceptance, and Phase 8
   review-media processing remain unimplemented.
   Read
   [design/object-presence-classification.md](design/object-presence-classification.md)

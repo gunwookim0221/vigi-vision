@@ -228,11 +228,12 @@ complete strict-reopen fixture, and a separate closed-state Phase 8
 media/handoff repository. Source-clip identity is semantic; encoded-byte digest
 and observed stream facts are separate integrity data. The exact synchronous invocation ceiling is 2,520
 seconds. Existing schemas 1–4 remain readable under their original strict
-semantics and are not migrated. The approved 7E-1A pure contract increment is
-implemented locally: strict request-relative models, 26 identity families,
-canonical identities, B4 evidence validation, schema 5/6 transition
-validation, Phase 8 state models, and executable 59-vector conformance checks.
-Persistence, acquisition, decoding, classifier execution, terminal
+semantics and are not migrated. The approved 7E-1A pure contract increment and
+7E-1B persistence increment are implemented locally: strict request-relative
+models, 26 identity families, canonical identities, B4 evidence validation,
+schema 5/6 transition validation, strict schema 5/6 publication and reopen,
+Phase 8 state models, and executable 59-vector conformance checks. Acquisition,
+decoding, classifier execution, terminal
 orchestration, CLI execution, and real-NVR acceptance remain unimplemented in
 later 7E slices; no terminal real-NVR search has been completed.
 Absolute source-time calibration remains unavailable; Phase 4C-2
@@ -261,7 +262,7 @@ capability.
    desktop/mobile acceptance. Continue with Phase 6-4 real-NVR validation
    without changing recording or reference-frame
    ownership.
-6. Preserve the implemented Phase 7E-1A contract foundation, then implement
+6. Preserve the implemented Phase 7E-1A/1B contract and persistence foundation, then implement
    Phase 7E in order: 7E-1A owns the 26 request-relative identity families,
    search/classifier/media policies, exact
    schema-5/6 matrices, schema dispatch, vectors, and pure validation; 7E-1B owns pre-acquisition schema 5, the zero-evidence
