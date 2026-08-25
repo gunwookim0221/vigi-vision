@@ -20,11 +20,14 @@ projection; D2-5 adds the strict FOUND-only Phase 8 request handoff and durable
 request persistence. The terminal path reloads post-D1 schema-3 evidence under
 the mutation boundary and independently reconstructs persisted FOUND facts on
 reopen. Phase 7E feasibility work proves that current VIGI replay timestamps
-are request-relative and cannot supply authoritative physical frame UTC. The
-single normative Phase 7E contract uses one replay/decode session, one SDK
+ are request-relative and cannot supply authoritative physical frame UTC. The
+ implemented Phase 7E-1C boundary now owns one bounded replay/decode session,
+ durable media retention, exact local frame selection, and persisted-frame
+ admission. The single normative Phase 7E contract uses one replay/decode session, one SDK
 segment, a five-minute default, a hard 600-second search maximum, an exact
 2,520-second invocation ceiling, schemas 5→6→7, and a separate FOUND-only Phase
-8 projection repository. Runtime implementation, terminal search, Phase 8
+8 projection repository. The 7E-1C common-session runtime boundary is
+implemented; terminal search, Phase 8
 review-media processing, and Phase 9 remain unimplemented; schemas 1–4 retain
 their original strict meaning.**
 
@@ -392,8 +395,11 @@ version after Phase 7E evidence.
   after its commit point. The Phase 7E contract preserves one common session,
   one segment, a 600-second search ceiling, and a 2,520-second invocation
   ceiling. Ordered 7E-1A/1B/1C/1D, 7E-2, and 7E-3 implementation/validation
-  remain pending. Slice ownership is: 1A identities/models/validation; 1B
-  pre-acquisition schema 5 and incremental schema 6; 1C retained MP4,
+  are in progress: 1A and 1B are implemented, and 1C now implements one
+  bounded replay/remux, durable `.media`, exact local target selection, RGB24,
+  and persisted-frame A2/B4 admission. Slice ownership is: 1A
+  identities/models/validation; 1B pre-acquisition schema 5 and incremental
+  schema 6; 1C retained MP4,
   exact logical-target frame selection, RGB24, and A2/B4; 1D the Phase
   7E-specific C1 adapter (`S`, logical `E`, backward final support), source
   reconstruction, and immutable schema 7; 2 synchronous CLI and separate

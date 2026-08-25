@@ -796,11 +796,14 @@ class RecordingSearch7ERepository:
         current = self._reopen_unlocked(investigation_id, run_id, expected_schema=6)
         if current.manifest_id != manifest.identity:
             return None
-        if current.state != state:
-            raise Phase7EConflictError
-        if not _same_child_set(current.records, records):
-            raise Phase7EConflictError
-        return PublicationResult(PublicationStatus.REUSED, current)
+        if current.state == state and _same_child_set(current.records, records):
+            return PublicationResult(PublicationStatus.REUSED, current)
+        # A lifecycle-only successor (for example FRAME_READY -> CLASSIFYING)
+        # may retain the same indexed child set.  Its state is still a distinct
+        # atomic manifest replacement, not an idempotent retry.
+        if current.state != state and _same_child_set(current.records, records):
+            return None
+        raise Phase7EConflictError
 
     def _reopen_unlocked(
         self,

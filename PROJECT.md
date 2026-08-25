@@ -228,12 +228,14 @@ complete strict-reopen fixture, and a separate closed-state Phase 8
 media/handoff repository. Source-clip identity is semantic; encoded-byte digest
 and observed stream facts are separate integrity data. The exact synchronous invocation ceiling is 2,520
 seconds. Existing schemas 1–4 remain readable under their original strict
-semantics and are not migrated. The approved 7E-1A pure contract increment and
-7E-1B persistence increment are implemented locally: strict request-relative
+semantics and are not migrated. The approved 7E-1A pure contract increment,
+7E-1B persistence increment, and 7E-1C common-session increment are implemented
+locally: strict request-relative
 models, 26 identity families, canonical identities, B4 evidence validation,
 schema 5/6 transition validation, strict schema 5/6 publication and reopen,
-Phase 8 state models, and executable 59-vector conformance checks. Acquisition,
-decoding, classifier execution, terminal
+Phase 8 state models, executable 59-vector conformance checks, one bounded
+replay/remux with durable `.media` retention, exact local target selection,
+RGB24/JPEG integrity, and persisted-frame B4 admission. Terminal
 orchestration, CLI execution, and real-NVR acceptance remain unimplemented in
 later 7E slices; no terminal real-NVR search has been completed.
 Absolute source-time calibration remains unavailable; Phase 4C-2
