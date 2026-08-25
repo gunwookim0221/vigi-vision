@@ -19,10 +19,13 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from enum import Enum
+from io import BytesIO
 from pathlib import Path
 from threading import RLock
-from typing import Any, ClassVar
+from types import MappingProxyType
+from typing import Any, ClassVar, Protocol
 
+from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, StrictInt, ValidationError
 
 from vigi_vision.durable_io import (
@@ -121,6 +124,7 @@ class Phase7ERun:
     manifest: StrictIdentityEnvelope
     state: Schema5Envelope | Schema6Envelope
     records: tuple[StrictIdentityEnvelope, ...] = field(default_factory=tuple)
+    frame_bytes: Mapping[str, bytes] = field(default_factory=dict, repr=False)
 
     @property
     def manifest_id(self) -> str:
@@ -152,6 +156,14 @@ class _Child:
     def relative_path(self) -> str:
         """Return the deterministic child path."""
         return f"{self.relative_directory}/{self.envelope.identity}.json"
+
+
+class DurableMediaProbe(Protocol):
+    """Structural probe used to prove retained common-session media on reopen."""
+
+    def probe(self, path: Path, timeout_seconds: float) -> object:
+        """Return strict media facts for one confined regular MP4."""
+        ...
 
 
 _SCHEMA5_DIRECTORIES = frozenset({"policy", "plans", "requests", "operations", "manifests"})
@@ -212,6 +224,9 @@ class RecordingSearch7ERepository:
 
     root: Path = field(repr=False)
     lock_timeout_seconds: float = field(default=1.0, repr=False)
+    media_root: Path | None = field(default=None, repr=False)
+    media_probe: DurableMediaProbe | None = field(default=None, repr=False)
+    media_probe_timeout_seconds: float = field(default=20.0, repr=False)
     _guard: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def ensure_root(self) -> None:
@@ -850,11 +865,86 @@ class RecordingSearch7ERepository:
         )
         try:
             records = self._read_children(path, document.schema_version, envelope, state)
+            frame_bytes = (
+                self._read_frame_bytes(path, records) if document.schema_version == 6 else {}
+            )
+            if document.schema_version == 6:
+                self._validate_common_session_media(investigation_id, run_id, records)
         except (OSError, UnicodeError, DurableJsonError, ValidationError, ValueError, TypeError):
             raise Phase7ECorruptError from None
         return Phase7ERun(
-            path, investigation_id, run_id, document.schema_version, envelope, state, records
+            path,
+            investigation_id,
+            run_id,
+            document.schema_version,
+            envelope,
+            state,
+            records,
+            MappingProxyType(frame_bytes),
         )
+
+    def _read_frame_bytes(
+        self, path: Path, records: Sequence[StrictIdentityEnvelope]
+    ) -> dict[str, bytes]:
+        """Read and fully verify every indexed JPEG owned by a schema-6 run."""
+        result: dict[str, bytes] = {}
+        for record in records:
+            if record.family != "frame":
+                continue
+            jpeg = path / "frames" / f"{record.identity}.jpg"
+            try:
+                if (
+                    jpeg.is_symlink()
+                    or not jpeg.is_file()
+                    or not is_safe_contained_path(self.root, jpeg, require_target=True)
+                ):
+                    raise Phase7ECorruptError
+                raw = jpeg.read_bytes()
+                _validate_one_frame_bytes(record, raw, Phase7ECorruptError)
+            except (OSError, ValueError, UnidentifiedImageError):
+                raise Phase7ECorruptError from None
+            result[record.identity] = raw
+        return result
+
+    def _validate_common_session_media(
+        self,
+        investigation_id: str,
+        run_id: str,
+        records: Sequence[StrictIdentityEnvelope],
+    ) -> None:
+        """Rehash and reprobe retained MP4 bytes when the production media boundary is bound."""
+        sessions = [record for record in records if record.family == "common-session"]
+        if len(sessions) != 1:
+            raise Phase7ECorruptError
+        if self.media_root is None and self.media_probe is None:
+            return
+        if self.media_root is None or self.media_probe is None:
+            raise Phase7ECorruptError
+        session = sessions[0]
+        media = self.media_root / investigation_id / run_id / f"{session.identity}.mp4"
+        try:
+            if (
+                self.media_root.is_symlink()
+                or not self.media_root.is_dir()
+                or media.is_symlink()
+                or not media.is_file()
+                or not is_safe_contained_path(self.media_root, media, require_target=True)
+                or media.stat().st_size != session.payload["mp4_size_bytes"]
+                or _sha256_path(media) != session.payload["mp4_sha256"]
+            ):
+                raise Phase7ECorruptError
+            facts = self.media_probe.probe(media, self.media_probe_timeout_seconds)
+        except (OSError, RuntimeError, ValueError, TypeError):
+            raise Phase7ECorruptError from None
+        expected = {
+            "selected_video_stream_index": session.payload["selected_video_stream_index"],
+            "container_start_pts": session.payload["container_start_pts"],
+            "time_base_num": session.payload["time_base_num"],
+            "time_base_den": session.payload["time_base_den"],
+            "duration_ticks": session.payload["duration_ticks"],
+        }
+        if any(getattr(facts, key, None) != value for key, value in expected.items()):
+            raise Phase7ECorruptError
 
     def _reopen_at(
         self, path: Path, investigation_id: str, run_id: str, *, expected_schema: int
@@ -1156,7 +1246,8 @@ class RecordingSearch7ERepository:
                 archived = _coerce_envelope(document.manifest, expected)
                 if document.schema_version != 5:
                     raise Phase7ECorruptError
-                if not isinstance(document.state, dict):
+                archived_state = validate_schema5_state(document.state)
+                if archived_state.phase_state is not Schema5PhaseState.ACQUIRED:
                     raise Phase7ECorruptError
             except (
                 OSError,
@@ -1168,6 +1259,17 @@ class RecordingSearch7ERepository:
             ):
                 raise Phase7ECorruptError from None
             if archived.family != expected or archived.identity != item.stem:
+                raise Phase7ECorruptError
+            _validate_manifest_binding(
+                archived,
+                archived_state,
+                manifest.payload["investigation_id"],
+                manifest.payload["run_id"],
+                5,
+            )
+            if archived_state.active_replay_operation_id != manifest.payload.get(
+                "replay_operation_id"
+            ):
                 raise Phase7ECorruptError
             if item.stem != manifest.payload.get("schema5_predecessor_manifest_id", item.stem):
                 if schema == 6:
@@ -1218,6 +1320,14 @@ class RecordingSearch7ERepository:
 
 
 _SCHEMA6_FAMILIES = frozenset(_FAMILY_DIRECTORY) | {"schema5-manifest"}
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _coerce_envelope(value: object, expected_family: str) -> StrictIdentityEnvelope:
@@ -1529,14 +1639,40 @@ def _validate_frame_bytes(
         if child.envelope.family != "frame" or child.envelope.identity not in binary:
             continue
         raw = bytes(binary[child.envelope.identity])
-        expected_size = child.envelope.payload.get("jpeg_size_bytes")
-        expected_digest = child.envelope.payload.get("jpeg_sha256")
-        if (
-            not isinstance(expected_size, int)
-            or len(raw) != expected_size
-            or hashlib.sha256(raw).hexdigest() != expected_digest
-        ):
-            raise Phase7EValidationError("frame bytes do not match metadata")
+        _validate_one_frame_bytes(child.envelope, raw, Phase7EValidationError)
+
+
+def _validate_one_frame_bytes(
+    frame: StrictIdentityEnvelope,
+    raw: bytes,
+    error_type: type[Phase7EValidationError | Phase7ECorruptError],
+) -> None:
+    """Prove one JPEG's bytes, structure, dimensions, and decoded RGB24 digest."""
+    payload = frame.payload
+    if (
+        type(raw) is not bytes
+        or len(raw) != payload.get("jpeg_size_bytes")
+        or hashlib.sha256(raw).hexdigest() != payload.get("jpeg_sha256")
+    ):
+        raise error_type("frame bytes do not match metadata")
+    try:
+        with Image.open(BytesIO(raw)) as image:
+            image.load()
+            if (
+                image.format != "JPEG"
+                or image.mode != "RGB"
+                or image.size
+                != (
+                    payload.get("width"),
+                    payload.get("height"),
+                )
+            ):
+                raise error_type("frame JPEG structure does not match metadata")
+            rgb24 = image.tobytes()
+    except (OSError, ValueError, UnidentifiedImageError) as exc:
+        raise error_type("frame JPEG is not decodable") from exc
+    if hashlib.sha256(rgb24).hexdigest() != payload.get("rgb24_sha256"):
+        raise error_type("frame JPEG pixels do not match metadata")
 
 
 def _legal_schema5_successor(current: Schema5Envelope, proposed: Schema5Envelope) -> bool:

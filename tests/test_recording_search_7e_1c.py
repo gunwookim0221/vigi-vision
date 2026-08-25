@@ -9,12 +9,10 @@ import json
 import re
 from datetime import date, datetime, timedelta, timezone
 from fractions import Fraction
-from io import BytesIO
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from PIL import Image
 
 from vigi_vision.recording import RecordingSegment, ReplayRequest
 from vigi_vision.recording_search_7e_1c import (
@@ -26,6 +24,8 @@ from vigi_vision.recording_search_7e_1c import (
     DurableCommonSessionMedia,
     MediaProbeFacts,
     Phase7E1CExecutor,
+    ProductionB4Adapter,
+    ProductionB4Context,
     admit_frame_then_classify,
     collapse_target_aliases,
     make_decoder_envelope,
@@ -33,13 +33,18 @@ from vigi_vision.recording_search_7e_1c import (
     rgb24_sha256,
     select_target_index,
 )
-from vigi_vision.recording_search_7e_models import StrictIdentityEnvelope
-from vigi_vision.recording_search_7e_models import (
-    ClassificationOperation,
-    ClassifierEvidence,
-    TargetRequest,
+from vigi_vision.object_presence_evidence import RawComparison
+from vigi_vision.object_presence_values import ClassificationOutcome, VisualStatus
+from vigi_vision.recording_search_b2_identity import observation_id_for
+from vigi_vision.recording_search_b2_records import RecordingProbeObservationRecord
+from vigi_vision.recording_search_b3_models import ClassifyRecordingProbeRequest
+from vigi_vision.recording_search_b4_models import (
+    ClassificationPublicationOutcome,
+    PublishedClassificationResult,
 )
+from vigi_vision.recording_search_7e_models import StrictIdentityEnvelope
 from vigi_vision.recording_search_7e_repository import RecordingSearch7ERepository
+from vigi_vision.recording_search_7e_repository import Phase7ECorruptError
 from vigi_vision.replay import ReplayClip
 
 
@@ -131,13 +136,6 @@ class _Probe:
 def _request(policy: CommonSessionPolicy | None = None) -> CommonSessionRequest:
     start = datetime(2026, 7, 20, 3, 0, tzinfo=timezone.utc)
     return CommonSessionRequest.from_start_and_duration("inv-01", "run-01", 1, start, 4, policy)
-
-
-def _jpeg_bytes() -> bytes:
-    image = Image.new("RGB", (8, 8), (120, 80, 40))
-    stream = BytesIO()
-    image.save(stream, format="JPEG", quality=90)
-    return stream.getvalue()
 
 
 def _acquirer(tmp_path: Path) -> tuple[CommonSessionAcquirer, _Extractor, _Planner]:
@@ -295,7 +293,6 @@ def test_frame_is_reopened_before_b4_and_observation_is_indexed(tmp_path: Path) 
         width=8,
         height=8,
         rgb24_bytes=bytes(range(8 * 8 * 3)),
-        jpeg_bytes=_jpeg_bytes(),
         decode_session_id=result.acquisition.common_session_id,
         container_start_pts=0,
         time_base_num=1,
@@ -321,24 +318,81 @@ def test_frame_is_reopened_before_b4_and_observation_is_indexed(tmp_path: Path) 
         "visual_status": "comparable",
         "unusable_reason": None,
     }
-    operation = ClassificationOperation(
-        investigation_id="inv-01",
-        run_id="run-01",
-        frame_id=frame_envelope.identity,
-        target_request_id=target_envelope.identity,
-        baseline_identity="baseline-v3-01",
-        classifier_policy_id=classifier_policy.identity,
-        attempt=1,
-        result_kind="VISUAL",
-        outcome="PRESENT",
-        reason_code=None,
-        classifier_evidence=ClassifierEvidence.model_validate(evidence),
-        operational_reason=None,
+    comparison = RawComparison.model_validate(
+        {
+            **evidence,
+            "baseline_mask_coverage": 0.5,
+            "probe_mask_coverage": 0.5,
+            "mask_iou": 0.333333,
+            "roi_luma_ncc": 0.7,
+            "visual_status": VisualStatus.COMPARABLE,
+        }
     )
+    baseline_id = "baseline-" + "a" * 64
+    canonical_frame_id = "canonical-frame-01"
+    policy_version = "phase7e-policy-v1"
+    observation_id = observation_id_for(
+        investigation_id="inv-01",
+        search_run_id="run-01",
+        channel_id=1,
+        baseline_observation_id=baseline_id,
+        canonical_frame_id=canonical_frame_id,
+        classifier_policy_version=policy_version,
+    )
+    published_at = result.acquisition.request.start_utc.replace(microsecond=1)
+    observation = RecordingProbeObservationRecord(
+        record_type="recording_probe",
+        observation_id=observation_id,
+        investigation_id="inv-01",
+        search_run_id="run-01",
+        channel_id=1,
+        classification_operation_id="classification-op-phase7e",
+        baseline_observation_id=baseline_id,
+        canonical_frame_id=canonical_frame_id,
+        primary_probe_request_id="probe-phase7e",
+        primary_requested_time_utc=result.acquisition.request.start_utc,
+        classifier_policy_version=policy_version,
+        state=ClassificationOutcome.PRESENT,
+        reason_code=None,
+        classifier_evidence=comparison,
+        published_at_utc=published_at,
+    )
+    published = PublishedClassificationResult(
+        ClassificationPublicationOutcome.CREATED,
+        observation_id,
+        None,
+        "probe-phase7e",
+        canonical_frame_id,
+        ClassificationOutcome.PRESENT,
+        None,
+    )
+    request = ClassifyRecordingProbeRequest("inv-01", "run-01", "probe-phase7e")
+    handle = object()
+    calls: list[str] = []
+
+    class Service:
+        def classify(self, received_handle: object, received_request: object) -> object:
+            assert received_handle is handle
+            assert received_request == request
+            calls.append("production-b4")
+            return published
+
+    def context(authoritative: Any) -> ProductionB4Context:
+        assert authoritative.frame is not frame
+        assert authoritative.frame.rgb24_bytes != frame.rgb24_bytes
+        assert authoritative.frame_jpeg_bytes == final_jpeg.read_bytes()
+        calls.append("strict-readback")
+        return ProductionB4Context(
+            cast("Any", handle), request, baseline_id, lambda _result: observation
+        )
+
+    adapter = ProductionB4Adapter(cast("Any", Service()), cast("Any", context))
 
     class Classifier:
-        def classify(self, frame: DecodedLocalFrame, target: object) -> ClassificationOperation:
-            return operation
+        def classify(self, authoritative: Any) -> object:
+            return adapter.classify(authoritative)
+
+    final_jpeg = result.run.root / "frames" / f"{frame_envelope.identity}.jpg"
 
     final = admit_frame_then_classify(
         repository,
@@ -347,9 +401,64 @@ def test_frame_is_reopened_before_b4_and_observation_is_indexed(tmp_path: Path) 
         decoder_operation,
         frame,
         Classifier(),
-        TargetRequest(payload=target_envelope.payload),
         classification_attempt_id="attempt-1",
     )
     assert final.is_schema6
+    assert calls == ["strict-readback", "production-b4"]
     assert any(record.family == "observation" for record in final.records)
-    assert (final.root / "frames" / f"{frame_envelope.identity}.jpg").is_file()
+    persisted = final.root / "frames" / f"{frame_envelope.identity}.jpg"
+    assert persisted.is_file()
+    before_manifest = (final.root / "manifest.json").read_bytes()
+    persisted.write_bytes(persisted.read_bytes()[:-1])
+    with pytest.raises(Phase7ECorruptError):
+        repository.reopen_schema6("inv-01", "run-01")
+    assert (final.root / "manifest.json").read_bytes() == before_manifest
+
+
+def test_strict_reopen_rehashes_and_reprobes_retained_mp4(tmp_path: Path) -> None:
+    vectors = _vectors()
+    by_family = {item["family"]: item for item in vectors}
+    targets = tuple(
+        _env(item)
+        for item in vectors
+        if item["family"] == "target-request"
+        and item["expected_id"]
+        in by_family["schema5-manifest"]["payload"]["coarse_target_request_ids"]
+    )
+    policy = _env(by_family["policy"])
+    acquirer, _, _ = _acquirer(tmp_path)
+    repository = RecordingSearch7ERepository(tmp_path / "runs")
+    result = Phase7E1CExecutor(
+        repository,
+        acquirer,
+        DurableCommonSessionMedia(tmp_path / ".media"),
+    ).execute(
+        _request(CommonSessionPolicy.from_payload(policy.payload)),
+        _env(by_family["schema5-manifest"]),
+        (policy, _env(by_family["coarse-plan"]), *targets),
+        _env(by_family["classifier-policy"]),
+        targets,
+    )
+    before = (result.run.root / "manifest.json").read_bytes()
+    archive = next((result.run.root / "manifests").glob("*.json"))
+    archived_bytes = archive.read_bytes()
+    archived_document = json.loads(archived_bytes)
+    archived_document["state"].update(
+        {
+            "run_state": "RUNNING",
+            "phase_state": "PLANNED",
+            "active_replay_operation_id": None,
+            "reason_code": None,
+            "attempt_count": 0,
+        }
+    )
+    archive.write_text(json.dumps(archived_document), encoding="utf-8")
+    changed_archive = archive.read_bytes()
+    with pytest.raises(Phase7ECorruptError):
+        repository.reopen_schema6("inv-01", "run-01")
+    assert archive.read_bytes() == changed_archive
+    archive.write_bytes(archived_bytes)
+    result.acquisition.media_path.write_bytes(b"changed-retained-media")
+    with pytest.raises(Phase7ECorruptError):
+        repository.reopen_schema6("inv-01", "run-01")
+    assert (result.run.root / "manifest.json").read_bytes() == before

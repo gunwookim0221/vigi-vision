@@ -1,5 +1,5 @@
 # pyright: reportAny=false, reportExplicitAny=false, reportUnknownParameterType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnannotatedClassAttribute=false, reportImplicitOverride=false, reportUnusedCallResult=false, reportArgumentType=false, reportInvalidTypeForm=false, reportOptionalMemberAccess=false, reportUnnecessaryIsInstance=false, reportCallInDefaultInitializer=false, reportUnusedImport=false, reportUnusedFunction=false
-# ruff: noqa: B009, C901, D105, I001, PLR0912, PLR0913, PTH105, RUF022, TC001, TC006, TRY300, UP037
+# ruff: noqa: B009, C901, D105, I001, PLR0913, PTH105, RUF022, TC001, TC006, TRY300, UP037
 """Phase 7E-1C common-session acquisition and local evidence admission.
 
 The 1C boundary owns one bounded replay/remux and all subsequent local reads of
@@ -16,16 +16,19 @@ import math
 import os
 import shutil
 import subprocess
+from io import BytesIO
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 from itertools import pairwise
-from tempfile import TemporaryDirectory, mkstemp
+from tempfile import mkstemp
 from pathlib import Path
 from time import monotonic
 from typing import Any, Protocol, cast
+
+from PIL import Image, UnidentifiedImageError
 
 from vigi_vision.investigation_confirmation_integrity import (
     compute_jpeg_integrity_from_bytes,
@@ -49,6 +52,17 @@ from vigi_vision.recording_search_7e_repository import (
 from vigi_vision.recording_search_7e_validation import (
     Schema5Envelope,
     Schema6Envelope,
+)
+from vigi_vision.recording_search_b2_records import RecordingProbeObservationRecord
+from vigi_vision.recording_search_b3_models import ClassifyRecordingProbeRequest
+from vigi_vision.recording_search_b4_models import (
+    ClassificationOperationalError,
+    ClassificationOperationalReason,
+    PublishedClassificationResult,
+)
+from vigi_vision.recording_search_b4_service import (
+    AuthoritativeClassificationHandle,
+    ObservationClassificationService,
 )
 from vigi_vision.recording_search_models import RecordingSearchError
 from vigi_vision.replay import (
@@ -377,17 +391,150 @@ class Decoder(Protocol):
         ...
 
 
-class Classifier(Protocol):
-    """Adapt the existing B4 classifier without changing its semantics."""
+@dataclass(frozen=True, slots=True)
+class Phase7EB4Input:
+    """Strictly reopened Phase 7E authority passed to the production B4 adapter."""
 
-    def classify(self, frame: "DecodedLocalFrame", target: object) -> object:
-        """Return a production ClassificationOperation or a safe failure."""
+    run: Phase7ERun
+    frame_record: StrictIdentityEnvelope
+    frame_jpeg_bytes: bytes = field(repr=False)
+    frame: "DecodedLocalFrame" = field(repr=False)
+    target_request: StrictIdentityEnvelope
+    classification_attempt_id: str
+
+
+class B4Bridge(Protocol):
+    """The sole Phase 7E seam around production B4 authority."""
+
+    def classify(self, authoritative: Phase7EB4Input) -> object:
+        """Return a Phase 7E operation derived from production B4 output."""
         ...
 
 
 @dataclass(frozen=True, slots=True)
+class ProductionB4Context:
+    """Real B4 handle/request plus strict observation readback."""
+
+    handle: AuthoritativeClassificationHandle
+    request: ClassifyRecordingProbeRequest
+    baseline_identity: str
+    read_observation: Callable[[PublishedClassificationResult], RecordingProbeObservationRecord]
+
+
+class ProductionB4ContextFactory(Protocol):
+    """Resolve legacy B4 authority only from strictly reopened Phase 7E input."""
+
+    def __call__(self, authoritative: Phase7EB4Input) -> ProductionB4Context:
+        """Build the real B4 handle and request after Phase 7E strict readback."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionB4Adapter:
+    """Invoke the existing B4 service and map its strictly read-back typed record."""
+
+    service: ObservationClassificationService
+    context_factory: ProductionB4ContextFactory
+
+    def classify(self, authoritative: Phase7EB4Input) -> StrictIdentityEnvelope:
+        """Call production B4 without accepting caller-owned media or fake result shapes."""
+        context = self.context_factory(authoritative)
+        if not isinstance(context.request, ClassifyRecordingProbeRequest):
+            raise CommonSessionValidationError
+        try:
+            result = self.service.classify(context.handle, context.request)
+        except ClassificationOperationalError as exc:
+            reason = _phase7e_operational_reason(exc.reason)
+            return _operational_completion(authoritative, context.baseline_identity, reason)
+        observation = context.read_observation(result)
+        if (
+            not isinstance(result, PublishedClassificationResult)
+            or not isinstance(observation, RecordingProbeObservationRecord)
+            or observation.observation_id != result.observation_id
+            or observation.canonical_frame_id != result.canonical_frame_id
+            or observation.state != result.state
+            or observation.reason_code != result.reason_code
+            or observation.baseline_observation_id != context.baseline_identity
+        ):
+            raise CommonSessionValidationError
+        classifier_policy_id = authoritative.run.manifest.payload["classifier_policy_id"]
+        return StrictIdentityEnvelope.from_payload(
+            "classification-operation",
+            {
+                "investigation_id": authoritative.run.investigation_id,
+                "run_id": authoritative.run.run_id,
+                "frame_id": authoritative.frame_record.identity,
+                "target_request_id": authoritative.target_request.identity,
+                "baseline_identity": observation.baseline_observation_id,
+                "classifier_policy_id": classifier_policy_id,
+                "attempt": 1,
+                "result_kind": "VISUAL",
+                "outcome": observation.state.value,
+                "reason_code": (
+                    observation.reason_code.value if observation.reason_code is not None else None
+                ),
+                "classifier_evidence": _phase7e_evidence(observation),
+                "operational_reason": None,
+            },
+        )
+
+
+def _phase7e_evidence(observation: RecordingProbeObservationRecord) -> dict[str, object]:
+    raw = observation.classifier_evidence.model_dump(mode="python")
+    result: dict[str, object] = {}
+    decimal_fields = {
+        "baseline_mask_coverage",
+        "probe_mask_coverage",
+        "mask_iou",
+        "roi_luma_ncc",
+    }
+    for key, value in raw.items():
+        if value is None:
+            result[key] = None
+        elif key in decimal_fields:
+            result[key] = f"{value:.6f}"
+        elif hasattr(value, "value"):
+            result[key] = value.value
+        else:
+            result[key] = value
+    return result
+
+
+def _phase7e_operational_reason(reason: ClassificationOperationalReason) -> str:
+    if reason is ClassificationOperationalReason.CLASSIFIER_TIMEOUT:
+        return "classifier_timeout"
+    if reason is ClassificationOperationalReason.INVALID_CLASSIFIER_OUTPUT:
+        return "invalid_classifier_result"
+    return "classification_failed"
+
+
+def _operational_completion(
+    authoritative: Phase7EB4Input,
+    baseline_identity: str,
+    operational_reason: str,
+) -> StrictIdentityEnvelope:
+    return StrictIdentityEnvelope.from_payload(
+        "classification-operation",
+        {
+            "investigation_id": authoritative.run.investigation_id,
+            "run_id": authoritative.run.run_id,
+            "frame_id": authoritative.frame_record.identity,
+            "target_request_id": authoritative.target_request.identity,
+            "baseline_identity": baseline_identity,
+            "classifier_policy_id": authoritative.run.manifest.payload["classifier_policy_id"],
+            "attempt": 1,
+            "result_kind": "OPERATIONAL",
+            "outcome": None,
+            "reason_code": None,
+            "classifier_evidence": None,
+            "operational_reason": operational_reason,
+        },
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class DecodedLocalFrame:
-    """One deterministic local frame and its exact source/media bytes."""
+    """One deterministic local frame represented only by authoritative RGB24 pixels."""
 
     requested_time_utc: datetime
     raw_pts: int
@@ -395,7 +542,6 @@ class DecodedLocalFrame:
     width: int
     height: int
     rgb24_bytes: bytes = field(repr=False)
-    jpeg_bytes: bytes = field(repr=False)
     decoder_operation_id: str = ""
     decode_session_id: str = ""
     container_start_pts: int = 0
@@ -431,8 +577,8 @@ class DecodedLocalFrame:
             or self.time_base_num <= 0
             or self.time_base_den <= 0
             or math.gcd(self.time_base_num, self.time_base_den) != 1
+            or type(self.rgb24_bytes) is not bytes
             or len(self.rgb24_bytes) != self.width * self.height * 3
-            or not self.jpeg_bytes
             or max_rgb24_frames <= 0
         ):
             raise CommonSessionDecoderError
@@ -680,74 +826,32 @@ class FfmpegLocalDecoder:
             raise CommonSessionDecoderError from exc
         if not offsets or any(current < prior for prior, current in pairwise(offsets)):
             raise CommonSessionDecoderError
-        with TemporaryDirectory(prefix="vigi-vision-7e1c-") as temporary:
-            results: list[DecodedLocalFrame] = []
-            for target in targets:
-                target_offset = Fraction(
-                    int((target - session.request.start_utc).total_seconds()), 1
+        results: list[DecodedLocalFrame] = []
+        for target in targets:
+            target_offset = Fraction(int((target - session.request.start_utc).total_seconds()), 1)
+            index = select_target_index(
+                offsets,
+                target_offset,
+                Fraction(session.request.duration_seconds, 1),
+                logical_end=target == session.request.end_utc,
+                tolerance=Fraction(session.request.policy.support_cadence_seconds, 1),
+            )
+            rgb = self._decode_rgb(session, index, timeout_seconds)
+            results.append(
+                DecodedLocalFrame(
+                    requested_time_utc=target,
+                    raw_pts=raw_pts[index],
+                    ordinal=index,
+                    width=session.media.width,
+                    height=session.media.height,
+                    rgb24_bytes=rgb,
+                    decode_session_id=session.common_session_id,
+                    container_start_pts=session.media.container_start_pts,
+                    time_base_num=session.media.time_base_num,
+                    time_base_den=session.media.time_base_den,
                 )
-                index = select_target_index(
-                    offsets,
-                    target_offset,
-                    Fraction(session.request.duration_seconds, 1),
-                    logical_end=target == session.request.end_utc,
-                    tolerance=Fraction(session.request.policy.support_cadence_seconds, 1),
-                )
-                jpeg_path = Path(temporary) / f"frame-{index}.jpg"
-                try:
-                    completed = subprocess.run(  # noqa: S603
-                        (
-                            str(self.ffmpeg),
-                            "-nostdin",
-                            "-hide_banner",
-                            "-loglevel",
-                            "error",
-                            "-y",
-                            "-i",
-                            str(session.media_path),
-                            "-map",
-                            f"0:{session.media.selected_video_stream_index}",
-                            "-vf",
-                            f"select=eq(n\\,{index})",
-                            "-frames:v",
-                            "1",
-                            "-q:v",
-                            "5",
-                            "-an",
-                            str(jpeg_path),
-                        ),
-                        capture_output=True,
-                        check=False,
-                        stdin=subprocess.DEVNULL,
-                        timeout=timeout_seconds,
-                    )
-                except subprocess.TimeoutExpired as exc:
-                    raise CommonSessionDecoderTimeoutError from exc
-                except OSError as exc:
-                    raise CommonSessionDecoderError from exc
-                if completed.returncode != 0:
-                    raise CommonSessionDecoderError
-                try:
-                    jpeg = jpeg_path.read_bytes()
-                except OSError as exc:
-                    raise CommonSessionDecoderError from exc
-                rgb = self._decode_rgb(session, index, timeout_seconds)
-                results.append(
-                    DecodedLocalFrame(
-                        requested_time_utc=target,
-                        raw_pts=raw_pts[index],
-                        ordinal=index,
-                        width=session.media.width,
-                        height=session.media.height,
-                        rgb24_bytes=rgb,
-                        jpeg_bytes=jpeg,
-                        decode_session_id=session.common_session_id,
-                        container_start_pts=session.media.container_start_pts,
-                        time_base_num=session.media.time_base_num,
-                        time_base_den=session.media.time_base_den,
-                    )
-                )
-            return tuple(results)
+            )
+        return tuple(results)
 
     def _decode_rgb(self, session: CommonSessionAcquisition, index: int, timeout: float) -> bytes:
         """Decode one selected frame to row-major RGB24 bytes."""
@@ -871,8 +975,8 @@ class CommonSessionAcquirer:
             session_payload = {
                 "investigation_id": request.investigation_id,
                 "run_id": request.run_id,
-                "replay_operation_id": "",  # filled by the admission adapter
-                "policy_id": "",  # filled by the admission adapter
+                "replay_operation_id": "pending-replay-operation",  # replaced before admission
+                "policy_id": "pending-policy",  # replaced before admission
                 "segment_id": _segment_id(selected_segment),
                 "replay_start_requested_time_utc": _whole_text(request.start_utc),
                 "replay_end_requested_time_utc": _whole_text(request.end_utc),
@@ -1026,6 +1130,8 @@ class Phase7E1CExecutor:
         replay_operation: StrictIdentityEnvelope | None = None,
     ) -> CommonSessionAdmissionResult:
         """Persist schema 5, acquire once, and publish zero-evidence schema 6."""
+        self.repository.media_root = self.media_store.root
+        self.repository.media_probe = self.acquirer.media_probe
         _validate_executor_inputs(
             request,
             schema5_manifest,
@@ -1232,8 +1338,7 @@ def admit_frame_then_classify(
     target_request: StrictIdentityEnvelope,
     decoder_operation: StrictIdentityEnvelope,
     frame: DecodedLocalFrame,
-    classifier: Classifier,
-    target: object,
+    classifier: B4Bridge,
     *,
     classification_attempt_id: str,
 ) -> Phase7ERun:
@@ -1248,11 +1353,13 @@ def admit_frame_then_classify(
     )
     if not isinstance(current.state, Schema6Envelope):
         raise CommonSessionValidationError
-    frame_envelope = make_frame_envelope(
+    canonical_frame, canonical_jpeg = canonicalize_frame(frame)
+    frame_envelope = _make_frame_envelope_from_canonical(
         acquisition,
         decoder_operation.identity,
         target_request.identity,
-        frame,
+        canonical_frame,
+        canonical_jpeg,
     )
     if current.state.target_state is not Schema6TargetState.REQUESTED:
         raise CommonSessionValidationError
@@ -1309,9 +1416,27 @@ def admit_frame_then_classify(
         ready_state,
         (*records, frame_envelope),
         expected_manifest_id=decoding_manifest.identity,
-        binary_records={frame_envelope.identity: frame.jpeg_bytes},
+        binary_records={frame_envelope.identity: canonical_jpeg},
     )
-    repository.reopen_schema6(acquisition.request.investigation_id, acquisition.request.run_id)
+    ready_run = repository.reopen_schema6(
+        acquisition.request.investigation_id, acquisition.request.run_id
+    )
+    authoritative_frame = reopened_frame_from_run(
+        ready_run,
+        frame_envelope.identity,
+        canonical_frame.requested_time_utc,
+    )
+    authoritative_record = next(
+        (
+            item
+            for item in ready_run.records
+            if item.family == "frame" and item.identity == frame_envelope.identity
+        ),
+        None,
+    )
+    authoritative_jpeg = ready_run.frame_bytes.get(frame_envelope.identity)
+    if authoritative_record is None or type(authoritative_jpeg) is not bytes:
+        raise CommonSessionValidationError
     classifying_manifest = ready_manifest
     classifying_state = Schema6Envelope(
         run_state="RUNNING",
@@ -1335,7 +1460,17 @@ def admit_frame_then_classify(
         expected_manifest_id=ready_manifest.identity,
     )
     completion = _as_envelope(
-        classify_after_readback(classifier, frame, target),
+        classify_after_readback(
+            classifier,
+            Phase7EB4Input(
+                ready_run,
+                authoritative_record,
+                authoritative_jpeg,
+                authoritative_frame,
+                target_request,
+                classification_attempt_id,
+            ),
+        ),
         "classification-operation",
     )
     payload = completion.payload
@@ -1375,7 +1510,7 @@ def admit_frame_then_classify(
     final_records = (*records, frame_envelope, completion)
     if observation is not None:
         final_records = (*final_records, observation)
-    return repository.admit_schema6(
+    published = repository.admit_schema6(
         acquisition.request.investigation_id,
         acquisition.request.run_id,
         final_manifest,
@@ -1383,6 +1518,7 @@ def admit_frame_then_classify(
         final_records,
         expected_manifest_id=classifying_manifest.identity,
     ).run
+    return repository.reopen_schema6(published.investigation_id, published.run_id)
 
 
 def _segment_id(segment: RecordingSegment) -> str:
@@ -1513,13 +1649,60 @@ def rgb24_sha256(rgb24_bytes: bytes, width: int, height: int) -> str:
     return hashlib.sha256(rgb24_bytes).hexdigest()
 
 
-def validate_jpeg_and_rgb24(frame: DecodedLocalFrame) -> tuple[str, int, str]:
-    """Validate encoded JPEG integrity and return JPEG/RGB24 identity facts."""
+def canonicalize_frame(frame: DecodedLocalFrame) -> tuple[DecodedLocalFrame, bytes]:
+    """Encode RGB24 once, then make its strictly decoded JPEG rendition authoritative."""
+    frame.validate()
     try:
-        jpeg = compute_jpeg_integrity_from_bytes(frame.jpeg_bytes, frame.width, frame.height)
+        image = Image.frombytes("RGB", (frame.width, frame.height), frame.rgb24_bytes)
+        stream = BytesIO()
+        image.save(
+            stream,
+            format="JPEG",
+            quality=95,
+            subsampling=0,
+            optimize=False,
+            progressive=False,
+        )
+        jpeg_bytes = stream.getvalue()
+        with Image.open(BytesIO(jpeg_bytes)) as reopened:
+            reopened.load()
+            if (
+                reopened.format != "JPEG"
+                or reopened.mode != "RGB"
+                or reopened.size
+                != (
+                    frame.width,
+                    frame.height,
+                )
+            ):
+                raise CommonSessionDecoderError
+            canonical_rgb = reopened.tobytes()
+    except (OSError, ValueError, UnidentifiedImageError) as exc:
+        raise CommonSessionDecoderError from exc
+    canonical = DecodedLocalFrame(
+        requested_time_utc=frame.requested_time_utc,
+        raw_pts=frame.raw_pts,
+        ordinal=frame.ordinal,
+        width=frame.width,
+        height=frame.height,
+        rgb24_bytes=canonical_rgb,
+        decoder_operation_id=frame.decoder_operation_id,
+        decode_session_id=frame.decode_session_id,
+        container_start_pts=frame.container_start_pts,
+        time_base_num=frame.time_base_num,
+        time_base_den=frame.time_base_den,
+    )
+    return canonical, jpeg_bytes
+
+
+def validate_jpeg_and_rgb24(frame: DecodedLocalFrame) -> tuple[str, int, str]:
+    """Return canonical internally generated JPEG and reopened RGB24 identity facts."""
+    canonical, jpeg_bytes = canonicalize_frame(frame)
+    try:
+        jpeg = compute_jpeg_integrity_from_bytes(jpeg_bytes, frame.width, frame.height)
     except ConfirmationArtifactError as exc:
         raise CommonSessionDecoderError from exc
-    return jpeg.sha256, jpeg.size_bytes, rgb24_sha256(frame.rgb24_bytes, frame.width, frame.height)
+    return jpeg.sha256, jpeg.size_bytes, canonical.rgb24_sha256
 
 
 def make_frame_envelope(
@@ -1529,8 +1712,25 @@ def make_frame_envelope(
     frame: DecodedLocalFrame,
 ) -> StrictIdentityEnvelope:
     """Construct one strict identity-bound decoded-frame record."""
-    frame.validate()
-    jpeg_sha, jpeg_size, rgb_sha = validate_jpeg_and_rgb24(frame)
+    canonical, jpeg_bytes = canonicalize_frame(frame)
+    return _make_frame_envelope_from_canonical(
+        acquisition, decoder_operation_id, target_request_id, canonical, jpeg_bytes
+    )
+
+
+def _make_frame_envelope_from_canonical(
+    acquisition: CommonSessionAcquisition,
+    decoder_operation_id: str,
+    target_request_id: str,
+    frame: DecodedLocalFrame,
+    jpeg_bytes: bytes,
+) -> StrictIdentityEnvelope:
+    """Bind a frame record to one internally generated, strictly reopened JPEG."""
+    try:
+        jpeg = compute_jpeg_integrity_from_bytes(jpeg_bytes, frame.width, frame.height)
+    except ConfirmationArtifactError as exc:
+        raise CommonSessionDecoderError from exc
+    rgb_sha = rgb24_sha256(frame.rgb24_bytes, frame.width, frame.height)
     offset = frame.decoded_offset
     estimated = acquisition.request.start_utc + timedelta(seconds=int(offset))
     payload = {
@@ -1548,11 +1748,52 @@ def make_frame_envelope(
         "ordinal": frame.ordinal,
         "width": frame.width,
         "height": frame.height,
-        "jpeg_size_bytes": jpeg_size,
-        "jpeg_sha256": jpeg_sha,
+        "jpeg_size_bytes": jpeg.size_bytes,
+        "jpeg_sha256": jpeg.sha256,
         "rgb24_sha256": rgb_sha,
     }
     return StrictIdentityEnvelope.from_payload("frame", payload)
+
+
+def reopened_frame_from_run(
+    run: Phase7ERun,
+    frame_id: str,
+    requested_time_utc: datetime,
+) -> DecodedLocalFrame:
+    """Construct classifier input solely from a strictly reopened frame record and JPEG."""
+    record = next(
+        (item for item in run.records if item.family == "frame" and item.identity == frame_id),
+        None,
+    )
+    raw = run.frame_bytes.get(frame_id)
+    if record is None or type(raw) is not bytes:
+        raise CommonSessionValidationError
+    payload = record.payload
+    try:
+        with Image.open(BytesIO(raw)) as image:
+            image.load()
+            if image.format != "JPEG" or image.mode != "RGB":
+                raise CommonSessionValidationError
+            rgb24 = image.tobytes()
+    except (OSError, ValueError, UnidentifiedImageError) as exc:
+        raise CommonSessionValidationError from exc
+    frame = DecodedLocalFrame(
+        requested_time_utc=requested_time_utc,
+        raw_pts=payload["raw_pts"],
+        ordinal=payload["ordinal"],
+        width=payload["width"],
+        height=payload["height"],
+        rgb24_bytes=rgb24,
+        decoder_operation_id=payload["decoder_operation_id"],
+        decode_session_id=payload["common_session_id"],
+        container_start_pts=payload["container_start_pts"],
+        time_base_num=payload["time_base_num"],
+        time_base_den=payload["time_base_den"],
+    )
+    frame.validate()
+    if frame.rgb24_sha256 != payload["rgb24_sha256"]:
+        raise CommonSessionValidationError
+    return frame
 
 
 def make_decoder_envelope(
@@ -1765,13 +2006,12 @@ def make_alias_envelope(
 
 
 def classify_after_readback(
-    classifier: Classifier,
-    frame: DecodedLocalFrame,
-    target: object,
+    classifier: B4Bridge,
+    authoritative: Phase7EB4Input,
 ) -> object:
     """Invoke B4 only after the caller has strictly persisted/reopened a frame."""
     try:
-        result = classifier.classify(frame, target)
+        result = classifier.classify(authoritative)
     except CommonSessionError:
         raise
     except (OSError, TimeoutError, ValueError, TypeError, RecordingSearchError) as exc:
@@ -1780,6 +2020,7 @@ def classify_after_readback(
 
 
 __all__ = [
+    "B4Bridge",
     "CLEANUP_RESERVE_SECONDS",
     "CommonSessionAcquirer",
     "CommonSessionAcquisition",
@@ -1811,8 +2052,13 @@ __all__ = [
     "MediaProbe",
     "MediaProbeFacts",
     "Phase7E1CExecutor",
+    "Phase7EB4Input",
+    "ProductionB4Adapter",
+    "ProductionB4Context",
+    "ProductionB4ContextFactory",
     "CommonSessionPersistenceAdapter",
     "bind_session",
+    "canonicalize_frame",
     "classify_after_readback",
     "collapse_target_aliases",
     "admit_frame_then_classify",
@@ -1826,6 +2072,7 @@ __all__ = [
     "make_target_envelope",
     "rgb24_sha256",
     "reject_duplicate_frame_evidence",
+    "reopened_frame_from_run",
     "select_target_index",
     "validate_decoded_order",
     "validate_jpeg_and_rgb24",

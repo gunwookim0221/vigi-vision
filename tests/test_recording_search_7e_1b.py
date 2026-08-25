@@ -7,10 +7,12 @@ from __future__ import annotations
 import json
 import hashlib
 import re
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import pytest
+from PIL import Image
 
 from vigi_vision.recording_search_7e_models import (
     Schema5PhaseState,
@@ -426,10 +428,20 @@ def test_schema6_increment_persists_decoder_and_frame_bytes(tmp_path: Path) -> N
         [*common, decoder],
         expected_manifest_id=manifest6.identity,
     )
-    raw = b"jpeg-placeholder"
+    image = Image.new("RGB", (32, 32), (32, 64, 96))
+    stream = BytesIO()
+    image.save(stream, format="JPEG", quality=95, subsampling=0)
+    raw = stream.getvalue()
+    with Image.open(BytesIO(raw)) as reopened:
+        reopened.load()
+        rgb_digest = hashlib.sha256(reopened.tobytes()).hexdigest()
     frame_payload = dict(vectors["frame"]["payload"])
     frame_payload.update(
-        {"jpeg_size_bytes": len(raw), "jpeg_sha256": hashlib.sha256(raw).hexdigest()}
+        {
+            "jpeg_size_bytes": len(raw),
+            "jpeg_sha256": hashlib.sha256(raw).hexdigest(),
+            "rgb24_sha256": rgb_digest,
+        }
     )
     frame_payload["decoder_operation_id"] = decoder.identity
     frame = StrictIdentityEnvelope.from_payload("frame", frame_payload)

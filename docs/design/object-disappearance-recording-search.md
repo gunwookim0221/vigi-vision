@@ -318,6 +318,10 @@ the envelope ID, requires the exact payload allowlist, recomputes the ID, and
 compares it. A payload containing its own computed identity, or any unknown
 payload key, is invalid.
 
+Every `classification-operation` and `observation` canonical payload requires
+both `investigation_id` and `run_id`; omitting either ownership binding is
+contract-invalid and has no compatibility or fallback interpretation.
+
 The 26 persisted identity families are acyclic. The search `policy`, full
 `classifier-policy`, and `media-generation-policy` are distinct. A mutable
 classifier label is display metadata only and is never an identity. The full
@@ -426,9 +430,10 @@ The following isolated vectors cover every production-shaped `unusable` `RawComp
   {
     "family": "classification-operation",
     "domain": "vigi.recording-search.request-relative.classification-operation.v1",
-    "expected_id": "rr-classification-operation-v1-1dbd66f45070625e3b30e253186fa816c6bc63311060c3aa58c97cb305513d39",
+    "expected_id": "rr-classification-operation-v1-f2e0c082c69725a3409aba0bac808b4863e9e9372edcbf010e953b7af08d28ac",
     "payload": {
       "investigation_id": "inv-01",
+      "run_id": "run-01",
       "frame_id": "rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec",
       "target_request_id": "rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc",
       "baseline_identity": "baseline-v3-01",
@@ -457,11 +462,12 @@ The following isolated vectors cover every production-shaped `unusable` `RawComp
   {
     "family": "observation",
     "domain": "vigi.recording-search.request-relative.observation.v1",
-    "expected_id": "rr-observation-v1-67522438a4fd5a491c95213a8b017b727ec3d6f77d20f00f70a86e3e434d4513",
+    "expected_id": "rr-observation-v1-2d3e64cb010c66a5c49f5f2c852e3f0edd0d0d6bfe853997481cc01cca7414ab",
     "payload": {
       "investigation_id": "inv-01",
+      "run_id": "run-01",
       "common_session_id": "rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68",
-      "classification_operation_id": "rr-classification-operation-v1-1dbd66f45070625e3b30e253186fa816c6bc63311060c3aa58c97cb305513d39",
+      "classification_operation_id": "rr-classification-operation-v1-f2e0c082c69725a3409aba0bac808b4863e9e9372edcbf010e953b7af08d28ac",
       "frame_id": "rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec",
       "target_request_id": "rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc",
       "classifier_policy_id": "rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f",
@@ -486,9 +492,10 @@ The following isolated vectors cover every production-shaped `unusable` `RawComp
   {
     "family": "classification-operation",
     "domain": "vigi.recording-search.request-relative.classification-operation.v1",
-    "expected_id": "rr-classification-operation-v1-6e019db4d6b91c39f268a33c42d65366d6b7be6e00048218da404226f0c6f34d",
+    "expected_id": "rr-classification-operation-v1-805385ca09bcce7ec50bb6ac3fcbe531e20e05dc07a6c3403792c3c842724d43",
     "payload": {
       "investigation_id": "inv-01",
+      "run_id": "run-01",
       "frame_id": "rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec",
       "target_request_id": "rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc",
       "baseline_identity": "baseline-v3-01",
@@ -517,11 +524,12 @@ The following isolated vectors cover every production-shaped `unusable` `RawComp
   {
     "family": "observation",
     "domain": "vigi.recording-search.request-relative.observation.v1",
-    "expected_id": "rr-observation-v1-6da539f32e5ecf504c9350773b3ecda5cf974bb394e1adb0180d294c831984b3",
+    "expected_id": "rr-observation-v1-71310712455b1791b6476a100f09314df8456797d813a58fa5f0c0444ba17cf4",
     "payload": {
       "investigation_id": "inv-01",
+      "run_id": "run-01",
       "common_session_id": "rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68",
-      "classification_operation_id": "rr-classification-operation-v1-6e019db4d6b91c39f268a33c42d65366d6b7be6e00048218da404226f0c6f34d",
+      "classification_operation_id": "rr-classification-operation-v1-805385ca09bcce7ec50bb6ac3fcbe531e20e05dc07a6c3403792c3c842724d43",
       "frame_id": "rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec",
       "target_request_id": "rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc",
       "classifier_policy_id": "rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f",
@@ -546,9 +554,10 @@ The following isolated vectors cover every production-shaped `unusable` `RawComp
   {
     "family": "classification-operation",
     "domain": "vigi.recording-search.request-relative.classification-operation.v1",
-    "expected_id": "rr-classification-operation-v1-61ec3340f3e380a786956e0d3378faabf25c67c4f00d46a25673d8804a3913de",
+    "expected_id": "rr-classification-operation-v1-3f94f10389b5624f168adc6c9548b40e5367b45f8627f4ff579ac05d3b429ecf",
     "payload": {
       "investigation_id": "inv-01",
+      "run_id": "run-01",
       "frame_id": "rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec",
       "target_request_id": "rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc",
       "baseline_identity": "baseline-v3-01",
@@ -577,11 +586,12 @@ The following isolated vectors cover every production-shaped `unusable` `RawComp
   {
     "family": "observation",
     "domain": "vigi.recording-search.request-relative.observation.v1",
-    "expected_id": "rr-observation-v1-923d676e5e8e4165167b07ddb2e2b5b35c7e082a14a4fe5c12e9cbfe1420c808",
+    "expected_id": "rr-observation-v1-a658ecf4c991c3b14869be0aeb129ff17133c9e4578575cb5517d0ed22ff8816",
     "payload": {
       "investigation_id": "inv-01",
+      "run_id": "run-01",
       "common_session_id": "rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68",
-      "classification_operation_id": "rr-classification-operation-v1-61ec3340f3e380a786956e0d3378faabf25c67c4f00d46a25673d8804a3913de",
+      "classification_operation_id": "rr-classification-operation-v1-3f94f10389b5624f168adc6c9548b40e5367b45f8627f4ff579ac05d3b429ecf",
       "frame_id": "rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec",
       "target_request_id": "rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc",
       "classifier_policy_id": "rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f",
@@ -606,9 +616,10 @@ The following isolated vectors cover every production-shaped `unusable` `RawComp
   {
     "family": "classification-operation",
     "domain": "vigi.recording-search.request-relative.classification-operation.v1",
-    "expected_id": "rr-classification-operation-v1-fbe9f2a846491b17e9f7164c36268dc1cb4c37ced2f92ecef15f00155a0ed481",
+    "expected_id": "rr-classification-operation-v1-6c4b9822e6c070806431ffff61e6ae84b185531ce451b4b0b4fd7f829e6befaf",
     "payload": {
       "investigation_id": "inv-01",
+      "run_id": "run-01",
       "frame_id": "rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec",
       "target_request_id": "rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc",
       "baseline_identity": "baseline-v3-01",
@@ -637,11 +648,12 @@ The following isolated vectors cover every production-shaped `unusable` `RawComp
   {
     "family": "observation",
     "domain": "vigi.recording-search.request-relative.observation.v1",
-    "expected_id": "rr-observation-v1-a0271ce84f9730913e03d58618fededd7af667f151e9c767c363bef1e2ed7505",
+    "expected_id": "rr-observation-v1-fe51a07a629e672b68bbc1eb172b7250c39269c3b11421fa6ef3d8a802e05767",
     "payload": {
       "investigation_id": "inv-01",
+      "run_id": "run-01",
       "common_session_id": "rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68",
-      "classification_operation_id": "rr-classification-operation-v1-fbe9f2a846491b17e9f7164c36268dc1cb4c37ced2f92ecef15f00155a0ed481",
+      "classification_operation_id": "rr-classification-operation-v1-6c4b9822e6c070806431ffff61e6ae84b185531ce451b4b0b4fd7f829e6befaf",
       "frame_id": "rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec",
       "target_request_id": "rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc",
       "classifier_policy_id": "rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f",
@@ -666,9 +678,10 @@ The following isolated vectors cover every production-shaped `unusable` `RawComp
   {
     "family": "classification-operation",
     "domain": "vigi.recording-search.request-relative.classification-operation.v1",
-    "expected_id": "rr-classification-operation-v1-f1baeb9d9bcf565613b1550637ae8b143196b90fd039f01a69a2aef8f64e2c05",
+    "expected_id": "rr-classification-operation-v1-39ebf87ece97aa4cf75ef737378d0c2a3ecb49805b8a1b80594dec9708702be1",
     "payload": {
       "investigation_id": "inv-01",
+      "run_id": "run-01",
       "frame_id": "rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec",
       "target_request_id": "rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc",
       "baseline_identity": "baseline-v3-01",
@@ -697,11 +710,12 @@ The following isolated vectors cover every production-shaped `unusable` `RawComp
   {
     "family": "observation",
     "domain": "vigi.recording-search.request-relative.observation.v1",
-    "expected_id": "rr-observation-v1-3b3aa77484a8686ed1a53ebaf5887285156b71e54805403b7000cf22e8f7e88f",
+    "expected_id": "rr-observation-v1-334c8720fc95523d7c2912f13148c53a2953dcd9ba3e7ec7ec040a555f6f62a9",
     "payload": {
       "investigation_id": "inv-01",
+      "run_id": "run-01",
       "common_session_id": "rr-common-session-v1-f591f022302f4296debe0a5a5480e39e138f83246dfac1322d37a53ecc1afb68",
-      "classification_operation_id": "rr-classification-operation-v1-f1baeb9d9bcf565613b1550637ae8b143196b90fd039f01a69a2aef8f64e2c05",
+      "classification_operation_id": "rr-classification-operation-v1-39ebf87ece97aa4cf75ef737378d0c2a3ecb49805b8a1b80594dec9708702be1",
       "frame_id": "rr-frame-v1-547b69337ff32000e8557b8c77a7a3bb45eb2d61b8429af59014339ba5a3bcec",
       "target_request_id": "rr-target-request-v1-576bcea11419e9b65ab8d25b95405d97039dd394c0b61213fee359f083c096cc",
       "classifier_policy_id": "rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f",

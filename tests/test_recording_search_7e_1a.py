@@ -57,6 +57,38 @@ def test_all_59_vectors_and_26_families_reproduce() -> None:
     assert validate_golden_vectors(_vectors()) == (59, 26)
 
 
+def test_every_family_requires_its_complete_exact_key_set() -> None:
+    representatives: dict[str, dict[str, Any]] = {}
+    for vector in _vectors():
+        representatives.setdefault(vector["family"], vector["payload"])
+    assert len(representatives) == 26
+    for family, payload in representatives.items():
+        for key in payload:
+            if family == "target-request" and key == "origin_target_request_id":
+                continue
+            with pytest.raises(IdentityValidationError):
+                identity_for(
+                    family, {name: value for name, value in payload.items() if name != key}
+                )
+
+
+def test_supplemental_b4_operations_and_observations_bind_run_ownership() -> None:
+    supplemental = _vectors()[49:]
+    affected = [
+        vector
+        for vector in supplemental
+        if vector["family"] in {"classification-operation", "observation"}
+    ]
+    assert len(affected) == 10
+    assert all(vector["payload"]["run_id"] == "run-01" for vector in affected)
+    for vector in affected:
+        with pytest.raises(IdentityValidationError, match="key set"):
+            identity_for(
+                vector["family"],
+                {key: value for key, value in vector["payload"].items() if key != "run_id"},
+            )
+
+
 def test_canonical_json_is_sorted_utf8_and_domain_separated() -> None:
     payload = {"z": "한글", "a": [1, 2]}
     assert canonical_payload(payload) == '{"a":[1,2],"z":"한글"}'
@@ -309,13 +341,15 @@ def test_phase8_manifest_state_union_is_closed(state: str) -> None:
                     "common_media_tombstone_name": ".delete-session",
                 }
             )
+        base.pop("failure_reason")
+        if state == "CLIP_READY":
+            base.pop("phase8_request_id")
     elif state == "DELETED":
-        base.update(
-            {
-                "failure_reason": None,
-                "deletion_result": "DELETED",
-                "source_clip_tombstone_name": ".delete-clip",
-                "common_media_tombstone_name": ".delete-session",
-            }
+        base = dict(
+            next(
+                item["payload"]
+                for item in _vectors()
+                if item["family"] == "phase8-manifest" and item["payload"]["state"] == "DELETED"
+            )
         )
     assert Phase8Manifest(payload=base).payload["state"] == state
