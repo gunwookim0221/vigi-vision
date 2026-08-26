@@ -165,6 +165,23 @@ class RecordingPlanner:
             raise RecordingUnavailableError
         return min(candidates, key=lambda segment: (segment.start_utc, segment.end_utc))
 
+    def find_segments_for_window(self, window: RecordingWindow) -> tuple[RecordingSegment, ...]:
+        """Return every SDK segment intersecting one bounded half-open window.
+
+        Phase 7E uses the complete returned inventory to prove that exactly one
+        segment—not merely the first match—covers the entire requested window.
+        """
+        try:
+            process_id = self._process_id()
+            return tuple(
+                segment
+                for recording_day in self._matching_days(window)
+                for segment in self._segments(window.channel_id, process_id, recording_day)
+                if _overlaps(window, segment)
+            )
+        except VigiError as error:
+            raise diagnose_nvr_error(error) from None
+
     def plan_for_segment(self, segment: RecordingSegment, window: RecordingWindow) -> ReplayRequest:
         """Build a replay request only when its whole window stays in ``segment``."""
         if (

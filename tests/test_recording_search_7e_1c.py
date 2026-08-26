@@ -1,5 +1,5 @@
-# pyright: reportAny=false, reportExplicitAny=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportOptionalMemberAccess=false, reportUnannotatedClassAttribute=false, reportUnusedCallResult=false, reportUnusedParameter=false, reportUnusedFunction=false
-# ruff: noqa: ANN401, I001
+# pyright: reportAny=false, reportExplicitAny=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportOptionalMemberAccess=false, reportUnannotatedClassAttribute=false, reportUnusedCallResult=false, reportUnusedParameter=false, reportUnusedFunction=false, reportImplicitOverride=false, reportUnknownLambdaType=false
+# ruff: noqa: ANN401, I001, PLR0915
 """Focused Phase 7E-1C common-session tests."""
 
 from __future__ import annotations
@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 from datetime import date, datetime, timedelta, timezone
 from fractions import Fraction
 from pathlib import Path
@@ -20,18 +21,27 @@ from vigi_vision.recording_search_7e_1c import (
     CommonSessionPolicy,
     CommonSessionRequest,
     CommonSessionReplayTimeoutError,
+    CommonSessionRecordingUnavailableError,
+    CommonSessionDeadlineError,
+    CommonSessionNonmonotonicPtsError,
+    CommonSessionRecordingGapError,
     DecodedLocalFrame,
     DurableCommonSessionMedia,
+    FfmpegLocalDecoder,
+    InvocationBudget,
     MediaProbeFacts,
     Phase7E1CExecutor,
     ProductionB4Adapter,
     ProductionB4Context,
     admit_frame_then_classify,
     collapse_target_aliases,
+    execute_local_targets,
     make_decoder_envelope,
     make_frame_envelope,
     rgb24_sha256,
     select_target_index,
+    validate_decoded_order,
+    validate_repeated_decode,
 )
 from vigi_vision.object_presence_evidence import RawComparison
 from vigi_vision.object_presence_values import ClassificationOutcome, VisualStatus
@@ -43,8 +53,13 @@ from vigi_vision.recording_search_b4_models import (
     PublishedClassificationResult,
 )
 from vigi_vision.recording_search_7e_models import StrictIdentityEnvelope
-from vigi_vision.recording_search_7e_repository import RecordingSearch7ERepository
-from vigi_vision.recording_search_7e_repository import Phase7ECorruptError
+from vigi_vision.recording_search_7e_repository import (
+    Phase7ECorruptError,
+    Phase7EInProgressError,
+    RecordingSearch7ERepository,
+)
+from vigi_vision.recording_search_7e_validation import Schema5Envelope
+from vigi_vision.recording_search_7e_models import Schema5PhaseState
 from vigi_vision.replay import ReplayClip
 
 
@@ -89,6 +104,10 @@ class _Planner:
     def find_covering_segment(self, channel_id: int, instant_utc: datetime) -> RecordingSegment:
         self.find_calls += 1
         return self.segment
+
+    def find_segments_for_window(self, window: Any) -> tuple[RecordingSegment, ...]:
+        self.find_calls += 1
+        return (self.segment,)
 
     def plan_for_segment(self, segment: RecordingSegment, window: Any) -> ReplayRequest:
         self.plan_calls += 1
@@ -190,9 +209,13 @@ def test_replay_timeout_is_safe_and_partial_path_is_removed(tmp_path: Path) -> N
 
 def test_durable_media_is_reused_and_read_back(tmp_path: Path) -> None:
     acquirer, _, _ = _acquirer(tmp_path)
-    acquisition = acquirer.acquire(_request())
+    request = _request()
+    acquisition = acquirer.acquire(request)
     bound = acquisition
-    durable = DurableCommonSessionMedia(tmp_path / ".media").publish(bound)
+    repository = RecordingSearch7ERepository(tmp_path / "runs")
+    executor = Phase7E1CExecutor(repository, acquirer)
+    with executor.invocation(request) as invocation:
+        durable = DurableCommonSessionMedia(repository).publish(bound, invocation)
     assert durable.media_path.is_file()
     assert durable.media_path.read_bytes() == b"one-retained-session"
     acquisition.remove()
@@ -238,11 +261,7 @@ def test_executor_admits_schema6_after_one_common_session(tmp_path: Path) -> Non
     policy = CommonSessionPolicy.from_payload(policy_envelope.payload)
     acquirer, extractor, _ = _acquirer(tmp_path)
     repository = RecordingSearch7ERepository(tmp_path / "runs")
-    executor = Phase7E1CExecutor(
-        repository,
-        acquirer,
-        DurableCommonSessionMedia(tmp_path / ".media"),
-    )
+    executor = Phase7E1CExecutor(repository, acquirer)
     result = executor.execute(
         _request(policy),
         schema5,
@@ -253,7 +272,52 @@ def test_executor_admits_schema6_after_one_common_session(tmp_path: Path) -> Non
     assert result.run.is_schema6
     assert extractor.calls == 1
     assert result.acquisition.media_path.is_file()
+    assert result.acquisition.media_path.is_relative_to(repository.root / ".media")
     assert getattr(result.run.state, "target_state", None).value == "REQUESTED"
+
+
+def test_executor_publishes_failed_state_and_releases_owner_on_replay_failure(
+    tmp_path: Path,
+) -> None:
+    vectors = _vectors()
+    by_family = {item["family"]: item for item in vectors}
+    schema5 = _env(by_family["schema5-manifest"])
+    target_ids = set(schema5.payload["coarse_target_request_ids"])
+    targets = tuple(
+        _env(item)
+        for item in vectors
+        if item["family"] == "target-request" and item["expected_id"] in target_ids
+    )
+    policy = _env(by_family["policy"])
+    base = (policy, _env(by_family["coarse-plan"]), *targets)
+    _unused_acquirer, _, planner = _acquirer(tmp_path)
+
+    class FailingExtractor:
+        def extract(self, request: ReplayRequest) -> ReplayClip:
+            raise CommonSessionReplayTimeoutError
+
+    repository = RecordingSearch7ERepository(tmp_path / "runs", lock_timeout_seconds=0)
+    executor = Phase7E1CExecutor(
+        repository,
+        CommonSessionAcquirer(planner, FailingExtractor(), _Probe()),
+    )
+    with pytest.raises(CommonSessionReplayTimeoutError):
+        executor.execute(
+            _request(CommonSessionPolicy.from_payload(policy.payload)),
+            schema5,
+            base,
+            _env(by_family["classifier-policy"]),
+            targets,
+        )
+    failed = repository.reopen_schema5("inv-01", "run-01")
+    assert isinstance(failed.state, Schema5Envelope)
+    assert failed.state.run_state == "FAILED"
+    assert failed.state.phase_state is Schema5PhaseState.ACQUISITION_FAILED
+    assert failed.state.reason_code == "replay_timeout"
+    with repository.invocation_ownership("inv-01", "run-01", timeout_seconds=0):
+        pass
+    media_root = repository.root / ".media"
+    assert not media_root.exists() or not tuple(media_root.rglob("*.mp4"))
 
 
 def test_frame_is_reopened_before_b4_and_observation_is_indexed(tmp_path: Path) -> None:
@@ -273,16 +337,17 @@ def test_frame_is_reopened_before_b4_and_observation_is_indexed(tmp_path: Path) 
     schema5 = _env(by_family["schema5-manifest"])
     acquirer, _, _ = _acquirer(tmp_path)
     repository = RecordingSearch7ERepository(tmp_path / "runs")
-    result = Phase7E1CExecutor(
-        repository,
-        acquirer,
-        DurableCommonSessionMedia(tmp_path / ".media"),
-    ).execute(
-        _request(CommonSessionPolicy.from_payload(policy_envelope.payload)),
+    request_model = _request(CommonSessionPolicy.from_payload(policy_envelope.payload))
+    executor = Phase7E1CExecutor(repository, acquirer)
+    invocation_context = executor.invocation(request_model)
+    invocation = invocation_context.__enter__()
+    result = executor.execute(
+        request_model,
         schema5,
         (policy_envelope, plan_envelope, *target_envelopes),
         classifier_policy,
         target_envelopes,
+        invocation=invocation,
     )
     target_envelope = target_envelopes[0]
     decoder_operation = make_decoder_envelope(result.acquisition, 1, [target_envelope.identity])
@@ -402,7 +467,9 @@ def test_frame_is_reopened_before_b4_and_observation_is_indexed(tmp_path: Path) 
         frame,
         Classifier(),
         classification_attempt_id="attempt-1",
+        invocation=invocation,
     )
+    invocation_context.__exit__(None, None, None)
     assert final.is_schema6
     assert calls == ["strict-readback", "production-b4"]
     assert any(record.family == "observation" for record in final.records)
@@ -428,11 +495,7 @@ def test_strict_reopen_rehashes_and_reprobes_retained_mp4(tmp_path: Path) -> Non
     policy = _env(by_family["policy"])
     acquirer, _, _ = _acquirer(tmp_path)
     repository = RecordingSearch7ERepository(tmp_path / "runs")
-    result = Phase7E1CExecutor(
-        repository,
-        acquirer,
-        DurableCommonSessionMedia(tmp_path / ".media"),
-    ).execute(
+    result = Phase7E1CExecutor(repository, acquirer).execute(
         _request(CommonSessionPolicy.from_payload(policy.payload)),
         _env(by_family["schema5-manifest"]),
         (policy, _env(by_family["coarse-plan"]), *targets),
@@ -462,3 +525,228 @@ def test_strict_reopen_rehashes_and_reprobes_retained_mp4(tmp_path: Path) -> Non
     with pytest.raises(Phase7ECorruptError):
         repository.reopen_schema6("inv-01", "run-01")
     assert (result.run.root / "manifest.json").read_bytes() == before
+
+
+def test_invocation_owner_blocks_recovery_and_unrelated_investigation_can_run(
+    tmp_path: Path,
+) -> None:
+    vectors = _vectors()
+    by_family = {item["family"]: item for item in vectors}
+    manifest = _env(by_family["schema5-manifest"])
+    target_ids = set(manifest.payload["coarse_target_request_ids"])
+    records = tuple(
+        _env(item)
+        for item in vectors
+        if item["family"] in {"policy", "coarse-plan"}
+        or (item["family"] == "target-request" and item["expected_id"] in target_ids)
+    )
+    repository = RecordingSearch7ERepository(tmp_path / "runs", lock_timeout_seconds=0)
+    repository.create_schema5(
+        manifest,
+        Schema5Envelope(
+            run_state="RUNNING",
+            phase_state=Schema5PhaseState.PLANNED,
+            active_replay_operation_id=None,
+            reason_code=None,
+            attempt_count=0,
+        ),
+        records,
+    )
+    with repository.invocation_ownership("inv-01", "run-01", timeout_seconds=0):
+        with pytest.raises(Phase7EInProgressError):
+            repository.recover_active("inv-01", "run-01")
+        with repository.invocation_ownership("inv-02", "run-02", timeout_seconds=0):
+            pass
+    recovered = repository.recover_active("inv-01", "run-01")
+    assert recovered.state.run_state == "INTERRUPTED"
+
+
+def test_released_or_foreign_invocation_owner_is_rejected(tmp_path: Path) -> None:
+    first = RecordingSearch7ERepository(tmp_path / "first")
+    second = RecordingSearch7ERepository(tmp_path / "second")
+    with (
+        first.invocation_ownership("inv-01", "run-01", timeout_seconds=0) as owner,
+        pytest.raises(Phase7EInProgressError),
+    ):
+        owner.validate(second, "inv-01", "run-01")
+    with pytest.raises(Phase7EInProgressError):
+        owner.validate(first, "inv-01", "run-01")
+
+
+def test_one_budget_shrinks_timeouts_and_preserves_cleanup_reserve() -> None:
+    class Clock:
+        value = 0.0
+
+        def __call__(self) -> float:
+            return self.value
+
+    clock = Clock()
+    policy = CommonSessionPolicy(invocation_deadline_seconds=100, cleanup_reserve_seconds=60)
+    budget = InvocationBudget(policy, clock)
+    assert budget.operation_timeout(120) == 40
+    clock.value = 15
+    assert budget.operation_timeout(120) == 25
+    clock.value = 40
+    with pytest.raises(CommonSessionDeadlineError):
+        budget.operation_timeout(1, minimum_start_seconds=0.001)
+    assert budget.cleanup_remaining() == 60
+
+
+def test_repeated_decoder_passes_share_the_same_deadline(tmp_path: Path) -> None:
+    class Clock:
+        value = 0.0
+
+        def __call__(self) -> float:
+            return self.value
+
+    clock = Clock()
+    policy = CommonSessionPolicy(invocation_deadline_seconds=200, cleanup_reserve_seconds=60)
+    request = _request(policy)
+    acquirer, _, _ = _acquirer(tmp_path)
+    acquisition = acquirer.acquire(request)
+    received: list[float] = []
+
+    class DecoderFake:
+        def decode(
+            self,
+            session: Any,
+            targets: tuple[datetime, ...],
+            timeout_seconds: float,
+        ) -> tuple[DecodedLocalFrame, ...]:
+            received.append(timeout_seconds)
+            clock.value += 30
+            ordinal = len(received) - 1
+            value = len(received)
+            return (
+                DecodedLocalFrame(
+                    targets[0],
+                    ordinal,
+                    ordinal,
+                    1,
+                    1,
+                    bytes((value, value, value)),
+                    decode_session_id=session.common_session_id,
+                ),
+            )
+
+    budget = InvocationBudget(policy, clock)
+    execute_local_targets(
+        acquisition,
+        DecoderFake(),
+        (request.start_utc,),
+        budget=budget,
+    )
+    execute_local_targets(
+        acquisition,
+        DecoderFake(),
+        (request.start_utc + timedelta(seconds=1),),
+        pass_number=2,
+        budget=budget,
+    )
+    assert received == [100, 70]
+
+
+def test_unique_full_window_segment_is_required(tmp_path: Path) -> None:
+    acquirer, _, planner = _acquirer(tmp_path)
+    request = _request()
+    assert acquirer.locate(request) == planner.segment
+
+    class AmbiguousPlanner(_Planner):
+        def find_segments_for_window(self, window: Any) -> tuple[RecordingSegment, ...]:
+            return (self.segment, self.segment)
+
+    ambiguous = CommonSessionAcquirer(
+        AmbiguousPlanner(planner.segment), _Extractor(tmp_path / "x"), _Probe()
+    )
+    with pytest.raises(CommonSessionRecordingUnavailableError):
+        ambiguous.locate(request)
+    partial = RecordingSegment(
+        1,
+        planner.segment.recording_day,
+        planner.segment.start_epoch_seconds,
+        planner.segment.end_epoch_seconds,
+        request.start_utc + timedelta(seconds=1),
+        request.end_utc,
+    )
+    with pytest.raises(CommonSessionRecordingUnavailableError):
+        CommonSessionAcquirer(_Planner(partial), _Extractor(tmp_path / "y"), _Probe()).locate(
+            request
+        )
+
+
+def test_nonzero_start_pts_is_subtracted_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    acquirer, _, _ = _acquirer(tmp_path)
+    acquisition = acquirer.acquire(_request())
+    media = MediaProbeFacts(
+        selected_video_stream_index=0,
+        video_stream_count=1,
+        audio_stream_count=0,
+        container_start_pts=1_000,
+        time_base_num=1,
+        time_base_den=100,
+        duration_ticks=400,
+        width=1,
+        height=1,
+        average_frame_rate_num=1,
+        average_frame_rate_den=1,
+    )
+    acquisition = type(acquisition)(
+        acquisition.request,
+        acquisition.segment,
+        acquisition.replay_request,
+        acquisition.replay_clip,
+        media,
+        acquisition.session,
+        acquisition.retained_mp4_path,
+    )
+    probe = subprocess.CompletedProcess(
+        (),
+        0,
+        json.dumps(
+            {
+                "frames": [
+                    {"best_effort_timestamp": str(value)} for value in (1000, 1100, 1200, 1300)
+                ]
+            }
+        ),
+        "",
+    )
+    monkeypatch.setattr(
+        "vigi_vision.recording_search_7e_1c.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess((), 0, b"\x01\x02\x03", b""),
+    )
+    decoder = FfmpegLocalDecoder(Path("ffmpeg"), Path("ffprobe"), lambda _args, _timeout: probe)
+    frame = decoder.decode(
+        acquisition,
+        (acquisition.request.start_utc + timedelta(seconds=1),),
+        10,
+    )[0]
+    assert frame.raw_pts == 1100
+    assert frame.decoded_offset == Fraction(1, 1)
+
+
+def test_timing_rejects_backward_pts_and_cross_pass_redefinition() -> None:
+    start = datetime(2026, 7, 20, 3, 0, tzinfo=timezone.utc)
+
+    def frame(raw_pts: int, ordinal: int, value: int = 1) -> DecodedLocalFrame:
+        return DecodedLocalFrame(
+            start + timedelta(seconds=ordinal),
+            raw_pts,
+            ordinal,
+            1,
+            1,
+            bytes((value, value, value)),
+            decode_session_id="session",
+            container_start_pts=100,
+            time_base_num=1,
+            time_base_den=10,
+        )
+
+    valid = (frame(100, 0), frame(110, 1, 2))
+    validate_decoded_order(valid)
+    with pytest.raises(CommonSessionNonmonotonicPtsError):
+        validate_decoded_order((frame(110, 0), frame(109, 1, 2)))
+    with pytest.raises(CommonSessionRecordingGapError):
+        validate_repeated_decode(valid, (frame(100, 0), frame(110, 1, 3)))

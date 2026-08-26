@@ -80,6 +80,40 @@ class Phase7EReadbackError(Phase7ERepositoryError):
     """A committed replacement could not be strictly read back."""
 
 
+@dataclass(slots=True)
+class Phase7EInvocationOwnership:
+    """One live invocation's continuously held per-investigation OS lock."""
+
+    repository: RecordingSearch7ERepository = field(repr=False)
+    investigation_id: str
+    run_id: str
+    lock: LocalInvestigationLock = field(repr=False)
+    active: bool = True
+
+    def validate(
+        self,
+        repository: RecordingSearch7ERepository,
+        investigation_id: str,
+        run_id: str | None = None,
+    ) -> None:
+        """Fail closed unless this exact live owner protects the requested run."""
+        if (
+            not self.active
+            or not self.lock.held
+            or self.repository is not repository
+            or self.investigation_id != investigation_id
+            or (run_id is not None and self.run_id != run_id)
+        ):
+            raise Phase7EInProgressError
+
+    def release(self) -> None:
+        """Release the OS handle exactly once."""
+        if not self.active:
+            return
+        self.active = False
+        self.lock.release()
+
+
 class PublicationStatus(str, Enum):
     """Deterministic result of an idempotent publication attempt."""
 
@@ -267,6 +301,31 @@ class RecordingSearch7ERepository:
             raise Phase7ECorruptError
         return path
 
+    @contextmanager
+    def invocation_ownership(
+        self,
+        investigation_id: str,
+        run_id: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> Iterator[Phase7EInvocationOwnership]:
+        """Hold the approved OS lock across one complete live invocation.
+
+        Repository mutations performed with the yielded owner take only the
+        short in-process guard and never recursively reacquire the OS lock.
+        """
+        self.ensure_root()
+        _ = self.run_path(investigation_id, run_id)
+        lock = LocalInvestigationLock(self.lock_path(investigation_id))
+        timeout = self.lock_timeout_seconds if timeout_seconds is None else timeout_seconds
+        if timeout < 0 or not lock.try_acquire(timeout):
+            raise Phase7EInProgressError
+        ownership = Phase7EInvocationOwnership(self, investigation_id, run_id, lock)
+        try:
+            yield ownership
+        finally:
+            ownership.release()
+
     def create_schema5(
         self,
         manifest: StrictIdentityEnvelope | Schema5Manifest | Mapping[str, Any],
@@ -275,6 +334,7 @@ class RecordingSearch7ERepository:
         *,
         investigation_id: str | None = None,
         run_id: str | None = None,
+        ownership: Phase7EInvocationOwnership | None = None,
     ) -> PublicationResult:
         """Atomically create a strict pre-acquisition schema-5 run."""
         envelope = _coerce_envelope(manifest, "schema5-manifest")
@@ -284,7 +344,7 @@ class RecordingSearch7ERepository:
         inv, run = _manifest_ids(envelope, investigation_id, run_id)
         children = _coerce_children(records)
         self._validate_schema5_proposal(envelope, phase, children)
-        with self._locked(inv):
+        with self._locked(inv, ownership, run):
             final = self.run_path(inv, run)
             if final.exists() or final.is_symlink():
                 existing = self._reopen_unlocked(inv, run, expected_schema=5)
@@ -317,12 +377,13 @@ class RecordingSearch7ERepository:
         records: Iterable[object] | Mapping[str, object] = (),
         *,
         expected_manifest_id: str | None = None,
+        ownership: Phase7EInvocationOwnership | None = None,
     ) -> PublicationResult:
         """Persist one legal successor in the mutable schema-5 lifecycle."""
         envelope = _coerce_envelope(proposal, "schema5-manifest")
         next_state = validate_schema5_state(state)
         children = _coerce_children(records)
-        with self._locked(investigation_id):
+        with self._locked(investigation_id, ownership, run_id):
             current = self._reopen_unlocked(investigation_id, run_id, expected_schema=5)
             if not isinstance(current.state, Schema5Envelope):
                 raise Phase7ECorruptError
@@ -359,9 +420,15 @@ class RecordingSearch7ERepository:
 
     transition_schema5 = admit_schema5
 
-    def reopen_schema5(self, investigation_id: str, run_id: str) -> Phase7ERun:
+    def reopen_schema5(
+        self,
+        investigation_id: str,
+        run_id: str,
+        *,
+        ownership: Phase7EInvocationOwnership | None = None,
+    ) -> Phase7ERun:
         """Strictly reopen schema 5 without recovery or mutation."""
-        with self._locked(investigation_id):
+        with self._locked(investigation_id, ownership, run_id):
             return self._reopen_unlocked(investigation_id, run_id, expected_schema=5)
 
     strict_reopen_schema5 = reopen_schema5
@@ -376,12 +443,13 @@ class RecordingSearch7ERepository:
         records: Iterable[object] | Mapping[str, object] = (),
         *,
         expected_schema5_manifest_id: str | None = None,
+        ownership: Phase7EInvocationOwnership | None = None,
     ) -> PublicationResult:
         """Atomically publish the approved schema-5 to schema-6 successor."""
         envelope = _coerce_envelope(proposal, "schema6-manifest")
         target_state = validate_schema6_state(state)
         children = _coerce_children(records)
-        with self._locked(investigation_id):
+        with self._locked(investigation_id, ownership, run_id):
             current = self._reopen_unlocked(investigation_id, run_id, expected_schema=None)
             if current.is_schema6:
                 if current.manifest_id != envelope.identity or current.state != target_state:
@@ -428,13 +496,14 @@ class RecordingSearch7ERepository:
         *,
         expected_manifest_id: str | None = None,
         binary_records: Mapping[str, bytes] | None = None,
+        ownership: Phase7EInvocationOwnership | None = None,
     ) -> PublicationResult:
         """Admit one validated schema-6 successor and its immutable children."""
         envelope = _coerce_envelope(proposal, "schema6-manifest")
         target_state = validate_schema6_state(state)
         children = _coerce_children(records)
         binary = dict(binary_records or {})
-        with self._locked(investigation_id):
+        with self._locked(investigation_id, ownership, run_id):
             current = self._reopen_unlocked(investigation_id, run_id, expected_schema=6)
             if not isinstance(current.state, Schema6Envelope):
                 raise Phase7ECorruptError
@@ -483,9 +552,15 @@ class RecordingSearch7ERepository:
 
     persist_schema6 = admit_schema6
 
-    def reopen_schema6(self, investigation_id: str, run_id: str) -> Phase7ERun:
+    def reopen_schema6(
+        self,
+        investigation_id: str,
+        run_id: str,
+        *,
+        ownership: Phase7EInvocationOwnership | None = None,
+    ) -> Phase7ERun:
         """Strictly reopen schema 6 without recovery, cleanup, or rewriting."""
-        with self._locked(investigation_id):
+        with self._locked(investigation_id, ownership, run_id):
             return self._reopen_unlocked(investigation_id, run_id, expected_schema=6)
 
     strict_reopen_schema6 = reopen_schema6
@@ -540,8 +615,19 @@ class RecordingSearch7ERepository:
     recover = recover_active
 
     @contextmanager
-    def _locked(self, investigation_id: str) -> Iterator[None]:
+    def _locked(
+        self,
+        investigation_id: str,
+        ownership: Phase7EInvocationOwnership | None = None,
+        run_id: str | None = None,
+    ) -> Iterator[None]:
         """Acquire OS lock before the in-process repository guard."""
+        if ownership is not None:
+            ownership.validate(self, investigation_id, run_id)
+            with self._guard:
+                ownership.validate(self, investigation_id, run_id)
+                yield
+            return
         lock = LocalInvestigationLock(self.lock_path(investigation_id))
         if not lock.try_acquire(self.lock_timeout_seconds):
             raise Phase7EInProgressError
@@ -920,15 +1006,20 @@ class RecordingSearch7ERepository:
             return
         if self.media_root is None or self.media_probe is None:
             raise Phase7ECorruptError
+        expected_media_root = self.root / ".media"
+        if self.media_root != expected_media_root:
+            raise Phase7ECorruptError
         session = sessions[0]
         media = self.media_root / investigation_id / run_id / f"{session.identity}.mp4"
         try:
             if (
                 self.media_root.is_symlink()
                 or not self.media_root.is_dir()
+                or not is_safe_contained_path(self.root, self.media_root, require_target=True)
                 or media.is_symlink()
                 or not media.is_file()
                 or not is_safe_contained_path(self.media_root, media, require_target=True)
+                or media.stat().st_nlink != 1
                 or media.stat().st_size != session.payload["mp4_size_bytes"]
                 or _sha256_path(media) != session.payload["mp4_sha256"]
             ):

@@ -1,5 +1,5 @@
 # pyright: reportAny=false, reportExplicitAny=false, reportUnknownParameterType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnannotatedClassAttribute=false, reportImplicitOverride=false, reportUnusedCallResult=false, reportArgumentType=false, reportInvalidTypeForm=false, reportOptionalMemberAccess=false, reportUnnecessaryIsInstance=false, reportCallInDefaultInitializer=false, reportUnusedImport=false, reportUnusedFunction=false
-# ruff: noqa: B009, C901, D105, I001, PLR0913, PTH105, RUF022, TC001, TC006, TRY300, UP037
+# ruff: noqa: B009, B904, C901, D105, FBT001, I001, PLR0912, PLR0913, PLR0915, PTH105, RUF022, TC006, TRY300, UP037
 """Phase 7E-1C common-session acquisition and local evidence admission.
 
 The 1C boundary owns one bounded replay/remux and all subsequent local reads of
@@ -14,21 +14,23 @@ import hashlib
 import json
 import math
 import os
-import shutil
 import subprocess
-from io import BytesIO
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+import tempfile
+from collections.abc import Callable, Generator, Mapping, Sequence
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 from itertools import pairwise
-from tempfile import mkstemp
+from io import BytesIO
 from pathlib import Path
 from time import monotonic
 from typing import Any, Protocol, cast
 
 from PIL import Image, UnidentifiedImageError
+
+from vigi_vision.durable_io import is_safe_contained_path, is_safe_path
 
 from vigi_vision.investigation_confirmation_integrity import (
     compute_jpeg_integrity_from_bytes,
@@ -46,10 +48,15 @@ from vigi_vision.recording_search_7e_models import (
     StrictIdentityEnvelope,
 )
 from vigi_vision.recording_search_7e_repository import (
+    Phase7ECorruptError,
+    Phase7EReadbackError,
+    Phase7ERepositoryError,
+    Phase7EInvocationOwnership,
     Phase7ERun,
     RecordingSearch7ERepository,
 )
 from vigi_vision.recording_search_7e_validation import (
+    Phase7EValidationError,
     Schema5Envelope,
     Schema6Envelope,
 )
@@ -89,6 +96,11 @@ class CommonSessionError(RecordingSearchError):
     """Safe base error for the 1C boundary."""
 
     code = "unexpected_error"
+
+    def __init__(self) -> None:
+        """Create one safe error with an optional secondary cleanup result."""
+        super().__init__(self.code)
+        self.cleanup_failure_code: str | None = None
 
     def __str__(self) -> str:
         return self.code
@@ -130,6 +142,48 @@ class CommonSessionMediaError(CommonSessionError):
     code = "media_probe_failed"
 
 
+class CommonSessionMediaProbeTimeoutError(CommonSessionMediaError):
+    """The bounded retained-media probe exhausted its operation budget."""
+
+    code = "media_probe_timeout"
+
+
+class CommonSessionMissingPtsError(CommonSessionError):
+    """A decoded frame did not expose an exact integer timestamp."""
+
+    code = "missing_pts"
+
+
+class CommonSessionInvalidTimeBaseError(CommonSessionError):
+    """The selected stream exposed no valid positive reduced time base."""
+
+    code = "invalid_time_base"
+
+
+class CommonSessionNonmonotonicPtsError(CommonSessionError):
+    """Decoded frame positions were duplicate or moved backward."""
+
+    code = "nonmonotonic_pts"
+
+
+class CommonSessionTimestampResetError(CommonSessionError):
+    """A decoded frame timestamp preceded the selected stream start PTS."""
+
+    code = "timestamp_reset"
+
+
+class CommonSessionRecordingGapError(CommonSessionError):
+    """Repeated decoding produced incompatible timing or content facts."""
+
+    code = "recording_gap"
+
+
+class CommonSessionSegmentBoundaryError(CommonSessionError):
+    """A decoded frame fell outside the admitted half-open common session."""
+
+    code = "segment_boundary"
+
+
 class CommonSessionDecoderTimeoutError(CommonSessionError):
     """A local decoder pass exceeded its bounded deadline."""
 
@@ -166,6 +220,18 @@ class CommonSessionCancelledError(CommonSessionError):
     code = "interrupted"
 
 
+class CommonSessionPublicationError(CommonSessionError):
+    """A lifecycle or evidence publication failed safely."""
+
+    code = "publication_failed"
+
+
+class CommonSessionReadbackError(CommonSessionError):
+    """A committed lifecycle state could not be strictly reopened."""
+
+    code = "readback_failed"
+
+
 @dataclass(frozen=True, slots=True)
 class CommonSessionPolicy:
     """Validated resource/deadline ceilings for one request-relative session."""
@@ -183,6 +249,8 @@ class CommonSessionPolicy:
     maximum_classifications: int = 32
     decoder_timeout_seconds: int = DECODER_TIMEOUT_SECONDS
     ffprobe_timeout_seconds: int = MEDIA_PROBE_TIMEOUT_SECONDS
+    classifier_timeout_seconds: int = 10
+    classifier_total_budget_seconds: int = 320
     support_cadence_seconds: int = 1
 
     @classmethod
@@ -203,6 +271,8 @@ class CommonSessionPolicy:
             "maximum_classifications",
             "decoder_timeout_seconds",
             "ffprobe_timeout_seconds",
+            "classifier_timeout_seconds",
+            "classifier_total_budget_seconds",
             "support_cadence_seconds",
         }
         for name in names:
@@ -230,6 +300,8 @@ class CommonSessionPolicy:
             self.maximum_classifications,
             self.decoder_timeout_seconds,
             self.ffprobe_timeout_seconds,
+            self.classifier_timeout_seconds,
+            self.classifier_total_budget_seconds,
             self.support_cadence_seconds,
         )
         if any(type(value) is not int or value <= 0 for value in fields):
@@ -243,6 +315,118 @@ class CommonSessionPolicy:
             raise CommonSessionValidationError
         if self.invocation_deadline_seconds <= self.cleanup_reserve_seconds:
             raise CommonSessionValidationError
+
+
+@dataclass(slots=True)
+class InvocationBudget:
+    """One monotonic deadline and cancellation authority for a 1C invocation."""
+
+    policy: CommonSessionPolicy
+    monotonic_clock: Callable[[], float] = field(repr=False)
+    cancellation: Callable[[], bool] | None = field(default=None, repr=False)
+    started_at: float = field(init=False)
+    deadline: float = field(init=False)
+    replay_attempts: int = 0
+    decoder_passes: int = 0
+    selected_rgb24_frames: int = 0
+    classifications: int = 0
+    classifier_seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.policy.validate()
+        self.started_at = self.monotonic_clock()
+        self.deadline = self.started_at + self.policy.invocation_deadline_seconds
+
+    def check(self) -> None:
+        """Apply cancellation before deadline according to fixed precedence."""
+        if self.cancellation is not None and self.cancellation():
+            raise CommonSessionCancelledError
+        if self.monotonic_clock() >= self.deadline:
+            raise CommonSessionDeadlineError
+
+    def usable_remaining(self) -> float:
+        """Return ordinary-work time without consuming the cleanup reserve."""
+        self.check()
+        return max(
+            0.0,
+            self.deadline - self.monotonic_clock() - self.policy.cleanup_reserve_seconds,
+        )
+
+    def operation_timeout(
+        self,
+        ceiling_seconds: float,
+        *,
+        minimum_start_seconds: float = 0.0,
+        downstream_reserve_seconds: float = 0.0,
+    ) -> float:
+        """Return the operation ceiling bounded by the one cumulative deadline."""
+        if not math.isfinite(ceiling_seconds) or ceiling_seconds <= 0:
+            raise CommonSessionValidationError
+        remaining = self.usable_remaining() - downstream_reserve_seconds
+        if remaining <= 0 or remaining < minimum_start_seconds:
+            raise CommonSessionDeadlineError
+        return min(ceiling_seconds, remaining)
+
+    def cleanup_remaining(self) -> float:
+        """Return the bounded interval available to failure cleanup/finalization."""
+        return max(0.0, self.deadline - self.monotonic_clock())
+
+    def admit_replay(self) -> None:
+        """Consume the invocation's sole replay attempt."""
+        self.check()
+        if self.replay_attempts >= 1:
+            raise CommonSessionCapacityError
+        self.replay_attempts += 1
+
+    def admit_decoder_pass(self, target_count: int) -> None:
+        """Consume one decoder pass and its selected-frame capacity."""
+        self.check()
+        if (
+            type(target_count) is not int
+            or target_count <= 0
+            or target_count > self.policy.maximum_targets_per_decoder_pass
+            or self.decoder_passes >= self.policy.maximum_decoder_passes
+            or self.selected_rgb24_frames + target_count > self.policy.maximum_selected_rgb24_frames
+        ):
+            raise CommonSessionCapacityError
+        self.decoder_passes += 1
+        self.selected_rgb24_frames += target_count
+
+    def admit_classification(self) -> float:
+        """Consume one classification and return its remaining bounded timeout."""
+        self.check()
+        if self.classifications >= self.policy.maximum_classifications:
+            raise CommonSessionCapacityError
+        timeout = self.operation_timeout(
+            self.policy.classifier_timeout_seconds,
+            minimum_start_seconds=1.0,
+            downstream_reserve_seconds=40.0,
+        )
+        if self.classifier_seconds + timeout > self.policy.classifier_total_budget_seconds:
+            timeout = self.policy.classifier_total_budget_seconds - self.classifier_seconds
+        if timeout <= 0:
+            raise CommonSessionCapacityError
+        self.classifications += 1
+        self.classifier_seconds += timeout
+        return timeout
+
+
+@dataclass(frozen=True, slots=True)
+class Phase7EInvocation:
+    """Validated repository ownership plus the invocation's one budget."""
+
+    request: "CommonSessionRequest"
+    ownership: Phase7EInvocationOwnership = field(repr=False)
+    budget: InvocationBudget = field(repr=False)
+
+    def validate(self, repository: RecordingSearch7ERepository) -> None:
+        """Revalidate both ownership and cumulative invocation authority."""
+        self.ownership.validate(
+            repository,
+            self.request.investigation_id,
+            self.request.run_id,
+        )
+        self.budget.check()
 
 
 def _utc_second(value: datetime) -> datetime:
@@ -342,6 +526,10 @@ class MediaProbeFacts:
             type(self.selected_video_stream_index) is not int
             or type(self.video_stream_count) is not int
             or type(self.audio_stream_count) is not int
+            or type(self.container_start_pts) is not int
+            or type(self.time_base_num) is not int
+            or type(self.time_base_den) is not int
+            or type(self.duration_ticks) is not int
             or self.selected_video_stream_index < 0
             or self.video_stream_count != 1
             or self.audio_stream_count != 0
@@ -369,8 +557,8 @@ class MediaProbe(Protocol):
 class RecordingPlannerBoundary(Protocol):
     """The existing planner methods consumed by the 1C adapter."""
 
-    def find_covering_segment(self, channel_id: int, instant_utc: datetime) -> RecordingSegment:
-        """Find one segment covering the requested start."""
+    def find_segments_for_window(self, window: RecordingWindow) -> tuple[RecordingSegment, ...]:
+        """Return the complete SDK segment inventory intersecting the window."""
         ...
 
     def plan_for_segment(self, segment: RecordingSegment, window: RecordingWindow) -> ReplayRequest:
@@ -401,6 +589,7 @@ class Phase7EB4Input:
     frame: "DecodedLocalFrame" = field(repr=False)
     target_request: StrictIdentityEnvelope
     classification_attempt_id: str
+    budget: InvocationBudget = field(repr=False)
 
 
 class B4Bridge(Protocol):
@@ -438,14 +627,21 @@ class ProductionB4Adapter:
 
     def classify(self, authoritative: Phase7EB4Input) -> StrictIdentityEnvelope:
         """Call production B4 without accepting caller-owned media or fake result shapes."""
+        timeout = authoritative.budget.admit_classification()
         context = self.context_factory(authoritative)
         if not isinstance(context.request, ClassifyRecordingProbeRequest):
             raise CommonSessionValidationError
         try:
-            result = self.service.classify(context.handle, context.request)
+            bounded_service = (
+                replace(self.service, timeout_seconds=timeout)
+                if isinstance(self.service, ObservationClassificationService)
+                else self.service
+            )
+            result = bounded_service.classify(context.handle, context.request)
         except ClassificationOperationalError as exc:
             reason = _phase7e_operational_reason(exc.reason)
             return _operational_completion(authoritative, context.baseline_identity, reason)
+        authoritative.budget.check()
         observation = context.read_observation(result)
         if (
             not isinstance(result, PublishedClassificationResult)
@@ -565,7 +761,7 @@ class DecodedLocalFrame:
         """Validate dimensions, stride-free RGB24 layout, and monotonic facts."""
         if (
             type(self.raw_pts) is not int
-            or self.raw_pts < 0
+            or type(self.container_start_pts) is not int
             or type(self.ordinal) is not int
             or self.ordinal < 0
             or type(self.width) is not int
@@ -582,8 +778,10 @@ class DecodedLocalFrame:
             or max_rgb24_frames <= 0
         ):
             raise CommonSessionDecoderError
+        if self.raw_pts < self.container_start_pts:
+            raise CommonSessionTimestampResetError
         if self.decoded_offset < 0:
-            raise CommonSessionDecoderError
+            raise CommonSessionTimestampResetError
 
 
 @dataclass(frozen=True, slots=True)
@@ -620,50 +818,88 @@ class CommonSessionAcquisition:
 class DurableCommonSessionMedia:
     """Atomically retain one validated MP4 outside the immutable run tree."""
 
-    root: Path
+    repository: RecordingSearch7ERepository = field(repr=False)
 
-    def publish(self, acquisition: CommonSessionAcquisition) -> CommonSessionAcquisition:
+    @property
+    def root(self) -> Path:
+        """Return the only approved retained-media root."""
+        return self.repository.root / ".media"
+
+    def publish(
+        self,
+        acquisition: CommonSessionAcquisition,
+        invocation: Phase7EInvocation,
+    ) -> CommonSessionAcquisition:
         """Copy, fsync, read back, and atomically publish the invocation's MP4."""
+        invocation.validate(self.repository)
         source = acquisition.replay_clip.temporary_mp4_path
         final_directory = (
             self.root / acquisition.request.investigation_id / acquisition.request.run_id
         )
         final = final_directory / f"{acquisition.common_session_id}.mp4"
-        temporary: Path | None = None
+        staging: Path | None = None
+        published_by_invocation = False
+        source_size = -1
+        source_digest = ""
         try:
-            _validate_media_root(self.root)
-            final_directory.mkdir(parents=True, exist_ok=True)
-            if not _is_safe_child(self.root, final_directory):
-                raise CommonSessionMediaError
-            if source.is_symlink() or not source.is_file():
+            _validate_media_root(self.repository.root, self.root)
+            _create_safe_media_directory(
+                self.root,
+                acquisition.request.investigation_id,
+                acquisition.request.run_id,
+            )
+            if (
+                source.is_symlink()
+                or not source.is_file()
+                or source.stat().st_nlink != 1
+                or not is_safe_path(source, require_target=True)
+            ):
                 raise CommonSessionMediaError
             source_size = source.stat().st_size
             source_digest = _sha256_file(source)
-            if final.exists():
-                if final.is_symlink() or not final.is_file():
-                    raise CommonSessionMediaError
-                if final.stat().st_size != source_size or _sha256_file(final) != source_digest:
-                    raise CommonSessionMediaError
-            else:
-                descriptor, temporary_name = mkstemp(
-                    prefix=f".{acquisition.common_session_id}-",
-                    suffix=".tmp",
-                    dir=final_directory,
+            if final.exists() or final.is_symlink():
+                raise CommonSessionMediaError
+            staging_root = self.repository.root / ".staging"
+            _validate_media_root(self.repository.root, staging_root)
+            staging = Path(
+                tempfile.mkdtemp(
+                    prefix=(
+                        f"{acquisition.request.investigation_id}-"
+                        f"{acquisition.request.run_id}-media-"
+                    ),
+                    dir=staging_root,
                 )
-                os.close(descriptor)
-                temporary = Path(temporary_name)
-                with source.open("rb") as source_stream, temporary.open("wb") as target_stream:
-                    shutil.copyfileobj(source_stream, target_stream, length=1024 * 1024)
-                    target_stream.flush()
-                    os.fsync(target_stream.fileno())
-                if (
-                    temporary.stat().st_size != source_size
-                    or _sha256_file(temporary) != source_digest
-                ):
-                    raise CommonSessionMediaError
-                os.replace(temporary, final)
-                temporary = None
-            if final.stat().st_size != source_size or _sha256_file(final) != source_digest:
+            )
+            if not is_safe_contained_path(self.repository.root, staging, require_target=True):
+                raise CommonSessionMediaError
+            temporary = staging / "session.mp4"
+            with source.open("rb") as source_stream, temporary.open("xb") as target_stream:
+                while True:
+                    invocation.budget.check()
+                    chunk = source_stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    target_stream.write(chunk)
+                target_stream.flush()
+                os.fsync(target_stream.fileno())
+            if (
+                temporary.stat().st_nlink != 1
+                or temporary.stat().st_size != source_size
+                or _sha256_file(temporary) != source_digest
+            ):
+                raise CommonSessionMediaError
+            invocation.validate(self.repository)
+            if final.exists() or final.is_symlink():
+                raise CommonSessionMediaError
+            os.replace(temporary, final)
+            published_by_invocation = True
+            _fsync_directory(final_directory)
+            if (
+                not _is_safe_child(self.root, final)
+                or final.stat().st_nlink != 1
+                or final.stat().st_size != source_size
+                or _sha256_file(final) != source_digest
+            ):
                 raise CommonSessionMediaError
             return CommonSessionAcquisition(
                 acquisition.request,
@@ -674,14 +910,19 @@ class DurableCommonSessionMedia:
                 acquisition.session,
                 final,
             )
+        except CommonSessionError:
+            if published_by_invocation:
+                with suppress(CommonSessionCleanupError):
+                    _remove_exact_media_file(final, source_size, source_digest)
+            raise
         except (OSError, RuntimeError) as exc:
+            if published_by_invocation:
+                with suppress(CommonSessionCleanupError):
+                    _remove_exact_media_file(final, source_size, source_digest)
             raise CommonSessionMediaError from exc
         finally:
-            if temporary is not None:
-                try:
-                    temporary.unlink(missing_ok=True)
-                except OSError as exc:
-                    raise CommonSessionCleanupError from exc
+            if staging is not None:
+                _remove_owned_media_directory(self.repository.root, staging)
 
 
 @dataclass(frozen=True, slots=True)
@@ -718,7 +959,7 @@ class FfprobeMediaProbe:
                 timeout_seconds,
             )
         except subprocess.TimeoutExpired as exc:
-            raise CommonSessionMediaError from exc
+            raise CommonSessionMediaProbeTimeoutError from exc
         except OSError as exc:
             raise CommonSessionMediaError from exc
         if completed.returncode != 0:
@@ -732,10 +973,19 @@ class FfprobeMediaProbe:
             if len(video) != 1:
                 raise CommonSessionMediaError
             stream = video[0]
-            time_base_num, time_base_den = _fraction_text(stream["time_base"])
+            try:
+                time_base_num, time_base_den = _fraction_text(stream["time_base"])
+            except CommonSessionMediaError as exc:
+                raise CommonSessionInvalidTimeBaseError from exc
             rate_num, rate_den = _fraction_text(stream["avg_frame_rate"])
-            duration_ticks = int(stream.get("duration_ts") or format_data["duration_ts"])
-            start_pts = int(stream.get("start_pts") or 0)
+            duration_value = stream.get("duration_ts")
+            if duration_value is None:
+                duration_value = format_data.get("duration_ts")
+            start_value = stream.get("start_pts")
+            if duration_value is None or start_value is None:
+                raise CommonSessionMediaError
+            duration_ticks = _strict_integer_text(duration_value, nonnegative=False)
+            start_pts = _strict_integer_text(start_value, nonnegative=True)
             facts = MediaProbeFacts(
                 selected_video_stream_index=int(stream.get("index", 0)),
                 video_stream_count=len(video),
@@ -777,6 +1027,7 @@ class FfmpegLocalDecoder:
         ),
         repr=False,
     )
+    monotonic_clock: Callable[[], float] = field(default=monotonic, repr=False)
 
     def decode(
         self,
@@ -785,6 +1036,9 @@ class FfmpegLocalDecoder:
         timeout_seconds: float,
     ) -> tuple[DecodedLocalFrame, ...]:
         """Probe once, select exact candidates, and decode each target locally."""
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise CommonSessionDecoderTimeoutError
+        deadline = self.monotonic_clock() + timeout_seconds
         try:
             probe = self.probe_runner(
                 (
@@ -798,7 +1052,7 @@ class FfmpegLocalDecoder:
                     "json",
                     str(session.media_path),
                 ),
-                timeout_seconds,
+                max(0.001, deadline - self.monotonic_clock()),
             )
         except subprocess.TimeoutExpired as exc:
             raise CommonSessionDecoderTimeoutError from exc
@@ -808,24 +1062,36 @@ class FfmpegLocalDecoder:
             raise CommonSessionDecoderError
         try:
             raw_frames = json.loads(probe.stdout)["frames"]
-            offsets: list[Fraction] = []
             raw_pts: list[int] = []
             for value in raw_frames:
-                timestamp = value.get("best_effort_timestamp_time")
+                timestamp = value.get("best_effort_timestamp")
                 if timestamp is None:
-                    timestamp = value.get("pkt_pts_time") or value.get("pkt_dts_time")
-                offset = _seconds_fraction(timestamp)
-                offsets.append(offset)
-                tick_fraction = offset * session.media.time_base_den / session.media.time_base_num
-                if tick_fraction.denominator != 1:
-                    raise CommonSessionDecoderError
-                raw_pts.append(session.media.container_start_pts + tick_fraction.numerator)
+                    timestamp = value.get("pkt_pts")
+                if timestamp is None:
+                    timestamp = value.get("pkt_dts")
+                if timestamp is None:
+                    raise CommonSessionMissingPtsError
+                raw_pts.append(_strict_integer_text(timestamp, nonnegative=True))
         except (CommonSessionError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             if isinstance(exc, CommonSessionError):
                 raise
             raise CommonSessionDecoderError from exc
-        if not offsets or any(current < prior for prior, current in pairwise(offsets)):
-            raise CommonSessionDecoderError
+        if not raw_pts:
+            raise CommonSessionMissingPtsError
+        if any(current <= prior for prior, current in pairwise(raw_pts)):
+            raise CommonSessionNonmonotonicPtsError
+        offsets = [
+            Fraction(
+                (raw_pts_value - session.media.container_start_pts) * session.media.time_base_num,
+                session.media.time_base_den,
+            )
+            for raw_pts_value in raw_pts
+        ]
+        if any(offset < 0 for offset in offsets):
+            raise CommonSessionTimestampResetError
+        session_end = Fraction(session.request.duration_seconds, 1)
+        if any(offset >= session_end for offset in offsets):
+            raise CommonSessionSegmentBoundaryError
         results: list[DecodedLocalFrame] = []
         for target in targets:
             target_offset = Fraction(int((target - session.request.start_utc).total_seconds()), 1)
@@ -836,7 +1102,10 @@ class FfmpegLocalDecoder:
                 logical_end=target == session.request.end_utc,
                 tolerance=Fraction(session.request.policy.support_cadence_seconds, 1),
             )
-            rgb = self._decode_rgb(session, index, timeout_seconds)
+            remaining = deadline - self.monotonic_clock()
+            if remaining <= 0:
+                raise CommonSessionDecoderTimeoutError
+            rgb = self._decode_rgb(session, index, remaining)
             results.append(
                 DecodedLocalFrame(
                     requested_time_utc=target,
@@ -904,22 +1173,34 @@ class CommonSessionAcquirer:
     monotonic_clock: Callable[[], float] = monotonic
     cancellation: Callable[[], bool] | None = None
 
-    def locate(self, request: CommonSessionRequest) -> RecordingSegment:
-        """Locate the one SDK segment without constructing or extracting replay."""
+    def locate(
+        self,
+        request: CommonSessionRequest,
+        budget: InvocationBudget | None = None,
+    ) -> RecordingSegment:
+        """Prove exactly one SDK segment covers the complete half-open window."""
         request.policy.validate()
-        self._check_cancelled()
+        active_budget = budget or InvocationBudget(
+            request.policy, self.monotonic_clock, self.cancellation
+        )
+        active_budget.check()
+        window = RecordingWindow(request.channel_id, request.start_utc, request.end_utc)
         try:
-            segment = self.recording_planner.find_covering_segment(
-                request.channel_id, request.start_utc
-            )
+            segments = tuple(self.recording_planner.find_segments_for_window(window))
         except RecordingUnavailableError as exc:
             raise CommonSessionRecordingUnavailableError from exc
         except (OSError, ValueError, RecordingSearchError) as exc:
             raise CommonSessionRecordingUnavailableError from exc
+        active_budget.check()
+        if len(segments) != 1:
+            raise CommonSessionRecordingUnavailableError
+        segment = segments[0]
         if (
             segment.channel_id != request.channel_id
             or segment.start_utc > request.start_utc
+            or request.start_utc >= request.end_utc
             or segment.end_utc < request.end_utc
+            or segment.start_utc >= segment.end_utc
         ):
             raise CommonSessionRecordingUnavailableError
         return segment
@@ -929,13 +1210,15 @@ class CommonSessionAcquirer:
         request: CommonSessionRequest,
         *,
         segment: RecordingSegment | None = None,
+        budget: InvocationBudget | None = None,
     ) -> CommonSessionAcquisition:
         """Acquire exactly one replay and retain its MP4 for local consumers."""
         request.policy.validate()
-        deadline = self.monotonic_clock() + request.policy.invocation_deadline_seconds
-        self._check_budget(deadline, request.policy)
-        self._check_cancelled()
-        selected_segment = segment or self.locate(request)
+        active_budget = budget or InvocationBudget(
+            request.policy, self.monotonic_clock, self.cancellation
+        )
+        active_budget.check()
+        selected_segment = segment or self.locate(request, active_budget)
         if (
             selected_segment.channel_id != request.channel_id
             or selected_segment.start_utc > request.start_utc
@@ -947,24 +1230,34 @@ class CommonSessionAcquirer:
             replay_request = self.recording_planner.plan_for_segment(selected_segment, window)
         except RecordingUnavailableError as exc:
             raise CommonSessionRecordingUnavailableError from exc
-        self._check_budget(
-            deadline,
-            request.policy,
+        active_budget.check()
+        active_budget.admit_replay()
+        replay_timeout = active_budget.operation_timeout(
             request.duration_seconds + request.policy.replay_margin_seconds,
+            minimum_start_seconds=1.0,
         )
-        self._check_cancelled()
         clip: ReplayClip | None = None
         try:
-            clip = cast(Any, self.replay_extractor).extract(replay_request)
-            self._check_cancelled()
+            bounded_extract = getattr(self.replay_extractor, "extract_with_timeout", None)
+            if callable(bounded_extract):
+                clip = cast("ReplayClip", bounded_extract(replay_request, replay_timeout))
+            else:
+                if replay_timeout < (
+                    request.duration_seconds + request.policy.replay_margin_seconds
+                ):
+                    raise CommonSessionDeadlineError
+                clip = cast(Any, self.replay_extractor).extract(replay_request)
+            active_budget.check()
             self._validate_retained_clip(clip, request.policy.maximum_mp4_bytes)
-            probe_budget = self._remaining(deadline, request.policy)
-            if probe_budget <= 0:
-                raise CommonSessionDeadlineError
+            probe_budget = active_budget.operation_timeout(
+                request.policy.ffprobe_timeout_seconds,
+                minimum_start_seconds=1.0,
+            )
             media = self.media_probe.probe(
                 clip.temporary_mp4_path,
-                min(float(request.policy.ffprobe_timeout_seconds), probe_budget),
+                probe_budget,
             )
+            active_budget.check()
             media.validate()
             observed_duration = Fraction(
                 media.duration_ticks * media.time_base_num,
@@ -1033,22 +1326,6 @@ class CommonSessionAcquirer:
         except (OSError, RuntimeError) as exc:
             raise CommonSessionMediaError from exc
 
-    def _check_cancelled(self) -> None:
-        if self.cancellation is not None and self.cancellation():
-            raise CommonSessionCancelledError
-
-    def _remaining(self, deadline: float, policy: CommonSessionPolicy) -> float:
-        return max(0.0, deadline - self.monotonic_clock() - policy.cleanup_reserve_seconds)
-
-    def _check_budget(
-        self,
-        deadline: float,
-        policy: CommonSessionPolicy,
-        required_seconds: int = 1,
-    ) -> None:
-        if self._remaining(deadline, policy) < required_seconds:
-            raise CommonSessionDeadlineError
-
 
 def bind_session(
     acquisition: CommonSessionAcquisition,
@@ -1092,6 +1369,14 @@ def _schema5_state(
             reason_code=None,
             attempt_count=0,
         )
+    if phase_state is Schema5PhaseState.INTERRUPTED:
+        return Schema5Envelope(
+            run_state="INTERRUPTED",
+            phase_state=phase_state,
+            active_replay_operation_id=replay_operation_id,
+            reason_code="interrupted",
+            attempt_count=1 if replay_operation_id is not None else 0,
+        )
     if replay_operation_id is None:
         raise CommonSessionValidationError
     if phase_state is Schema5PhaseState.ACQUISITION_FAILED:
@@ -1117,7 +1402,28 @@ class Phase7E1CExecutor:
 
     repository: RecordingSearch7ERepository
     acquirer: CommonSessionAcquirer
-    media_store: DurableCommonSessionMedia
+
+    @contextmanager
+    def invocation(self, request: CommonSessionRequest) -> Generator[Phase7EInvocation]:
+        """Hold one OS owner and one cumulative budget across caller-composed 1C work."""
+        budget = InvocationBudget(
+            request.policy,
+            self.acquirer.monotonic_clock,
+            self.acquirer.cancellation,
+        )
+        budget.check()
+        lock_timeout = budget.operation_timeout(
+            max(0.001, self.repository.lock_timeout_seconds),
+            minimum_start_seconds=0.001,
+        )
+        with self.repository.invocation_ownership(
+            request.investigation_id,
+            request.run_id,
+            timeout_seconds=lock_timeout,
+        ) as ownership:
+            active = Phase7EInvocation(request, ownership, budget)
+            active.validate(self.repository)
+            yield active
 
     def execute(
         self,
@@ -1128,9 +1434,23 @@ class Phase7E1CExecutor:
         target_requests: Sequence[StrictIdentityEnvelope],
         *,
         replay_operation: StrictIdentityEnvelope | None = None,
+        invocation: Phase7EInvocation | None = None,
     ) -> CommonSessionAdmissionResult:
         """Persist schema 5, acquire once, and publish zero-evidence schema 6."""
-        self.repository.media_root = self.media_store.root
+        if invocation is None:
+            with self.invocation(request) as active:
+                return self.execute(
+                    request,
+                    schema5_manifest,
+                    base_records,
+                    classifier_policy,
+                    target_requests,
+                    replay_operation=replay_operation,
+                    invocation=active,
+                )
+        invocation.validate(self.repository)
+        media_store = DurableCommonSessionMedia(self.repository)
+        self.repository.media_root = media_store.root
         self.repository.media_probe = self.acquirer.media_probe
         _validate_executor_inputs(
             request,
@@ -1139,6 +1459,7 @@ class Phase7E1CExecutor:
             classifier_policy,
             target_requests,
         )
+        segment = self.acquirer.locate(request, invocation.budget)
         planned = _schema5_state(Schema5PhaseState.PLANNED, None)
         self.repository.create_schema5(
             schema5_manifest,
@@ -1146,8 +1467,8 @@ class Phase7E1CExecutor:
             base_records,
             investigation_id=request.investigation_id,
             run_id=request.run_id,
+            ownership=invocation.ownership,
         )
-        segment = self.acquirer.locate(request)
         operation = replay_operation or make_replay_envelope(
             request,
             schema5_manifest.payload["policy_id"],
@@ -1163,15 +1484,24 @@ class Phase7E1CExecutor:
             schema5_manifest,
             _schema5_state(Schema5PhaseState.ACQUIRING, operation.identity),
             acquiring_records,
+            ownership=invocation.ownership,
         )
+        acquisition: CommonSessionAcquisition | None = None
+        retained: CommonSessionAcquisition | None = None
+        schema6_committed = False
         try:
-            acquisition = self.acquirer.acquire(request, segment=segment)
+            acquisition = self.acquirer.acquire(
+                request,
+                segment=segment,
+                budget=invocation.budget,
+            )
             bound = bind_session(
                 acquisition,
                 operation.identity,
                 schema5_manifest.payload["policy_id"],
             )
-            retained = self.media_store.publish(bound)
+            retained = media_store.publish(bound, invocation)
+            invocation.validate(self.repository)
             retained.remove()
             acquired_records = (*base_records, operation)
             self.repository.admit_schema5(
@@ -1180,6 +1510,7 @@ class Phase7E1CExecutor:
                 schema5_manifest,
                 _schema5_state(Schema5PhaseState.ACQUIRED, operation.identity),
                 acquired_records,
+                ownership=invocation.ownership,
             )
             target_ids = tuple(item.identity for item in target_requests)
             schema6_manifest = make_schema6_manifest(
@@ -1217,22 +1548,89 @@ class Phase7E1CExecutor:
                 state,
                 schema6_records,
                 expected_schema5_manifest_id=schema5_manifest.identity,
+                ownership=invocation.ownership,
             )
+            schema6_committed = True
+            invocation.validate(self.repository)
             return CommonSessionAdmissionResult(result.run, retained)
-        except CommonSessionError as exc:
-            failure_reason = getattr(exc, "code", "acquisition_failed")
-            self.repository.admit_schema5(
-                request.investigation_id,
-                request.run_id,
+        except (KeyboardInterrupt, SystemExit) as exc:
+            primary = CommonSessionCancelledError()
+            self._finalize_failure(
+                invocation,
                 schema5_manifest,
-                _schema5_state(
-                    Schema5PhaseState.ACQUISITION_FAILED,
-                    operation.identity,
-                    failure_reason,
-                ),
+                operation,
                 acquiring_records,
+                primary,
+                retained or acquisition,
+                schema6_committed,
             )
-            raise
+            raise primary from exc
+        except (
+            CommonSessionError,
+            Phase7ERepositoryError,
+            Phase7EValidationError,
+        ) as exc:
+            primary = _translate_repository_failure(exc)
+            self._finalize_failure(
+                invocation,
+                schema5_manifest,
+                operation,
+                acquiring_records,
+                primary,
+                retained or acquisition,
+                schema6_committed,
+            )
+            raise primary
+
+    def _finalize_failure(
+        self,
+        invocation: Phase7EInvocation,
+        schema5_manifest: StrictIdentityEnvelope,
+        operation: StrictIdentityEnvelope,
+        acquiring_records: Sequence[StrictIdentityEnvelope],
+        primary: CommonSessionError,
+        retained: CommonSessionAcquisition | None,
+        schema6_committed: bool,
+    ) -> None:
+        """Preserve the primary cause while publishing/cleaning only current ownership."""
+        if not invocation.ownership.active or not invocation.ownership.lock.held:
+            return
+        if invocation.budget.cleanup_remaining() <= 0:
+            primary.cleanup_failure_code = "cleanup_failed"
+            return
+        with suppress(Phase7ERepositoryError, Phase7EValidationError, CommonSessionError):
+            current = self.repository.reopen_schema5(
+                invocation.request.investigation_id,
+                invocation.request.run_id,
+                ownership=invocation.ownership,
+            )
+            if (
+                isinstance(current.state, Schema5Envelope)
+                and current.state.phase_state is Schema5PhaseState.ACQUIRING
+            ):
+                interrupted = isinstance(primary, CommonSessionCancelledError)
+                self.repository.admit_schema5(
+                    invocation.request.investigation_id,
+                    invocation.request.run_id,
+                    schema5_manifest,
+                    _schema5_state(
+                        Schema5PhaseState.INTERRUPTED
+                        if interrupted
+                        else Schema5PhaseState.ACQUISITION_FAILED,
+                        operation.identity,
+                        primary.code,
+                    ),
+                    acquiring_records,
+                    expected_manifest_id=current.manifest_id,
+                    ownership=invocation.ownership,
+                )
+        if retained is not None and not schema6_committed:
+            try:
+                if not isinstance(primary, CommonSessionReadbackError):
+                    _remove_owned_retained_media(self.repository.root, retained)
+                retained.remove()
+            except CommonSessionCleanupError:
+                primary.cleanup_failure_code = "cleanup_failed"
 
 
 def _validate_executor_inputs(
@@ -1341,15 +1739,20 @@ def admit_frame_then_classify(
     classifier: B4Bridge,
     *,
     classification_attempt_id: str,
+    invocation: Phase7EInvocation,
 ) -> Phase7ERun:
     """Persist/reopen a frame before invoking B4, then persist its completion."""
     if target_request.family != "target-request" or decoder_operation.family != "decoder-operation":
         raise CommonSessionValidationError
     if not classification_attempt_id:
         raise CommonSessionValidationError
+    invocation.validate(repository)
+    if invocation.request != acquisition.request:
+        raise CommonSessionValidationError
     current = repository.reopen_schema6(
         acquisition.request.investigation_id,
         acquisition.request.run_id,
+        ownership=invocation.ownership,
     )
     if not isinstance(current.state, Schema6Envelope):
         raise CommonSessionValidationError
@@ -1391,6 +1794,7 @@ def admit_frame_then_classify(
         decoding_state,
         records,
         expected_manifest_id=current.manifest_id,
+        ownership=invocation.ownership,
     )
     ready_manifest = _schema6_successor_manifest(
         decoding_manifest,
@@ -1417,9 +1821,13 @@ def admit_frame_then_classify(
         (*records, frame_envelope),
         expected_manifest_id=decoding_manifest.identity,
         binary_records={frame_envelope.identity: canonical_jpeg},
+        ownership=invocation.ownership,
     )
+    invocation.validate(repository)
     ready_run = repository.reopen_schema6(
-        acquisition.request.investigation_id, acquisition.request.run_id
+        acquisition.request.investigation_id,
+        acquisition.request.run_id,
+        ownership=invocation.ownership,
     )
     authoritative_frame = reopened_frame_from_run(
         ready_run,
@@ -1458,6 +1866,7 @@ def admit_frame_then_classify(
         classifying_state,
         (*records, frame_envelope),
         expected_manifest_id=ready_manifest.identity,
+        ownership=invocation.ownership,
     )
     completion = _as_envelope(
         classify_after_readback(
@@ -1469,6 +1878,7 @@ def admit_frame_then_classify(
                 authoritative_frame,
                 target_request,
                 classification_attempt_id,
+                invocation.budget,
             ),
         ),
         "classification-operation",
@@ -1517,8 +1927,14 @@ def admit_frame_then_classify(
         final_state,
         final_records,
         expected_manifest_id=classifying_manifest.identity,
+        ownership=invocation.ownership,
     ).run
-    return repository.reopen_schema6(published.investigation_id, published.run_id)
+    invocation.validate(repository)
+    return repository.reopen_schema6(
+        published.investigation_id,
+        published.run_id,
+        ownership=invocation.ownership,
+    )
 
 
 def _segment_id(segment: RecordingSegment) -> str:
@@ -1538,13 +1954,22 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _validate_media_root(root: Path) -> None:
-    """Reject symlinked media roots and unsafe parent components."""
-    if root.exists() and (root.is_symlink() or not root.is_dir()):
-        raise CommonSessionMediaError
-    root.mkdir(parents=True, exist_ok=True)
-    if root.is_symlink() or not root.is_dir():
-        raise CommonSessionMediaError
+def _validate_media_root(repository_root: Path, root: Path) -> None:
+    """Create only a direct safe child of the configured repository root."""
+    try:
+        if root.parent != repository_root or not is_safe_path(repository_root, require_target=True):
+            raise CommonSessionMediaError
+        if root.exists() and (root.is_symlink() or not root.is_dir()):
+            raise CommonSessionMediaError
+        root.mkdir(parents=False, exist_ok=True)
+        if (
+            root.is_symlink()
+            or not root.is_dir()
+            or not is_safe_contained_path(repository_root, root, require_target=True)
+        ):
+            raise CommonSessionMediaError
+    except OSError as exc:
+        raise CommonSessionMediaError from exc
 
 
 def _is_safe_child(root: Path, child: Path) -> bool:
@@ -1559,6 +1984,135 @@ def _is_safe_child(root: Path, child: Path) -> bool:
         return child.resolve(strict=True).is_relative_to(root_resolved)
     except (OSError, RuntimeError):
         return False
+
+
+def _create_safe_media_directory(root: Path, investigation_id: str, run_id: str) -> Path:
+    """Create each deterministic media component without traversing linked parents."""
+    if any(
+        not value or value in {".", ".."} or "/" in value or "\\" in value or "\0" in value
+        for value in (investigation_id, run_id)
+    ):
+        raise CommonSessionMediaError
+    current = root
+    try:
+        for component in (investigation_id, run_id):
+            candidate = current / component
+            if candidate.exists() or candidate.is_symlink():
+                if candidate.is_symlink() or not candidate.is_dir():
+                    raise CommonSessionMediaError
+            else:
+                candidate.mkdir(parents=False)
+            if not _is_safe_child(root, candidate):
+                raise CommonSessionMediaError
+            current = candidate
+    except OSError as exc:
+        raise CommonSessionMediaError from exc
+    return current
+
+
+def _remove_owned_media_directory(repository_root: Path, path: Path) -> None:
+    """Remove only one confined invocation staging directory without following links."""
+    try:
+        if (
+            not path.exists()
+            or path.is_symlink()
+            or not is_safe_contained_path(repository_root, path, require_target=True)
+        ):
+            return
+        for item in path.iterdir():
+            if (
+                item.is_symlink()
+                or not item.is_file()
+                or not is_safe_contained_path(repository_root, item, require_target=True)
+            ):
+                raise CommonSessionCleanupError
+            item.unlink()
+        path.rmdir()
+    except OSError as exc:
+        raise CommonSessionCleanupError from exc
+
+
+def _remove_exact_media_file(path: Path, size_bytes: int, sha256: str) -> None:
+    """Remove only the just-published regular file whose bytes remain unchanged."""
+    try:
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_nlink != 1
+            or path.stat().st_size != size_bytes
+            or _sha256_file(path) != sha256
+        ):
+            raise CommonSessionCleanupError
+        path.unlink()
+    except OSError as exc:
+        raise CommonSessionCleanupError from exc
+
+
+def _remove_owned_retained_media(
+    repository_root: Path,
+    acquisition: CommonSessionAcquisition,
+) -> None:
+    """Delete only the exact uncommitted media identity owned by this invocation."""
+    path = acquisition.retained_mp4_path
+    if path is None:
+        return
+    expected_root = repository_root / ".media"
+    expected = (
+        expected_root
+        / acquisition.request.investigation_id
+        / acquisition.request.run_id
+        / f"{acquisition.common_session_id}.mp4"
+    )
+    try:
+        if path != expected or not _is_safe_child(expected_root, path):
+            raise CommonSessionCleanupError
+        payload = acquisition.session.payload
+        if (
+            path.stat().st_nlink != 1
+            or path.stat().st_size != payload.get("mp4_size_bytes")
+            or _sha256_file(path) != payload.get("mp4_sha256")
+        ):
+            raise CommonSessionCleanupError
+        path.unlink()
+        for parent in (path.parent, path.parent.parent):
+            if _is_safe_child(expected_root, parent) and not any(parent.iterdir()):
+                parent.rmdir()
+    except OSError as exc:
+        raise CommonSessionCleanupError from exc
+
+
+def _fsync_directory(directory: Path) -> None:
+    with suppress(OSError):
+        descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def _strict_integer_text(value: object, *, nonnegative: bool) -> int:
+    """Parse ffprobe integer JSON/string values without float coercion."""
+    if type(value) is int:
+        result = value
+    elif (
+        isinstance(value, str)
+        and value
+        and (value.isdigit() or (value.startswith("-") and value[1:].isdigit()))
+    ):
+        result = int(value)
+    else:
+        raise CommonSessionMissingPtsError
+    if nonnegative and result < 0:
+        raise CommonSessionTimestampResetError
+    return result
+
+
+def _translate_repository_failure(exc: BaseException) -> CommonSessionError:
+    if isinstance(exc, CommonSessionError):
+        return exc
+    if isinstance(exc, (Phase7EReadbackError, Phase7ECorruptError)):
+        return CommonSessionReadbackError()
+    return CommonSessionPublicationError()
 
 
 def _remove_clip_or_raise(clip: ReplayClip) -> None:
@@ -1632,12 +2186,50 @@ def select_target_index(
 
 def validate_decoded_order(frames: Sequence[DecodedLocalFrame]) -> None:
     """Reject PTS/ordinal resets and duplicate physical positions."""
+    if not frames:
+        raise CommonSessionDecoderError
+    first = frames[0]
+    first.validate()
     for prior, current in pairwise(frames):
-        if current.decoded_offset <= prior.decoded_offset or current.ordinal <= prior.ordinal:
+        current.validate()
+        if (
+            current.decode_session_id != first.decode_session_id
+            or current.container_start_pts != first.container_start_pts
+            or current.time_base_num != first.time_base_num
+            or current.time_base_den != first.time_base_den
+        ):
+            raise CommonSessionRecordingGapError
+        if current.ordinal <= prior.ordinal:
             raise CommonSessionDecoderError
+        if current.raw_pts <= prior.raw_pts or current.decoded_offset <= prior.decoded_offset:
+            raise CommonSessionNonmonotonicPtsError
     positions = {(frame.decode_session_id, frame.ordinal) for frame in frames}
     if len(positions) != len(frames):
         raise CommonSessionDecoderError
+
+
+def validate_repeated_decode(
+    authoritative: Sequence[DecodedLocalFrame],
+    repeated: Sequence[DecodedLocalFrame],
+) -> None:
+    """Require a repeated pass to reproduce exact timing and RGB24 identities."""
+    if len(authoritative) != len(repeated) or not authoritative:
+        raise CommonSessionRecordingGapError
+    validate_decoded_order(authoritative)
+    validate_decoded_order(repeated)
+    for prior, current in zip(authoritative, repeated, strict=True):
+        if (
+            prior.requested_time_utc != current.requested_time_utc
+            or prior.raw_pts != current.raw_pts
+            or prior.ordinal != current.ordinal
+            or prior.container_start_pts != current.container_start_pts
+            or prior.time_base_num != current.time_base_num
+            or prior.time_base_den != current.time_base_den
+            or prior.width != current.width
+            or prior.height != current.height
+            or prior.rgb24_sha256 != current.rgb24_sha256
+        ):
+            raise CommonSessionRecordingGapError
 
 
 def rgb24_sha256(rgb24_bytes: bytes, width: int, height: int) -> str:
@@ -1918,6 +2510,7 @@ def execute_local_targets(
     pass_number: int = 1,
     cancellation: Callable[[], bool] | None = None,
     logical_end: bool = False,
+    budget: InvocationBudget | None = None,
 ) -> tuple[DecodedLocalFrame, ...]:
     """Run bounded local decoding over the same retained MP4 only."""
     ordered = tuple(_utc_second(target) for target in targets)
@@ -1938,9 +2531,19 @@ def execute_local_targets(
         for target in ordered
     ):
         raise CommonSessionValidationError
+    active_budget = budget or InvocationBudget(
+        acquisition.request.policy,
+        monotonic,
+        cancellation,
+    )
     if cancellation is not None and cancellation():
         raise CommonSessionCancelledError
-    usable_seconds = acquisition.request.policy.decoder_timeout_seconds
+    active_budget.admit_decoder_pass(len(ordered))
+    usable_seconds = active_budget.operation_timeout(
+        acquisition.request.policy.decoder_timeout_seconds,
+        minimum_start_seconds=1.0,
+        downstream_reserve_seconds=40.0,
+    )
     try:
         frames = tuple(decoder.decode(acquisition, ordered, float(usable_seconds)))
     except CommonSessionError:
@@ -1952,11 +2555,13 @@ def execute_local_targets(
     if len(frames) != len(ordered):
         raise CommonSessionDecoderError
     for frame, target in zip(frames, ordered, strict=True):
+        active_budget.check()
         if _utc_second(frame.requested_time_utc) != target:
             raise CommonSessionDecoderError
         frame.validate(max_rgb24_frames=acquisition.request.policy.maximum_selected_rgb24_frames)
     validate_decoded_order(frames)
     reject_duplicate_frame_evidence(frames)
+    active_budget.check()
     return frames
 
 
@@ -2010,12 +2615,14 @@ def classify_after_readback(
     authoritative: Phase7EB4Input,
 ) -> object:
     """Invoke B4 only after the caller has strictly persisted/reopened a frame."""
+    authoritative.budget.check()
     try:
         result = classifier.classify(authoritative)
     except CommonSessionError:
         raise
     except (OSError, TimeoutError, ValueError, TypeError, RecordingSearchError) as exc:
         raise CommonSessionError from exc
+    authoritative.budget.check()
     return result
 
 
@@ -2034,6 +2641,13 @@ __all__ = [
     "CommonSessionDeadlineError",
     "CommonSessionError",
     "CommonSessionMediaError",
+    "CommonSessionMediaProbeTimeoutError",
+    "CommonSessionMissingPtsError",
+    "CommonSessionInvalidTimeBaseError",
+    "CommonSessionNonmonotonicPtsError",
+    "CommonSessionTimestampResetError",
+    "CommonSessionRecordingGapError",
+    "CommonSessionSegmentBoundaryError",
     "CommonSessionPolicy",
     "CommonSessionRecordingUnavailableError",
     "CommonSessionReplayError",
@@ -2051,6 +2665,8 @@ __all__ = [
     "MAX_TARGETS_PER_DECODER_PASS",
     "MediaProbe",
     "MediaProbeFacts",
+    "InvocationBudget",
+    "Phase7EInvocation",
     "Phase7E1CExecutor",
     "Phase7EB4Input",
     "ProductionB4Adapter",
@@ -2075,5 +2691,6 @@ __all__ = [
     "reopened_frame_from_run",
     "select_target_index",
     "validate_decoded_order",
+    "validate_repeated_decode",
     "validate_jpeg_and_rgb24",
 ]

@@ -1,6 +1,7 @@
 """Temporary MP4 extraction for credential-free NVR replay requests."""
 
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -120,6 +121,18 @@ class ReplayExtractor:
 
     def extract(self, request: ReplayRequest) -> ReplayClip:
         """Extract one bounded MP4 from a credential-free replay request."""
+        return self.extract_with_timeout(request, None)
+
+    def extract_with_timeout(  # noqa: C901
+        self,
+        request: ReplayRequest,
+        timeout_seconds: float | None,
+    ) -> ReplayClip:
+        """Extract with an optional stricter invocation-owned timeout ceiling."""
+        if timeout_seconds is not None and (
+            not math.isfinite(timeout_seconds) or timeout_seconds <= 0
+        ):
+            raise ReplayTimeoutError
         try:
             output_path = self._temporary_path()
         except OSError:
@@ -132,12 +145,17 @@ class ReplayExtractor:
         )
         try:
             arguments = self._arguments(request, output_path)
-            timeout_seconds = (
+            normal_timeout = (
                 request.window.duration_seconds
                 + _STARTUP_ALLOWANCE_SECONDS
                 + _FINALIZATION_MARGIN_SECONDS
             )
-            completed = self._run(arguments, timeout_seconds, diagnostics)
+            effective_timeout = (
+                normal_timeout
+                if timeout_seconds is None
+                else min(float(normal_timeout), timeout_seconds)
+            )
+            completed = self._run(arguments, effective_timeout, diagnostics)
         except subprocess.TimeoutExpired:
             try:
                 partial_output_bytes = output_path.stat().st_size
