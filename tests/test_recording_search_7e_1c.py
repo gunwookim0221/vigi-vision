@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import subprocess
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from fractions import Fraction
 from pathlib import Path
@@ -18,6 +19,9 @@ import pytest
 from vigi_vision.recording import RecordingSegment, ReplayRequest
 from vigi_vision.recording_search_7e_1c import (
     CommonSessionAcquirer,
+    CommonSessionCancelledError,
+    CommonSessionCleanupError,
+    CommonSessionMediaError,
     CommonSessionPolicy,
     CommonSessionRequest,
     CommonSessionReplayTimeoutError,
@@ -207,6 +211,148 @@ def test_replay_timeout_is_safe_and_partial_path_is_removed(tmp_path: Path) -> N
     assert not path.exists()
 
 
+def test_primary_media_failure_survives_successful_temp_cleanup(tmp_path: Path) -> None:
+    acquirer, extractor, planner = _acquirer(tmp_path)
+
+    class ShortProbe(_Probe):
+        def probe(self, path: Path, timeout_seconds: float) -> MediaProbeFacts:
+            return replace(super().probe(path, timeout_seconds), duration_ticks=1)
+
+    acquirer = CommonSessionAcquirer(planner, extractor, ShortProbe())
+    with pytest.raises(CommonSessionMediaError) as exception_info:
+        acquirer.acquire(_request())
+
+    primary = exception_info.value
+    assert primary.cleanup_failure_code is None
+    assert primary.cleanup_failure is None
+    assert primary.failed_replay_clip is None
+    assert not extractor.path.exists()
+
+
+def test_primary_media_failure_retains_failed_clip_when_temp_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    acquirer, extractor, planner = _acquirer(tmp_path)
+
+    class ShortProbe(_Probe):
+        def probe(self, path: Path, timeout_seconds: float) -> MediaProbeFacts:
+            return replace(super().probe(path, timeout_seconds), duration_ticks=1)
+
+    remove_calls = [0]
+
+    def fail_remove(self: ReplayClip) -> None:
+        remove_calls[0] += 1
+        raise OSError from None
+
+    monkeypatch.setattr(ReplayClip, "remove", fail_remove)
+    acquirer = CommonSessionAcquirer(planner, extractor, ShortProbe())
+    with pytest.raises(CommonSessionMediaError) as exception_info:
+        acquirer.acquire(_request())
+
+    primary = exception_info.value
+    assert primary.cleanup_failure_code == "cleanup_failed"
+    assert isinstance(primary.cleanup_failure, CommonSessionCleanupError)
+    assert primary.failed_replay_clip is not None
+    assert primary.failed_replay_clip.temporary_mp4_path == extractor.path
+    assert extractor.path.exists()
+    assert remove_calls == [1]
+    assert str(primary) == "media_probe_failed"
+    assert "native path details" not in str(primary)
+
+
+def test_standalone_cleanup_failure_remains_primary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    acquirer, _, _ = _acquirer(tmp_path)
+    acquisition = acquirer.acquire(_request())
+
+    def fail_remove(self: ReplayClip) -> None:
+        raise OSError from None
+
+    monkeypatch.setattr(ReplayClip, "remove", fail_remove)
+    with pytest.raises(CommonSessionCleanupError):
+        acquisition.remove()
+
+
+def test_deadline_failure_remains_primary_when_temp_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    acquirer, extractor, planner = _acquirer(tmp_path)
+    now = [0.0]
+    policy = replace(
+        CommonSessionPolicy(), invocation_deadline_seconds=50, cleanup_reserve_seconds=1
+    )
+    budget = InvocationBudget(policy, lambda: now[0])
+    budget.deadline = 50.0
+
+    def fail_remove(self: ReplayClip) -> None:
+        raise OSError from None
+
+    monkeypatch.setattr(ReplayClip, "remove", fail_remove)
+
+    class AdvancingExtractor(_Extractor):
+        def extract(self, request: ReplayRequest) -> ReplayClip:
+            clip = super().extract(request)
+            now[0] = 51.0
+            return clip
+
+    acquirer = CommonSessionAcquirer(planner, AdvancingExtractor(extractor.path), _Probe())
+    with pytest.raises(CommonSessionDeadlineError) as exception_info:
+        acquirer.acquire(_request(policy), budget=budget)
+
+    primary = exception_info.value
+    assert primary.cleanup_failure_code == "cleanup_failed"
+    assert isinstance(primary.cleanup_failure, CommonSessionCleanupError)
+    assert primary.failed_replay_clip is not None
+    assert extractor.path.exists()
+    assert budget.deadline == 50.0
+
+
+def test_cancellation_remains_primary_when_temp_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    acquirer, extractor, planner = _acquirer(tmp_path)
+
+    def fail_remove(self: ReplayClip) -> None:
+        raise OSError from None
+
+    monkeypatch.setattr(ReplayClip, "remove", fail_remove)
+    cancelled = [False]
+
+    class CancellingExtractor(_Extractor):
+        def extract(self, request: ReplayRequest) -> ReplayClip:
+            clip = super().extract(request)
+            cancelled[0] = True
+            return clip
+
+    probe_calls = [0]
+
+    class Probe(_Probe):
+        def probe(self, path: Path, timeout_seconds: float) -> MediaProbeFacts:
+            probe_calls[0] += 1
+            return super().probe(path, timeout_seconds)
+
+    acquirer = CommonSessionAcquirer(
+        planner,
+        CancellingExtractor(extractor.path),
+        Probe(),
+        cancellation=lambda: cancelled[0],
+    )
+    with pytest.raises(CommonSessionCancelledError) as exception_info:
+        acquirer.acquire(_request())
+
+    primary = exception_info.value
+    assert primary.cleanup_failure_code == "cleanup_failed"
+    assert isinstance(primary.cleanup_failure, CommonSessionCleanupError)
+    assert primary.failed_replay_clip is not None
+    assert probe_calls == [0]
+    assert extractor.path.exists()
+
+
 def test_durable_media_is_reused_and_read_back(tmp_path: Path) -> None:
     acquirer, _, _ = _acquirer(tmp_path)
     request = _request()
@@ -318,6 +464,59 @@ def test_executor_publishes_failed_state_and_releases_owner_on_replay_failure(
         pass
     media_root = repository.root / ".media"
     assert not media_root.exists() or not tuple(media_root.rglob("*.mp4"))
+
+
+def test_executor_publishes_primary_failure_when_temp_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vectors = _vectors()
+    by_family = {item["family"]: item for item in vectors}
+    schema5 = _env(by_family["schema5-manifest"])
+    target_ids = set(schema5.payload["coarse_target_request_ids"])
+    targets = tuple(
+        _env(item)
+        for item in vectors
+        if item["family"] == "target-request" and item["expected_id"] in target_ids
+    )
+    policy = _env(by_family["policy"])
+    base = (policy, _env(by_family["coarse-plan"]), *targets)
+    _unused_acquirer, extractor, planner = _acquirer(tmp_path)
+
+    class ShortProbe(_Probe):
+        def probe(self, path: Path, timeout_seconds: float) -> MediaProbeFacts:
+            return replace(super().probe(path, timeout_seconds), duration_ticks=1)
+
+    remove_calls = [0]
+
+    def fail_remove(self: ReplayClip) -> None:
+        remove_calls[0] += 1
+        raise OSError from None
+
+    monkeypatch.setattr(ReplayClip, "remove", fail_remove)
+    repository = RecordingSearch7ERepository(tmp_path / "runs", lock_timeout_seconds=0)
+    acquirer = CommonSessionAcquirer(planner, extractor, ShortProbe())
+    executor = Phase7E1CExecutor(repository, acquirer)
+    with pytest.raises(CommonSessionMediaError) as exception_info:
+        executor.execute(
+            _request(CommonSessionPolicy.from_payload(policy.payload)),
+            schema5,
+            base,
+            _env(by_family["classifier-policy"]),
+            targets,
+        )
+
+    primary = exception_info.value
+    assert primary.cleanup_failure_code == "cleanup_failed"
+    assert primary.failed_replay_clip is not None
+    assert remove_calls == [1]
+    failed = repository.reopen_schema5("inv-01", "run-01")
+    assert isinstance(failed.state, Schema5Envelope)
+    assert failed.state.run_state == "FAILED"
+    assert failed.state.reason_code == "media_probe_failed"
+    assert extractor.path.exists()
+    with repository.invocation_ownership("inv-01", "run-01", timeout_seconds=0):
+        pass
 
 
 def test_frame_is_reopened_before_b4_and_observation_is_indexed(tmp_path: Path) -> None:

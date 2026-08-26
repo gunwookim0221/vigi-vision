@@ -101,6 +101,8 @@ class CommonSessionError(RecordingSearchError):
         """Create one safe error with an optional secondary cleanup result."""
         super().__init__(self.code)
         self.cleanup_failure_code: str | None = None
+        self.cleanup_failure: CommonSessionCleanupError | None = None
+        self.failed_replay_clip: ReplayClip | None = None
 
     def __str__(self) -> str:
         return self.code
@@ -1299,21 +1301,26 @@ class CommonSessionAcquirer:
             ReplayUnavailableError,
             ReplayError,
         ) as exc:
-            if clip is not None:
-                _remove_clip_or_raise(clip)
             if isinstance(exc, CommonSessionError):
-                raise
-            if isinstance(exc, ReplayTimeoutError):
-                raise CommonSessionReplayTimeoutError from exc
-            if isinstance(exc, ReplayAuthenticationError):
-                raise CommonSessionReplayAuthenticationError from exc
-            if isinstance(exc, ReplayUnavailableError):
-                raise CommonSessionRecordingUnavailableError from exc
-            raise CommonSessionReplayError from exc
-        except (OSError, ConfirmationArtifactError, ValueError, TypeError) as exc:
+                primary = exc
+            elif isinstance(exc, ReplayTimeoutError):
+                primary = CommonSessionReplayTimeoutError()
+            elif isinstance(exc, ReplayAuthenticationError):
+                primary = CommonSessionReplayAuthenticationError()
+            elif isinstance(exc, ReplayUnavailableError):
+                primary = CommonSessionRecordingUnavailableError()
+            else:
+                primary = CommonSessionReplayError()
             if clip is not None:
-                _remove_clip_or_raise(clip)
-            raise CommonSessionMediaError from exc
+                _remove_clip_preserving_primary(clip, primary)
+            if primary is exc:
+                raise
+            raise primary from exc
+        except (OSError, ConfirmationArtifactError, ValueError, TypeError) as exc:
+            primary = CommonSessionMediaError()
+            if clip is not None:
+                _remove_clip_preserving_primary(clip, primary)
+            raise primary from exc
 
     def _validate_retained_clip(self, clip: ReplayClip, maximum_bytes: int) -> None:
         """Reject symlinks, non-regular files, escapes, and oversized media."""
@@ -1579,6 +1586,7 @@ class Phase7E1CExecutor:
                 primary,
                 retained or acquisition,
                 schema6_committed,
+                failed_clip=primary.failed_replay_clip,
             )
             raise primary
 
@@ -1591,6 +1599,7 @@ class Phase7E1CExecutor:
         primary: CommonSessionError,
         retained: CommonSessionAcquisition | None,
         schema6_committed: bool,
+        failed_clip: ReplayClip | None = None,
     ) -> None:
         """Preserve the primary cause while publishing/cleaning only current ownership."""
         if not invocation.ownership.active or not invocation.ownership.lock.held:
@@ -1631,6 +1640,11 @@ class Phase7E1CExecutor:
                 retained.remove()
             except CommonSessionCleanupError:
                 primary.cleanup_failure_code = "cleanup_failed"
+        # A failed acquisition owns only its temporary replay clip.  The
+        # acquisition boundary has already attempted cleanup exactly once;
+        # retain the context without retrying or claiming that it was removed.
+        if failed_clip is not None and primary.failed_replay_clip is None:
+            primary.failed_replay_clip = failed_clip
 
 
 def _validate_executor_inputs(
@@ -2120,6 +2134,19 @@ def _remove_clip_or_raise(clip: ReplayClip) -> None:
         clip.remove()
     except OSError as exc:
         raise CommonSessionCleanupError from exc
+
+
+def _remove_clip_preserving_primary(
+    clip: ReplayClip,
+    primary: CommonSessionError,
+) -> None:
+    """Attempt owned temp cleanup without replacing an existing primary error."""
+    try:
+        clip.remove()
+    except OSError:
+        primary.cleanup_failure_code = CommonSessionCleanupError.code
+        primary.cleanup_failure = CommonSessionCleanupError()
+        primary.failed_replay_clip = clip
 
 
 def _fraction_text(value: object) -> tuple[int, int]:
