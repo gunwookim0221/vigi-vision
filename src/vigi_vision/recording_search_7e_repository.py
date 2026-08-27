@@ -1,9 +1,8 @@
 # pyright: reportAny=false, reportExplicitAny=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportUnknownMemberType=false, reportUnannotatedClassAttribute=false, reportUnusedCallResult=false, reportUnnecessaryIsInstance=false, reportUnreachable=false, reportInvalidTypeForm=false, reportAttributeAccessIssue=false, reportDeprecated=false, reportUnusedParameter=false, reportArgumentType=false, reportUnusedFunction=false
 # ruff: noqa: ARG002, C901, EM101, FURB171, PLR0912, PLR0913, PLR0915, PLR2004, PLW0108, PTH105, RET504, RUF022, SIM102, SIM108, TRY003, TRY300
-"""Strict local persistence for the Phase 7E schema-5/6 boundary.
+"""Strict local persistence for the Phase 7E schema-5/6/7 boundary.
 
-This module deliberately stops at durable request/session metadata.  It does
-not acquire recordings, decode media, invoke B4, publish schema 7, or create
+This module does not acquire recordings, decode media, invoke B4, or create
 Phase 8 records.  A manifest replacement is the only visible commit point;
 children are immutable and are indexed only by the successor manifest.
 """
@@ -43,6 +42,7 @@ from vigi_vision.recording_search_7e_models import (
     Schema5PhaseState,
     Schema6Manifest,
     Schema6TargetState,
+    Schema7Manifest,
     StrictIdentityEnvelope,
 )
 from vigi_vision.recording_search_7e_validation import (
@@ -149,7 +149,7 @@ class _ManifestDocument(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class Phase7ERun:
-    """A strictly reopened schema-5 or schema-6 tree."""
+    """A strictly reopened schema-5, schema-6, or schema-7 tree."""
 
     root: Path = field(repr=False)
     investigation_id: str
@@ -179,6 +179,21 @@ class Phase7ERun:
     def is_schema6(self) -> bool:
         """Return whether this is a schema-6 run."""
         return self.schema_version == 6
+
+    @property
+    def is_schema7(self) -> bool:
+        """Return whether this is an immutable schema-7 run."""
+        return self.schema_version == 7
+
+    @property
+    def result_kind(self) -> str | None:
+        """Return the strictly reopened schema-7 terminal kind."""
+        if not self.is_schema7:
+            return None
+        terminal = next(
+            (record for record in self.records if record.family == "terminal-result"), None
+        )
+        return None if terminal is None else str(terminal.payload["result_kind"])
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +233,7 @@ _SCHEMA6_DIRECTORIES = frozenset(
         "narrowed-brackets",
     }
 )
+_SCHEMA7_DIRECTORIES = frozenset({*_SCHEMA6_DIRECTORIES, "terminal"})
 _FAMILY_DIRECTORY = {
     "policy": "policy",
     "coarse-plan": "plans",
@@ -249,6 +265,11 @@ _SCHEMA6_INDEX_KEYS = (
     "d1_history_ids",
     "narrowed_bracket_ids",
 )
+_TERMINAL_FILES = {
+    "source-record-set": "source-record-set.json",
+    "evidence-snapshot": "evidence-snapshot.json",
+    "terminal-result": "result.json",
+}
 _IDENTITY_RE = r"^rr-[a-z0-9-]+-v1-[0-9a-f]{64}$"
 
 
@@ -566,15 +587,107 @@ class RecordingSearch7ERepository:
     strict_reopen_schema6 = reopen_schema6
     read_schema6 = reopen_schema6
 
+    def publish_schema7(
+        self,
+        investigation_id: str,
+        run_id: str,
+        proposal: StrictIdentityEnvelope | Schema7Manifest | Mapping[str, Any],
+        source_record_set: object,
+        evidence_snapshot: object,
+        terminal_result: object,
+        *,
+        expected_schema6_manifest_id: str | None = None,
+        ownership: Phase7EInvocationOwnership | None = None,
+    ) -> PublicationResult:
+        """Atomically replace a complete schema-6 tree with immutable schema 7."""
+        envelope = _coerce_envelope(proposal, "schema7-manifest")
+        terminal_children = tuple(
+            _coerce_terminal_child(value, family)
+            for value, family in (
+                (source_record_set, "source-record-set"),
+                (evidence_snapshot, "evidence-snapshot"),
+                (terminal_result, "terminal-result"),
+            )
+        )
+        with self._locked(investigation_id, ownership, run_id):
+            run_path = self.run_path(investigation_id, run_id)
+            if _is_schema7_root(run_path):
+                current7 = self._reopen_schema7_unlocked(investigation_id, run_id)
+                if _same_schema7_proposal(current7, envelope, terminal_children):
+                    return PublicationResult(PublicationStatus.REUSED, current7)
+                raise Phase7EConflictError
+            current = self._reopen_unlocked(investigation_id, run_id, expected_schema=6)
+            if not isinstance(current.state, Schema6Envelope):
+                raise Phase7ECorruptError
+            if (
+                current.state.run_state != "RUNNING"
+                or current.state.target_state is not Schema6TargetState.OBSERVED
+            ):
+                raise Phase7EValidationError("schema-7 predecessor is not complete")
+            if (
+                expected_schema6_manifest_id is not None
+                and current.manifest_id != expected_schema6_manifest_id
+            ):
+                raise Phase7EConflictError
+            self._validate_schema7_proposal(current, envelope, terminal_children)
+            self._publish_schema7_successor(current, envelope, terminal_children)
+            reopened = self._reopen_schema7_unlocked(investigation_id, run_id)
+            if reopened.manifest_id != envelope.identity:
+                raise Phase7EReadbackError
+            return PublicationResult(PublicationStatus.CREATED, reopened)
+
+    transition_schema6_to_schema7 = publish_schema7
+    persist_schema7 = publish_schema7
+
+    def reopen_schema7(
+        self,
+        investigation_id: str,
+        run_id: str,
+        *,
+        ownership: Phase7EInvocationOwnership | None = None,
+    ) -> Phase7ERun:
+        """Strictly reopen immutable schema 7 without cleanup or repair."""
+        with self._locked(investigation_id, ownership, run_id):
+            return self._reopen_schema7_unlocked(investigation_id, run_id)
+
+    strict_reopen_schema7 = reopen_schema7
+    read_schema7 = reopen_schema7
+
+    def reopen_current(
+        self,
+        investigation_id: str,
+        run_id: str,
+        *,
+        ownership: Phase7EInvocationOwnership | None = None,
+    ) -> Phase7ERun:
+        """Strictly dispatch the current schema without mutation or recovery."""
+        with self._locked(investigation_id, ownership, run_id):
+            path = self.run_path(investigation_id, run_id)
+            if _is_schema7_root(path):
+                return self._reopen_schema7_unlocked(investigation_id, run_id)
+            return self._reopen_unlocked(investigation_id, run_id, expected_schema=None)
+
+    strict_reopen_current = reopen_current
+
     def recover_active(self, investigation_id: str, run_id: str) -> Phase7ERun:
         """Inspect and interrupt an unowned active run under the OS lock."""
         with self._locked(investigation_id):
             self._clean_owned_staging(investigation_id, run_id)
-            run = self._reopen_unlocked(investigation_id, run_id, expected_schema=None)
+            run = (
+                self._reopen_schema7_unlocked(investigation_id, run_id)
+                if _is_schema7_root(self.run_path(investigation_id, run_id))
+                else self._reopen_unlocked(investigation_id, run_id, expected_schema=None)
+            )
+            if run.is_schema7:
+                return run
+            if not isinstance(run.state, (Schema5Envelope, Schema6Envelope)):
+                raise Phase7ECorruptError
             if run.state.run_state not in {"RUNNING"}:
                 return run
             if run.is_schema5:
                 previous = run.state
+                if not isinstance(previous, Schema5Envelope):
+                    raise Phase7ECorruptError
                 interrupted = Schema5Envelope(
                     run_state="INTERRUPTED",
                     phase_state=Schema5PhaseState.INTERRUPTED,
@@ -588,6 +701,8 @@ class RecordingSearch7ERepository:
                 )
             else:
                 previous6 = run.state
+                if not isinstance(previous6, Schema6Envelope):
+                    raise Phase7ECorruptError
                 interrupted = Schema6Envelope(
                     run_state="INTERRUPTED",
                     target_state=Schema6TargetState.INTERRUPTED,
@@ -1287,11 +1402,255 @@ class RecordingSearch7ERepository:
                 raise Phase7EValidationError("schema-6 indexes are not deterministic")
         self._validate_manifest_bindings(manifest, children)
         if (
+            predecessor.is_schema6
+            and isinstance(predecessor.state, Schema6Envelope)
+            and predecessor.state.target_state is Schema6TargetState.REQUESTED
+            and state.target_state is Schema6TargetState.OBSERVED
+        ):
+            _validate_alias_observation_successor(predecessor, state, children)
+        if (
             state.predecessor_target_state is not None
             and state.target_state is Schema6TargetState.REQUESTED
         ):
             if state.predecessor_target_state is not Schema6TargetState.OBSERVED:
                 raise Phase7EValidationError("invalid target predecessor")
+
+    def _validate_schema7_proposal(
+        self,
+        predecessor: Phase7ERun,
+        manifest: StrictIdentityEnvelope,
+        terminal_children: Sequence[StrictIdentityEnvelope],
+    ) -> None:
+        """Validate the complete immutable terminal proposal against schema 6."""
+        if manifest.family != "schema7-manifest" or predecessor.schema_version != 6:
+            raise Phase7EValidationError("invalid schema-7 proposal")
+        by_family = {child.family: child for child in terminal_children}
+        if set(by_family) != set(_TERMINAL_FILES) or len(by_family) != len(terminal_children):
+            raise Phase7EValidationError("invalid schema-7 terminal membership")
+        payload = manifest.payload
+        source_set = by_family["source-record-set"]
+        snapshot = by_family["evidence-snapshot"]
+        terminal = by_family["terminal-result"]
+        if (
+            payload.get("investigation_id") != predecessor.investigation_id
+            or payload.get("run_id") != predecessor.run_id
+            or payload.get("schema6_predecessor_manifest_id") != predecessor.manifest_id
+            or payload.get("source_record_set_id") != source_set.identity
+            or payload.get("evidence_snapshot_id") != snapshot.identity
+            or payload.get("terminal_result_id") != terminal.identity
+        ):
+            raise Phase7EConflictError
+        for child in terminal_children:
+            if (
+                child.payload.get("investigation_id") != predecessor.investigation_id
+                or child.payload.get("run_id") != predecessor.run_id
+            ):
+                raise Phase7EValidationError("foreign schema-7 terminal record")
+        expected_groups = _source_record_groups(predecessor)
+        if (
+            source_set.payload.get("schema6_manifest_id") != predecessor.manifest_id
+            or source_set.payload.get("record_groups") != expected_groups
+            or source_set.payload.get("record_count") != len(predecessor.records)
+        ):
+            raise Phase7EValidationError("source reconstruction mismatch")
+        predecessor_payload = predecessor.manifest.payload
+        indexes = predecessor_payload.get("indexes")
+        if not isinstance(indexes, Mapping):
+            raise Phase7EValidationError("schema-6 indexes are missing")
+        narrowed_id = snapshot.payload.get("narrowed_bracket_id")
+        if (
+            snapshot.payload.get("source_record_set_id") != source_set.identity
+            or snapshot.payload.get("policy_id") != predecessor_payload.get("policy_id")
+            or snapshot.payload.get("classifier_policy_id")
+            != predecessor_payload.get("classifier_policy_id")
+            or not _ordered_subset(
+                snapshot.payload.get("selected_observation_ids"), indexes["observation_ids"]
+            )
+            or not _ordered_subset(
+                snapshot.payload.get("selected_support_group_ids"), indexes["support_group_ids"]
+            )
+            or (narrowed_id is not None and narrowed_id not in indexes["narrowed_bracket_ids"])
+        ):
+            raise Phase7EValidationError("terminal evidence snapshot mismatch")
+        if (
+            terminal.payload.get("source_record_set_id") != source_set.identity
+            or terminal.payload.get("evidence_snapshot_id") != snapshot.identity
+            or terminal.payload.get("common_session_id")
+            != predecessor_payload.get("common_session_id")
+        ):
+            raise Phase7EValidationError("terminal result mismatch")
+        _validate_schema7_terminal_matrix(predecessor, snapshot, terminal)
+        graph = (
+            *predecessor.records,
+            predecessor.manifest,
+            *terminal_children,
+            manifest,
+        )
+        try:
+            validate_dependency_graph([item.model_dump(mode="json") for item in graph])
+        except Phase7EValidationError as exc:
+            raise Phase7EValidationError("invalid schema-7 identity graph") from exc
+
+    def _publish_schema7_successor(
+        self,
+        current: Phase7ERun,
+        manifest: StrictIdentityEnvelope,
+        terminal_children: Sequence[StrictIdentityEnvelope],
+    ) -> None:
+        """Stage all terminal records, then replace the root manifest last."""
+        staging = self._new_staging(current.investigation_id, current.run_id)
+        created: list[str] = []
+        created_directories: list[str] = []
+        committed = False
+        try:
+            self._copy_tree(current.root, staging)
+            terminal_dir = staging / "terminal"
+            terminal_dir.mkdir()
+            archive_path = staging / "manifests" / f"{current.manifest_id}.json"
+            archive_bytes = _canonical_json(_manifest_document(current)).encode()
+            _write_bytes_no_replace(archive_path, archive_bytes)
+            for child in terminal_children:
+                filename = _TERMINAL_FILES[child.family]
+                _write_bytes_no_replace(
+                    terminal_dir / filename,
+                    _canonical_json(child.model_dump(mode="json")).encode(),
+                )
+            _remove_owned_file(self.root, staging / "manifest.json")
+            _write_bytes_no_replace(
+                staging / "manifest.json",
+                _canonical_json(manifest.model_dump(mode="json")).encode(),
+            )
+            checked = self._reopen_schema7_unlocked(
+                current.investigation_id,
+                current.run_id,
+                path_override=staging,
+            )
+            if checked.manifest_id != manifest.identity:
+                raise Phase7EReadbackError
+            for relative in (
+                f"manifests/{current.manifest_id}.json",
+                "terminal/source-record-set.json",
+                "terminal/evidence-snapshot.json",
+                "terminal/result.json",
+            ):
+                target = current.root / Path(relative)
+                if target.exists() or target.is_symlink():
+                    raise Phase7EConflictError
+                created.append(relative)
+            _write_bytes_no_replace(
+                staging / "publication.json",
+                _canonical_json(
+                    {
+                        "investigation_id": current.investigation_id,
+                        "run_id": current.run_id,
+                        "manifest_id": manifest.identity,
+                        "paths": created,
+                    }
+                ).encode(),
+            )
+            for relative in created:
+                source = staging / Path(relative)
+                target = current.root / Path(relative)
+                missing: list[Path] = []
+                parent = target.parent
+                while parent != current.root and not parent.exists():
+                    missing.append(parent)
+                    parent = parent.parent
+                for directory in reversed(missing):
+                    directory.mkdir()
+                    created_directories.append(directory.relative_to(current.root).as_posix())
+                os.replace(source, target)
+                _fsync_directory(target.parent)
+            _replace_schema7_manifest(self.root, current.root, manifest)
+            committed = True
+        finally:
+            if not committed:
+                _remove_owned_paths(self.root, current.root, created)
+                _remove_owned_empty_directories(self.root, current.root, created_directories)
+            _remove_owned_directory(self.root, staging)
+
+    def _reopen_schema7_unlocked(
+        self,
+        investigation_id: str,
+        run_id: str,
+        *,
+        path_override: Path | None = None,
+    ) -> Phase7ERun:
+        """Strictly reconstruct schema 7 from fixed membership and archives."""
+        path = path_override or self.run_path(investigation_id, run_id)
+        _validate_schema7_root(self.root, path)
+        root_files = {entry.name for entry in path.iterdir() if entry.is_file()}
+        expected_root_files = {"manifest.json"}
+        if path.parent.name == ".staging":
+            expected_root_files.add("target.json")
+            if (path / "publication.json").exists():
+                expected_root_files.add("publication.json")
+        if root_files != expected_root_files:
+            raise Phase7ECorruptError
+        actual_directories = {entry.name for entry in path.iterdir() if entry.is_dir()}
+        if actual_directories != set(_SCHEMA7_DIRECTORIES):
+            raise Phase7ECorruptError
+        try:
+            manifest = _read_envelope(path / "manifest.json")
+            if manifest.family != "schema7-manifest":
+                raise Phase7ECorruptError
+            if (
+                manifest.payload.get("investigation_id") != investigation_id
+                or manifest.payload.get("run_id") != run_id
+            ):
+                raise Phase7ECorruptError
+            schema6_manifest, schema6_state, schema5_manifest = _read_schema7_archives(
+                self.root, path, manifest
+            )
+            source_records, frame_binary_ids = _read_schema7_source_records(
+                self.root, path, schema5_manifest
+            )
+            self._validate_membership(
+                6,
+                schema6_manifest,
+                schema6_state,
+                source_records,
+                path,
+                frame_binary_ids,
+            )
+            validate_dependency_graph([record.model_dump(mode="json") for record in source_records])
+            frame_bytes = self._read_frame_bytes(path, source_records)
+            self._validate_common_session_media(investigation_id, run_id, source_records)
+            terminal_children = _read_terminal_children(self.root, path, manifest)
+            predecessor = Phase7ERun(
+                path,
+                investigation_id,
+                run_id,
+                6,
+                schema6_manifest,
+                schema6_state,
+                source_records,
+                MappingProxyType(frame_bytes),
+            )
+            self._validate_schema7_proposal(predecessor, manifest, terminal_children)
+        except Phase7ERepositoryError:
+            raise
+        except (
+            OSError,
+            UnicodeError,
+            DurableJsonError,
+            ValidationError,
+            ValueError,
+            TypeError,
+            IdentityValidationError,
+            Phase7EValidationError,
+        ):
+            raise Phase7ECorruptError from None
+        return Phase7ERun(
+            path,
+            investigation_id,
+            run_id,
+            7,
+            manifest,
+            schema6_state,
+            (*source_records, schema6_manifest, *terminal_children),
+            MappingProxyType(frame_bytes),
+        )
 
     def _validate_manifest_bindings(
         self, manifest: StrictIdentityEnvelope, children: Sequence[_Child]
@@ -1408,6 +1767,357 @@ class RecordingSearch7ERepository:
                 _remove_owned_directory(self.root, directory)
             except (OSError, UnicodeError, ValueError, IdentityValidationError):
                 continue
+
+
+def _coerce_terminal_child(value: object, family: str) -> StrictIdentityEnvelope:
+    envelope = _coerce_any_envelope(value)
+    if envelope.family != family:
+        raise Phase7EValidationError("invalid terminal record family")
+    return envelope
+
+
+def _is_schema7_root(run_path: Path) -> bool:
+    manifest_path = run_path / "manifest.json"
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        return False
+    try:
+        value = strict_json_loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, DurableJsonError, IdentityValidationError):
+        return False
+    return value.get("family") == "schema7-manifest"
+
+
+def _same_schema7_proposal(
+    current: Phase7ERun,
+    manifest: StrictIdentityEnvelope,
+    terminal_children: Sequence[StrictIdentityEnvelope],
+) -> bool:
+    if current.manifest_id != manifest.identity:
+        return False
+    expected = {(item.family, item.identity) for item in terminal_children}
+    actual = {
+        (item.family, item.identity) for item in current.records if item.family in _TERMINAL_FILES
+    }
+    return actual == expected
+
+
+def _validate_schema7_root(root: Path, path: Path) -> None:
+    try:
+        if (
+            path.is_symlink()
+            or not path.is_dir()
+            or not is_safe_contained_path(root, path, require_target=True)
+        ):
+            raise Phase7ECorruptError
+        for entry in path.iterdir():
+            if entry.is_symlink() or not is_safe_contained_path(root, entry, require_target=True):
+                raise Phase7ECorruptError
+    except OSError:
+        raise Phase7ECorruptError from None
+
+
+def _read_schema7_archives(
+    root: Path,
+    path: Path,
+    manifest: StrictIdentityEnvelope,
+) -> tuple[StrictIdentityEnvelope, Schema6Envelope, StrictIdentityEnvelope]:
+    directory = path / "manifests"
+    schema6_id = manifest.payload["schema6_predecessor_manifest_id"]
+    schema6_path = directory / f"{schema6_id}.json"
+    try:
+        schema6_document = _parse_document(schema6_path.read_text(encoding="utf-8"))
+        schema6_manifest = _coerce_envelope(schema6_document.manifest, "schema6-manifest")
+        schema6_state = validate_schema6_state(schema6_document.state)
+        schema5_id = schema6_manifest.payload["schema5_predecessor_manifest_id"]
+        schema5_path = directory / f"{schema5_id}.json"
+        schema5_document = _parse_document(schema5_path.read_text(encoding="utf-8"))
+        schema5_manifest = _coerce_envelope(schema5_document.manifest, "schema5-manifest")
+        schema5_state = validate_schema5_state(schema5_document.state)
+        actual = {entry.name for entry in directory.iterdir()}
+        if actual != {schema6_path.name, schema5_path.name}:
+            raise Phase7ECorruptError
+        if any(
+            entry.is_symlink()
+            or not entry.is_file()
+            or not is_safe_contained_path(root, entry, require_target=True)
+            for entry in directory.iterdir()
+        ):
+            raise Phase7ECorruptError
+        if (
+            schema6_document.schema_version != 6
+            or schema6_manifest.identity != schema6_id
+            or schema6_state.run_state != "RUNNING"
+            or schema6_state.target_state is not Schema6TargetState.OBSERVED
+            or schema5_document.schema_version != 5
+            or schema5_manifest.identity != schema5_id
+            or schema5_state.phase_state is not Schema5PhaseState.ACQUIRED
+            or schema5_state.active_replay_operation_id
+            != schema6_manifest.payload["replay_operation_id"]
+        ):
+            raise Phase7ECorruptError
+        _validate_manifest_binding(
+            schema6_manifest,
+            schema6_state,
+            manifest.payload["investigation_id"],
+            manifest.payload["run_id"],
+            6,
+        )
+        _validate_manifest_binding(
+            schema5_manifest,
+            schema5_state,
+            manifest.payload["investigation_id"],
+            manifest.payload["run_id"],
+            5,
+        )
+    except Phase7ERepositoryError:
+        raise
+    except (
+        OSError,
+        UnicodeError,
+        DurableJsonError,
+        ValidationError,
+        ValueError,
+        TypeError,
+        KeyError,
+    ):
+        raise Phase7ECorruptError from None
+    return schema6_manifest, schema6_state, schema5_manifest
+
+
+def _read_schema7_source_records(
+    root: Path,
+    path: Path,
+    schema5_manifest: StrictIdentityEnvelope,
+) -> tuple[tuple[StrictIdentityEnvelope, ...], set[str]]:
+    records: list[StrictIdentityEnvelope] = [schema5_manifest]
+    frame_binary_ids: set[str] = set()
+    for directory_name in sorted(_SCHEMA6_DIRECTORIES - {"manifests"}):
+        directory = path / directory_name
+        try:
+            entries = tuple(directory.iterdir())
+        except OSError:
+            raise Phase7ECorruptError from None
+        if any(
+            entry.is_symlink()
+            or entry.is_dir()
+            or not is_safe_contained_path(root, entry, require_target=True)
+            for entry in entries
+        ):
+            raise Phase7ECorruptError
+        for item in sorted(entries, key=lambda entry: entry.name):
+            if (
+                directory_name == "frames"
+                and item.suffix == ".jpg"
+                and _safe_identity_name(item.stem)
+            ):
+                frame_binary_ids.add(item.stem)
+                continue
+            if item.suffix != ".json" or not _safe_identity_name(item.stem):
+                raise Phase7ECorruptError
+            child = _read_envelope(item)
+            if _FAMILY_DIRECTORY.get(child.family) != directory_name or child.identity != item.stem:
+                raise Phase7ECorruptError
+            records.append(child)
+    records.sort(key=lambda item: (_FAMILY_DIRECTORY.get(item.family, "manifests"), item.identity))
+    return tuple(records), frame_binary_ids
+
+
+def _read_terminal_children(
+    root: Path,
+    path: Path,
+    manifest: StrictIdentityEnvelope,
+) -> tuple[StrictIdentityEnvelope, ...]:
+    directory = path / "terminal"
+    expected_names = set(_TERMINAL_FILES.values())
+    try:
+        entries = tuple(directory.iterdir())
+        if {entry.name for entry in entries} != expected_names:
+            raise Phase7ECorruptError
+        if any(
+            entry.is_symlink()
+            or not entry.is_file()
+            or not is_safe_contained_path(root, entry, require_target=True)
+            for entry in entries
+        ):
+            raise Phase7ECorruptError
+        children = tuple(
+            _read_envelope(directory / filename)
+            for filename in (
+                "source-record-set.json",
+                "evidence-snapshot.json",
+                "result.json",
+            )
+        )
+    except OSError:
+        raise Phase7ECorruptError from None
+    expected_ids = {
+        "source-record-set": manifest.payload["source_record_set_id"],
+        "evidence-snapshot": manifest.payload["evidence_snapshot_id"],
+        "terminal-result": manifest.payload["terminal_result_id"],
+    }
+    if any(child.identity != expected_ids.get(child.family) for child in children):
+        raise Phase7ECorruptError
+    return children
+
+
+def _source_record_groups(run: Phase7ERun) -> list[dict[str, object]]:
+    payload = run.manifest.payload
+    indexes = payload["indexes"]
+    schema5 = next(record for record in run.records if record.family == "schema5-manifest")
+    groups = [
+        ("policy", [payload["policy_id"]]),
+        ("classifier_policy", [payload["classifier_policy_id"]]),
+        ("schema5_manifest", [schema5.identity]),
+        ("coarse_plan", [payload["plan_id"]]),
+        ("replay_operation", [payload["replay_operation_id"]]),
+        ("common_session", [payload["common_session_id"]]),
+        ("target_requests", list(indexes["target_request_ids"])),
+        ("decoder_operations", list(indexes["decoder_operation_ids"])),
+        ("frames", list(indexes["frame_ids"])),
+        ("classification_operations", list(indexes["classification_operation_ids"])),
+        ("observations", list(indexes["observation_ids"])),
+        ("aliases", list(indexes["alias_ids"])),
+        ("support_groups", list(indexes["support_group_ids"])),
+        ("c2_brackets", list(indexes["c2_bracket_ids"])),
+        ("d1_inputs", list(indexes["d1_input_ids"])),
+        ("d1_histories", list(indexes["d1_history_ids"])),
+        ("narrowed_brackets", list(indexes["narrowed_bracket_ids"])),
+    ]
+    return [{"type": name, "ids": ids} for name, ids in groups]
+
+
+def _ordered_subset(value: object, authoritative: object) -> bool:
+    return (
+        isinstance(value, list)
+        and isinstance(authoritative, list)
+        and len(value) == len(set(value))
+        and all(item in authoritative for item in value)
+    )
+
+
+def _record_map(run: Phase7ERun) -> dict[str, StrictIdentityEnvelope]:
+    return {record.identity: record for record in run.records}
+
+
+def _validate_schema7_terminal_matrix(
+    predecessor: Phase7ERun,
+    snapshot: StrictIdentityEnvelope,
+    terminal: StrictIdentityEnvelope,
+) -> None:
+    records = _record_map(predecessor)
+    kind = terminal.payload["result_kind"]
+    reason = terminal.payload["reason_code"]
+    start = terminal.payload["interval_start_requested_time_utc"]
+    end = terminal.payload["interval_end_requested_time_utc"]
+    narrowed_id = snapshot.payload["narrowed_bracket_id"]
+    selected_observations = snapshot.payload["selected_observation_ids"]
+    selected_support = snapshot.payload["selected_support_group_ids"]
+    observations = [records[item] for item in selected_observations]
+    if any(item.family != "observation" for item in observations):
+        raise Phase7EValidationError("invalid terminal observation reference")
+    if kind == "FOUND":
+        if (
+            reason != "SUPPORTED_TRANSITION"
+            or start is None
+            or end is None
+            or narrowed_id is None
+            or len(selected_support) != 1
+            or len(selected_observations) < 2
+        ):
+            raise Phase7EValidationError("invalid FOUND terminal matrix")
+        narrowed = records.get(narrowed_id)
+        support = records.get(selected_support[0])
+        if narrowed is None or support is None:
+            raise Phase7EValidationError("missing FOUND evidence")
+        if (
+            narrowed.payload["interval_start_requested_time_utc"] != start
+            or narrowed.payload["interval_end_requested_time_utc"] != end
+            or narrowed.payload["stop_reason"] != "TARGET_PRECISION_REACHED"
+            or narrowed.payload["lower_observation_id"] not in selected_observations
+            or narrowed.payload["upper_observation_id"] not in selected_observations
+            or narrowed.payload["upper_support_group_id"] != support.identity
+        ):
+            raise Phase7EValidationError("FOUND bracket mismatch")
+        _validate_distinct_absence_support(predecessor, support)
+        lower = records[narrowed.payload["lower_observation_id"]]
+        upper = records[narrowed.payload["upper_observation_id"]]
+        if lower.payload["outcome"] != "PRESENT" or upper.payload["outcome"] != "ABSENT":
+            raise Phase7EValidationError("FOUND transition is not supported")
+    elif kind == "NOT_FOUND":
+        if (
+            reason != "COMPLETE_PRESENT_GRID"
+            or start is not None
+            or end is not None
+            or narrowed_id is not None
+            or selected_support
+            or not observations
+            or any(item.payload["outcome"] != "PRESENT" for item in observations)
+        ):
+            raise Phase7EValidationError("invalid NOT_FOUND terminal matrix")
+    elif kind == "INCONCLUSIVE":
+        if (
+            reason
+            not in {
+                "BASELINE_ONLY_LOWER_BOUND",
+                "VISUAL_INDETERMINATE",
+                "INCOMPLETE_VISUAL_EVIDENCE",
+            }
+            or start is not None
+            or end is not None
+        ):
+            raise Phase7EValidationError("invalid INCONCLUSIVE terminal matrix")
+        if any(
+            item.payload.get("classifier_evidence", {}).get("visual_status") == "unusable"
+            for item in observations
+        ):
+            raise Phase7EValidationError("operational evidence cannot terminalize visually")
+    else:
+        raise Phase7EValidationError("invalid terminal kind")
+
+
+def _validate_distinct_absence_support(run: Phase7ERun, support: StrictIdentityEnvelope) -> None:
+    records = _record_map(run)
+    frame_ids = support.payload["member_frame_ids"]
+    observation_ids = support.payload["member_observation_ids"]
+    target_ids = support.payload["member_target_request_ids"]
+    if (
+        len(frame_ids) != 3
+        or len(set(frame_ids)) != 3
+        or len(set(observation_ids)) != 3
+        or len(set(target_ids)) != 3
+    ):
+        raise Phase7EValidationError("absence support is not distinct")
+    frames = [records[item] for item in frame_ids]
+    observations = [records[item] for item in observation_ids]
+    session_ids = {item.payload["common_session_id"] for item in frames}
+    rgb_digests = {item.payload["rgb24_sha256"] for item in frames}
+    if (
+        len(session_ids) != 1
+        or len(rgb_digests) != 3
+        or any(item.payload["outcome"] != "ABSENT" for item in observations)
+        or any(
+            item.payload["classifier_evidence"]["visual_status"] != "comparable"
+            for item in observations
+        )
+        or any(
+            frames[index - 1].payload["raw_pts"] >= frames[index].payload["raw_pts"]
+            or frames[index - 1].payload["ordinal"] >= frames[index].payload["ordinal"]
+            for index in range(1, len(frames))
+        )
+    ):
+        raise Phase7EValidationError("invalid absence support")
+
+
+def _replace_schema7_manifest(root: Path, run_path: Path, manifest: StrictIdentityEnvelope) -> None:
+    path = run_path / "manifest.json"
+    temporary = path.with_name(f".manifest-{manifest.identity}.tmp")
+    _write_bytes_no_replace(temporary, _canonical_json(manifest.model_dump(mode="json")).encode())
+    try:
+        os.replace(temporary, path)
+        _fsync_directory(run_path)
+    except OSError:
+        _remove_owned_file(root, temporary)
+        raise Phase7ERepositoryError from None
 
 
 _SCHEMA6_FAMILIES = frozenset(_FAMILY_DIRECTORY) | {"schema5-manifest"}
@@ -1559,6 +2269,8 @@ def _read_envelope(path: Path) -> StrictIdentityEnvelope:
 
 
 def _manifest_document(run: Phase7ERun) -> dict[str, Any]:
+    if not isinstance(run.state, (Schema5Envelope, Schema6Envelope)):
+        raise Phase7ECorruptError
     return {
         "schema_version": run.schema_version,
         "manifest": run.manifest.model_dump(mode="json"),
@@ -1782,7 +2494,10 @@ def _legal_schema6_successor(current: Schema6Envelope, proposed: Schema6Envelope
     if proposed.predecessor_target_state is not current.target_state:
         return False
     allowed = {
-        Schema6TargetState.REQUESTED: {Schema6TargetState.DECODING},
+        Schema6TargetState.REQUESTED: {
+            Schema6TargetState.DECODING,
+            Schema6TargetState.OBSERVED,
+        },
         Schema6TargetState.DECODING: {
             Schema6TargetState.FRAME_READY,
             Schema6TargetState.ACQUISITION_FAILED,
@@ -1800,6 +2515,50 @@ def _legal_schema6_successor(current: Schema6Envelope, proposed: Schema6Envelope
         Schema6TargetState.OBSERVED: {Schema6TargetState.REQUESTED},
     }
     return proposed.target_state in allowed.get(current.target_state, set())
+
+
+def _validate_alias_observation_successor(
+    predecessor: Phase7ERun,
+    proposed_state: Schema6Envelope,
+    children: Sequence[_Child],
+) -> None:
+    """Allow direct REQUESTED→OBSERVED only for one proven frame alias reuse."""
+    if not isinstance(predecessor.state, Schema6Envelope):
+        raise Phase7EValidationError("alias predecessor is not schema 6")
+    previous = {item.identity: item for item in predecessor.records}
+    proposed = {item.envelope.identity: item.envelope for item in children}
+    additions = [item for identity, item in proposed.items() if identity not in previous]
+    aliases = [item for item in additions if item.family == "alias"]
+    decoders = [item for item in additions if item.family == "decoder-operation"]
+    if len(aliases) != 1 or len(decoders) > 1 or len(additions) != 1 + len(decoders):
+        raise Phase7EValidationError("alias reuse has unexpected evidence")
+    alias = aliases[0]
+    decoder = proposed.get(str(proposed_state.active_decoder_operation_id))
+    target_id = predecessor.state.active_target_request_id
+    frame = previous.get(str(proposed_state.active_frame_id))
+    observation = previous.get(str(proposed_state.active_observation_id))
+    operation = previous.get(str(proposed_state.active_classification_operation_id))
+    if (
+        target_id is None
+        or alias.payload.get("target_request_id") != target_id
+        or alias.payload.get("frame_id") != proposed_state.active_frame_id
+        or decoder is None
+        or decoder.family != "decoder-operation"
+        or decoder.identity != proposed_state.active_decoder_operation_id
+        or target_id not in decoder.payload.get("target_request_ids", [])
+        or frame is None
+        or frame.family != "frame"
+        or observation is None
+        or observation.family != "observation"
+        or operation is None
+        or operation.family != "classification-operation"
+        or observation.payload.get("frame_id") != frame.identity
+        or observation.payload.get("classification_operation_id") != operation.identity
+        or operation.payload.get("frame_id") != frame.identity
+        or alias.payload.get("alias_of_target_request_id")
+        != observation.payload.get("target_request_id")
+    ):
+        raise Phase7EValidationError("alias reuse is not authoritative")
 
 
 __all__ = [

@@ -26,12 +26,15 @@ reconstruction envelope for `FOUND` and independently rebuilds it from the
  schema-3 authority during reopen. Phase 7E-1C now implements the bounded
  common-session acquisition, durable media retention, exact local frame
  selection, RGB24/JPEG integrity, and persisted-frame admission described
- below. Phase 7E feasibility work proved that the
+ below. Phase 7E-1D now implements the C1 planning adapter, adaptive
+ same-session evidence admission, C2/D1/D2 terminal composition, complete
+ source reconstruction, immutable schema-7 publication, strict reopen, and
+ safe status described below. Phase 7E feasibility work proved that the
  current VIGI RTSP/SDK/FFmpeg path exposes request-relative, per-replay
  timestamps but no authoritative physical frame UTC. The normative section
  below defines the versioned request-relative schema 5–7 contract while keeping
  schemas 1–4 readable under their original strict physical-UTC semantics. The
- ordered Phase 7E-1A/1B/1D, 7E-2, and 7E-3 implementation/validation and
+ ordered Phase 7E-2 and 7E-3 implementation/validation and
  Phase 8 review-media generation remain unimplemented. The required Phase 6C
 schema 3 compatibility increment is complete.**
 

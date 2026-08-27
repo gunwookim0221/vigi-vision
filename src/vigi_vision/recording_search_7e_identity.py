@@ -793,6 +793,13 @@ _UTC_FIELDS = frozenset(
     }
 )
 
+_NULLABLE_UTC_FIELDS = frozenset(
+    {
+        "interval_start_requested_time_utc",
+        "interval_end_requested_time_utc",
+    }
+)
+
 _DIGEST_FIELDS = frozenset(
     {"checkpoint_sha256", "mp4_sha256", "jpeg_sha256", "rgb24_sha256", "sha256"}
 )
@@ -921,6 +928,8 @@ def _validate_value_types(value: Mapping[str, Any]) -> None:
             if type(child) is not bool:
                 raise IdentityValidationError("invalid boolean field")
         elif key in _UTC_FIELDS:
+            if child is None and key in _NULLABLE_UTC_FIELDS:
+                continue
             _validate_utc_second(child)
         elif key in _DIGEST_FIELDS:
             if type(child) is not str or _HEX64.fullmatch(child) is None:

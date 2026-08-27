@@ -215,7 +215,7 @@ delayed-retry reuse. The production terminalization operation reconstructs its
 snapshot from indexed schema-2/3 evidence, reloads the post-D1 schema-3
 manifest under the mutation boundary, persists a validated D1 reconstruction
 envelope for FOUND, and publishes only after strict readback; a post-commit
-readback failure never downgrades schema 4. Phase 7E request-relative runtime,
+readback failure never downgrades schema 4. Phase 7E-2 CLI/projection integration,
 Phase 7E-3 real-NVR acceptance, Phase 8 review-media processing, and Phase 9
 result UI remain unimplemented. The Phase 7E feasibility work proves that VIGI
 segment metadata supplies coverage only and that current replay exposes
@@ -229,14 +229,17 @@ media/handoff repository. Source-clip identity is semantic; encoded-byte digest
 and observed stream facts are separate integrity data. The exact synchronous invocation ceiling is 2,520
 seconds. Existing schemas 1–4 remain readable under their original strict
 semantics and are not migrated. The approved 7E-1A pure contract increment,
-7E-1B persistence increment, and 7E-1C common-session increment are implemented
+7E-1B persistence increment, 7E-1C common-session increment, and 7E-1D
+orchestration increment are implemented
 locally: strict request-relative
 models, 26 identity families, canonical identities, B4 evidence validation,
 schema 5/6 transition validation, strict schema 5/6 publication and reopen,
 Phase 8 state models, executable 59-vector conformance checks, one bounded
 replay/remux with durable `.media` retention, exact local target selection,
-RGB24/JPEG integrity, and persisted-frame B4 admission. Terminal
-orchestration, CLI execution, and real-NVR acceptance remain unimplemented in
+RGB24/JPEG integrity, persisted-frame B4 admission, adaptive same-session
+evidence admission, C2/D1/D2 composition, complete source reconstruction,
+immutable schema 7, and strict terminal readback/status. CLI execution and
+real-NVR acceptance remain unimplemented in
 later 7E slices; no terminal real-NVR search has been completed.
 Absolute source-time calibration remains unavailable; Phase 4C-2
 provides transient frontend-only selection of one
@@ -264,7 +267,7 @@ capability.
    desktop/mobile acceptance. Continue with Phase 6-4 real-NVR validation
    without changing recording or reference-frame
    ownership.
-6. Preserve the implemented Phase 7E-1A/1B contract and persistence foundation, then implement
+6. Preserve the implemented Phase 7E-1A through 1D foundation, then implement
    Phase 7E in order: 7E-1A owns the 26 request-relative identity families,
    search/classifier/media policies, exact
    schema-5/6 matrices, schema dispatch, vectors, and pure validation; 7E-1B owns pre-acquisition schema 5, the zero-evidence

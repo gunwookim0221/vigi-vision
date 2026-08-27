@@ -23,11 +23,13 @@ reopen. Phase 7E feasibility work proves that current VIGI replay timestamps
  are request-relative and cannot supply authoritative physical frame UTC. The
  implemented Phase 7E-1C boundary now owns one bounded replay/decode session,
  durable media retention, exact local frame selection, and persisted-frame
- admission. The single normative Phase 7E contract uses one replay/decode session, one SDK
+ admission. Phase 7E-1D now owns the Phase 7E C1 adapter, adaptive evidence
+ composition, schema-7 terminal publication, strict readback, and safe status.
+ The single normative Phase 7E contract uses one replay/decode session, one SDK
 segment, a five-minute default, a hard 600-second search maximum, an exact
 2,520-second invocation ceiling, schemas 5→6→7, and a separate FOUND-only Phase
-8 projection repository. The 7E-1C common-session runtime boundary is
-implemented; terminal search, Phase 8
+8 projection repository. The 7E-1C common-session and 7E-1D terminal
+orchestration boundaries are implemented; CLI integration, Phase 8
 review-media processing, and Phase 9 remain unimplemented; schemas 1–4 retain
 their original strict meaning.**
 

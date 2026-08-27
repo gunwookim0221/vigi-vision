@@ -254,6 +254,9 @@ class CommonSessionPolicy:
     classifier_timeout_seconds: int = 10
     classifier_total_budget_seconds: int = 320
     support_cadence_seconds: int = 1
+    terminal_interpretation_seconds: int = 10
+    publication_seconds: int = 10
+    strict_readback_seconds: int = 20
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "CommonSessionPolicy":
@@ -276,6 +279,9 @@ class CommonSessionPolicy:
             "classifier_timeout_seconds",
             "classifier_total_budget_seconds",
             "support_cadence_seconds",
+            "terminal_interpretation_seconds",
+            "publication_seconds",
+            "strict_readback_seconds",
         }
         for name in names:
             if name in payload:
@@ -305,6 +311,9 @@ class CommonSessionPolicy:
             self.classifier_timeout_seconds,
             self.classifier_total_budget_seconds,
             self.support_cadence_seconds,
+            self.terminal_interpretation_seconds,
+            self.publication_seconds,
+            self.strict_readback_seconds,
         )
         if any(type(value) is not int or value <= 0 for value in fields):
             raise CommonSessionValidationError
@@ -1703,6 +1712,9 @@ def _schema6_successor_manifest(
     return StrictIdentityEnvelope.from_payload("schema6-manifest", payload)
 
 
+append_schema6_indexes = _schema6_successor_manifest
+
+
 def _as_envelope(value: object, family: str) -> StrictIdentityEnvelope:
     """Coerce one classifier/model completion into a strict envelope."""
     if isinstance(value, StrictIdentityEnvelope):
@@ -1780,9 +1792,16 @@ def admit_frame_then_classify(
     )
     if current.state.target_state is not Schema6TargetState.REQUESTED:
         raise CommonSessionValidationError
-    decoding_manifest = _schema6_successor_manifest(
-        current.manifest,
-        decoder_operation_ids=decoder_operation.identity,
+    decoder_indexed = (
+        decoder_operation.identity in current.manifest.payload["indexes"]["decoder_operation_ids"]
+    )
+    decoding_manifest = (
+        current.manifest
+        if decoder_indexed
+        else _schema6_successor_manifest(
+            current.manifest,
+            decoder_operation_ids=decoder_operation.identity,
+        )
     )
     decoding_state = Schema6Envelope(
         run_state="RUNNING",
@@ -1797,10 +1816,9 @@ def admit_frame_then_classify(
         attempt_count=1,
         predecessor_target_state=current.state.target_state,
     )
-    records = (
-        *(record for record in current.records if record.family != "schema5-manifest"),
-        decoder_operation,
-    )
+    records = tuple(record for record in current.records if record.family != "schema5-manifest")
+    if not decoder_indexed:
+        records = (*records, decoder_operation)
     repository.admit_schema6(
         acquisition.request.investigation_id,
         acquisition.request.run_id,
@@ -2211,8 +2229,10 @@ def select_target_index(
     return selected[0]
 
 
-def validate_decoded_order(frames: Sequence[DecodedLocalFrame]) -> None:
-    """Reject PTS/ordinal resets and duplicate physical positions."""
+def validate_decoded_order(
+    frames: Sequence[DecodedLocalFrame], *, allow_aliases: bool = False
+) -> None:
+    """Reject resets while optionally retaining exact repeated-frame aliases."""
     if not frames:
         raise CommonSessionDecoderError
     first = frames[0]
@@ -2226,12 +2246,25 @@ def validate_decoded_order(frames: Sequence[DecodedLocalFrame]) -> None:
             or current.time_base_den != first.time_base_den
         ):
             raise CommonSessionRecordingGapError
-        if current.ordinal <= prior.ordinal:
+        if current.ordinal < prior.ordinal:
             raise CommonSessionDecoderError
-        if current.raw_pts <= prior.raw_pts or current.decoded_offset <= prior.decoded_offset:
+        if current.raw_pts < prior.raw_pts or current.decoded_offset < prior.decoded_offset:
             raise CommonSessionNonmonotonicPtsError
+        same_position = (
+            current.ordinal == prior.ordinal
+            and current.raw_pts == prior.raw_pts
+            and current.decoded_offset == prior.decoded_offset
+        )
+        if (
+            current.ordinal == prior.ordinal
+            or current.raw_pts == prior.raw_pts
+            or current.decoded_offset == prior.decoded_offset
+        ) and not same_position:
+            raise CommonSessionNonmonotonicPtsError
+        if same_position and (not allow_aliases or current.rgb24_sha256 != prior.rgb24_sha256):
+            raise CommonSessionDecoderError
     positions = {(frame.decode_session_id, frame.ordinal) for frame in frames}
-    if len(positions) != len(frames):
+    if not allow_aliases and len(positions) != len(frames):
         raise CommonSessionDecoderError
 
 
@@ -2537,6 +2570,7 @@ def execute_local_targets(
     pass_number: int = 1,
     cancellation: Callable[[], bool] | None = None,
     logical_end: bool = False,
+    allow_aliases: bool = False,
     budget: InvocationBudget | None = None,
 ) -> tuple[DecodedLocalFrame, ...]:
     """Run bounded local decoding over the same retained MP4 only."""
@@ -2586,8 +2620,9 @@ def execute_local_targets(
         if _utc_second(frame.requested_time_utc) != target:
             raise CommonSessionDecoderError
         frame.validate(max_rgb24_frames=acquisition.request.policy.maximum_selected_rgb24_frames)
-    validate_decoded_order(frames)
-    reject_duplicate_frame_evidence(frames)
+    validate_decoded_order(frames, allow_aliases=allow_aliases)
+    if not allow_aliases:
+        reject_duplicate_frame_evidence(frames)
     active_budget.check()
     return frames
 
@@ -2705,6 +2740,7 @@ __all__ = [
     "classify_after_readback",
     "collapse_target_aliases",
     "admit_frame_then_classify",
+    "append_schema6_indexes",
     "execute_local_targets",
     "make_decoder_envelope",
     "make_alias_envelope",

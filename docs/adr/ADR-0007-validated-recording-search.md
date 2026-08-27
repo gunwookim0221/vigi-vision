@@ -7,8 +7,9 @@ contract. Phase 7D-2's strict physical-origin schema 1–4 family remains
 implemented, immutable, and readable. The Phase 7E feasibility investigations
 prove that production VIGI replay cannot supply authoritative frame UTC but can
 sustain one common replay/decode session for the bounded MVP. The 7E-1C
-common-session acquisition and local frame-admission boundary is implemented;
-schema 5–7 terminal runtime, terminal real-NVR validation, separate Phase 8
+common-session acquisition/local frame-admission and 7E-1D terminal schema-7
+orchestration boundaries are implemented; CLI integration, terminal real-NVR
+validation, separate Phase 8
 projection repository, and Phase 8 review-media processing remain unimplemented.
 
 ## Context
