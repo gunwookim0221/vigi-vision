@@ -2497,7 +2497,7 @@ def make_target_envelope(
     origin_target_request_id: str | None = None,
 ) -> StrictIdentityEnvelope:
     """Construct one strict target-request identity."""
-    if type(sequence) is not int or sequence <= 0:
+    if type(sequence) is not int or sequence < 0:
         raise CommonSessionValidationError
     payload: dict[str, Any] = {
         "investigation_id": request.investigation_id,

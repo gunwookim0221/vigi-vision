@@ -14,7 +14,7 @@ import json
 import os
 import shutil
 import tempfile
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from enum import Enum
@@ -530,7 +530,13 @@ class RecordingSearch7ERepository:
                 raise Phase7ECorruptError
             if expected_manifest_id is not None and current.manifest_id != expected_manifest_id:
                 raise Phase7EConflictError
-            if not _legal_schema6_successor(current.state, target_state):
+            analysis_append = _legal_schema6_analysis_append(
+                current,
+                envelope,
+                target_state,
+                children,
+            )
+            if not _legal_schema6_successor(current.state, target_state) and not analysis_append:
                 if current.manifest_id == envelope.identity:
                     existing = self._existing_schema6_result(
                         investigation_id, run_id, envelope, target_state, children
@@ -598,6 +604,8 @@ class RecordingSearch7ERepository:
         *,
         expected_schema6_manifest_id: str | None = None,
         ownership: Phase7EInvocationOwnership | None = None,
+        publication_check: Callable[[], None] | None = None,
+        readback_check: Callable[[], None] | None = None,
     ) -> PublicationResult:
         """Atomically replace a complete schema-6 tree with immutable schema 7."""
         envelope = _coerce_envelope(proposal, "schema7-manifest")
@@ -612,7 +620,11 @@ class RecordingSearch7ERepository:
         with self._locked(investigation_id, ownership, run_id):
             run_path = self.run_path(investigation_id, run_id)
             if _is_schema7_root(run_path):
+                if readback_check is not None:
+                    readback_check()
                 current7 = self._reopen_schema7_unlocked(investigation_id, run_id)
+                if readback_check is not None:
+                    readback_check()
                 if _same_schema7_proposal(current7, envelope, terminal_children):
                     return PublicationResult(PublicationStatus.REUSED, current7)
                 raise Phase7EConflictError
@@ -630,8 +642,17 @@ class RecordingSearch7ERepository:
             ):
                 raise Phase7EConflictError
             self._validate_schema7_proposal(current, envelope, terminal_children)
-            self._publish_schema7_successor(current, envelope, terminal_children)
+            self._publish_schema7_successor(
+                current,
+                envelope,
+                terminal_children,
+                publication_check=publication_check,
+            )
+            if readback_check is not None:
+                readback_check()
             reopened = self._reopen_schema7_unlocked(investigation_id, run_id)
+            if readback_check is not None:
+                readback_check()
             if reopened.manifest_id != envelope.identity:
                 raise Phase7EReadbackError
             return PublicationResult(PublicationStatus.CREATED, reopened)
@@ -668,6 +689,31 @@ class RecordingSearch7ERepository:
             return self._reopen_unlocked(investigation_id, run_id, expected_schema=None)
 
     strict_reopen_current = reopen_current
+
+    def inspect_current_read_only(
+        self,
+        investigation_id: str,
+        run_id: str,
+        *,
+        timeout_seconds: float = 0.05,
+    ) -> Phase7ERun:
+        """Strictly inspect a run without acquiring or changing execution authority."""
+        if timeout_seconds < 0 or not self._guard.acquire(timeout=timeout_seconds):
+            raise Phase7EInProgressError
+        try:
+            path = self.run_path(investigation_id, run_id)
+            try:
+                if _is_schema7_root(path):
+                    return self._reopen_schema7_unlocked(investigation_id, run_id)
+                return self._reopen_unlocked(investigation_id, run_id, expected_schema=None)
+            except (Phase7ENotFoundError, Phase7ECorruptError):
+                lock = LocalInvestigationLock(self.lock_path(investigation_id))
+                if not lock.try_acquire(0):
+                    raise Phase7EInProgressError from None
+                lock.release()
+                raise
+        finally:
+            self._guard.release()
 
     def recover_active(self, investigation_id: str, run_id: str) -> Phase7ERun:
         """Inspect and interrupt an unowned active run under the OS lock."""
@@ -1496,6 +1542,8 @@ class RecordingSearch7ERepository:
         current: Phase7ERun,
         manifest: StrictIdentityEnvelope,
         terminal_children: Sequence[StrictIdentityEnvelope],
+        *,
+        publication_check: Callable[[], None] | None = None,
     ) -> None:
         """Stage all terminal records, then replace the root manifest last."""
         staging = self._new_staging(current.investigation_id, current.run_id)
@@ -1503,13 +1551,19 @@ class RecordingSearch7ERepository:
         created_directories: list[str] = []
         committed = False
         try:
+            if publication_check is not None:
+                publication_check()
             self._copy_tree(current.root, staging)
+            if publication_check is not None:
+                publication_check()
             terminal_dir = staging / "terminal"
             terminal_dir.mkdir()
             archive_path = staging / "manifests" / f"{current.manifest_id}.json"
             archive_bytes = _canonical_json(_manifest_document(current)).encode()
             _write_bytes_no_replace(archive_path, archive_bytes)
             for child in terminal_children:
+                if publication_check is not None:
+                    publication_check()
                 filename = _TERMINAL_FILES[child.family]
                 _write_bytes_no_replace(
                     terminal_dir / filename,
@@ -1527,6 +1581,8 @@ class RecordingSearch7ERepository:
             )
             if checked.manifest_id != manifest.identity:
                 raise Phase7EReadbackError
+            if publication_check is not None:
+                publication_check()
             for relative in (
                 f"manifests/{current.manifest_id}.json",
                 "terminal/source-record-set.json",
@@ -1549,6 +1605,8 @@ class RecordingSearch7ERepository:
                 ).encode(),
             )
             for relative in created:
+                if publication_check is not None:
+                    publication_check()
                 source = staging / Path(relative)
                 target = current.root / Path(relative)
                 missing: list[Path] = []
@@ -1561,6 +1619,8 @@ class RecordingSearch7ERepository:
                     created_directories.append(directory.relative_to(current.root).as_posix())
                 os.replace(source, target)
                 _fsync_directory(target.parent)
+            if publication_check is not None:
+                publication_check()
             _replace_schema7_manifest(self.root, current.root, manifest)
             committed = True
         finally:
@@ -2515,6 +2575,52 @@ def _legal_schema6_successor(current: Schema6Envelope, proposed: Schema6Envelope
         Schema6TargetState.OBSERVED: {Schema6TargetState.REQUESTED},
     }
     return proposed.target_state in allowed.get(current.target_state, set())
+
+
+def _legal_schema6_analysis_append(  # noqa: PLR0911 - fail-closed append checks.
+    current: Phase7ERun,
+    proposed_manifest: StrictIdentityEnvelope,
+    proposed_state: Schema6Envelope,
+    proposed_children: Sequence[_Child],
+) -> bool:
+    """Allow only immutable C2/D1 analysis records after an observed target."""
+    if (
+        not isinstance(current.state, Schema6Envelope)
+        or current.state.target_state is not Schema6TargetState.OBSERVED
+        or proposed_state != current.state
+    ):
+        return False
+    current_indexes = current.manifest.payload.get("indexes")
+    proposed_indexes = proposed_manifest.payload.get("indexes")
+    if not isinstance(current_indexes, Mapping) or not isinstance(proposed_indexes, Mapping):
+        return False
+    analysis_indexes = {
+        "support_group_ids": "support-group",
+        "c2_bracket_ids": "c2-bracket",
+        "d1_input_ids": "d1-input",
+        "d1_history_ids": "d1-history",
+        "narrowed_bracket_ids": "narrowed-bracket",
+    }
+    current_ids = {item.identity for item in current.records if item.family != "schema5-manifest"}
+    proposed = {item.envelope.identity: item.envelope for item in proposed_children}
+    additions = tuple(item for identity, item in proposed.items() if identity not in current_ids)
+    if not additions or any(item.family not in analysis_indexes.values() for item in additions):
+        return False
+    if not current_ids.issubset(proposed):
+        return False
+    for key in _SCHEMA6_INDEX_KEYS:
+        before = current_indexes.get(key)
+        after = proposed_indexes.get(key)
+        if not isinstance(before, list) or not isinstance(after, list):
+            return False
+        if key not in analysis_indexes:
+            if after != before:
+                return False
+            continue
+        appended = [item.identity for item in additions if item.family == analysis_indexes[key]]
+        if after != [*before, *appended]:
+            return False
+    return True
 
 
 def _validate_alias_observation_successor(

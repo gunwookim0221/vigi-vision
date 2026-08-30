@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import timedelta
 from itertools import pairwise
 from typing import TYPE_CHECKING
 
 from vigi_vision.object_presence_values import ClassificationOutcome
 from vigi_vision.recording_search_c1_models import CoarseSampleStatus
-from vigi_vision.recording_search_c1_planner import confirmation_run_id_for
+from vigi_vision.recording_search_c1_planner import (
+    SupportDirection,
+    confirmation_run_id_for,
+    support_target_times,
+)
 from vigi_vision.recording_search_c2_models import (
     CoarseCandidateBracket,
     CoarseEvidenceSnapshot,
@@ -64,7 +67,7 @@ def _validate_coarse_samples(
                     raise ValueError
 
 
-def _validate_support_samples(
+def _validate_support_samples(  # noqa: C901 - strict direction-aware evidence checks.
     snapshot: CoarseEvidenceSnapshot,
     by_target: Mapping[tuple[datetime, datetime | None], CoarseTargetEvidence],
 ) -> None:
@@ -78,11 +81,18 @@ def _validate_support_samples(
             raise ValueError
         first = support.samples[0]
         primary = by_target.get((support.origin_target_utc, None))
+        if primary is None or support.confirmation_run_id != confirmation_run_id_for(
+            snapshot.plan, support.origin_target_utc, snapshot.identity
+        ):
+            raise ValueError
         if (
-            primary is None
-            or first != coarse_samples.get(support.origin_target_utc)
-            or support.confirmation_run_id
-            != confirmation_run_id_for(snapshot.plan, support.origin_target_utc, snapshot.identity)
+            snapshot.plan.support_direction is SupportDirection.FORWARD
+            and first != coarse_samples.get(support.origin_target_utc)
+        ):
+            raise ValueError
+        if (
+            snapshot.plan.support_direction is SupportDirection.BACKWARD_FROM_END
+            and support.origin_target_utc != snapshot.plan.search_end_utc
         ):
             raise ValueError
         for sample in support.samples:
@@ -111,10 +121,10 @@ def _absence_support(
     by_target: Mapping[tuple[datetime, datetime | None], CoarseTargetEvidence],
 ) -> tuple[CoarseTargetEvidence, ...] | None:
     resolved_list: list[CoarseTargetEvidence] = []
-    for index in range(snapshot.absence_confirmation_frames):
-        requested = first.requested_time_utc + index * snapshot.absence_cadence_seconds * timedelta(
-            seconds=1
-        )
+    requested_times = support_target_times(snapshot.plan, first.requested_time_utc)
+    if len(requested_times) != snapshot.absence_confirmation_frames:
+        return None
+    for requested in requested_times:
         target = by_target.get((requested, first.requested_time_utc))
         if target is None:
             return None

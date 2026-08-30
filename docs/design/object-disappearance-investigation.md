@@ -403,7 +403,8 @@ version after Phase 7E evidence.
   identities/models/validation; 1B pre-acquisition schema 5 and incremental
   schema 6; 1C retained MP4,
   exact logical-target frame selection, RGB24, and A2/B4; 1D the Phase
-  7E-specific C1 adapter (`S`, logical `E`, backward final support), source
+  Phase 7E C1 adapter (`S`, logical `E`, shared explicit
+  `BACKWARD_FROM_END` support mode with legacy default `FORWARD`), source
   reconstruction, and immutable schema 7; 2 synchronous CLI and separate
   Phase 8 projection/retention; 3
   bounded real-NVR acceptance and fault injection.

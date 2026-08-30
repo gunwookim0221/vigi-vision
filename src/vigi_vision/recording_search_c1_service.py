@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
 
 from vigi_vision.object_presence_values import ClassificationOutcome
@@ -22,11 +21,15 @@ from vigi_vision.recording_search_c1_models import (
 )
 from vigi_vision.recording_search_c1_planner import (
     CoarseSamplingIdentity,
+    SupportDirection,
     confirmation_run_id_for,
+    support_target_times,
 )
 from vigi_vision.recording_search_models import RecordingSearchBaselineError
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from vigi_vision.recording_search_c1_planner import CoarseSamplingPlan
 
 
@@ -88,7 +91,7 @@ class CoarseSamplingExecutor(Generic[HandleT_contra]):
 
     host: CoarseSamplingHost[HandleT_contra]
 
-    def execute(  # noqa: C901, PLR0912 - isolates bounded boundary failures.
+    def execute(  # noqa: C901, PLR0912, PLR0915 - bounded boundary failures.
         self,
         handle: HandleT_contra,
         plan: CoarseSamplingPlan,
@@ -119,7 +122,12 @@ class CoarseSamplingExecutor(Generic[HandleT_contra]):
                     if not acquired_target_times.intersection(candidate_support_targets)
                     else ()
                 )
-                acquisition_targets = support_targets or (target,)
+                acquisition_targets = (
+                    (target, *support_targets)
+                    if support_targets
+                    and plan.support_direction is SupportDirection.BACKWARD_FROM_END
+                    else support_targets or (target,)
+                )
                 requests = self.host.acquire_targets(handle, acquisition_targets)
                 acquired_target_times.update(acquisition_targets)
                 if len(requests) != len(acquisition_targets):
@@ -171,10 +179,13 @@ class CoarseSamplingExecutor(Generic[HandleT_contra]):
                 and sample.classification is ClassificationOutcome.ABSENT
             ):
                 try:
-                    support_samples = [sample]
-                    for support_target, request in zip(
-                        support_targets[1:], requests[1:], strict=True
-                    ):
+                    if plan.support_direction is SupportDirection.FORWARD:
+                        support_samples = [sample]
+                        support_pairs = zip(support_targets[1:], requests[1:], strict=True)
+                    else:
+                        support_samples = []
+                        support_pairs = zip(support_targets, requests[1:], strict=True)
+                    for support_target, request in support_pairs:
                         support_sample = classified_samples.get(support_target)
                         if support_sample is None:
                             support_sample = self._execute_support_request(
@@ -330,17 +341,7 @@ def _classification_status(reason: ClassificationOperationalReason) -> CoarseSam
 
 def _support_targets(plan: CoarseSamplingPlan, target: datetime) -> tuple[datetime, ...]:
     """Return an in-window confirmation batch or no batch at the boundary."""
-    if plan.absence_confirmation_frames <= 0:
-        return ()
-    last = target + (
-        plan.absence_confirmation_frames - 1
-    ) * plan.absence_cadence_seconds * timedelta(seconds=1)
-    if last > plan.search_end_utc:
-        return ()
-    return tuple(
-        target + index * plan.absence_cadence_seconds * timedelta(seconds=1)
-        for index in range(plan.absence_confirmation_frames)
-    )
+    return support_target_times(plan, target)
 
 
 def _confirmation_run_id(

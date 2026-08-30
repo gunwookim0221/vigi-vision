@@ -6,11 +6,19 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from itertools import pairwise
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from vigi_vision.recording_search_models import RecordingSearchBaseline, RecordingSearchPolicy
+
+
+class SupportDirection(str, Enum):
+    """Closed absence-support direction used by C1/C2 composition."""
+
+    FORWARD = "FORWARD"
+    BACKWARD_FROM_END = "BACKWARD_FROM_END"
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,13 +56,18 @@ class CoarseSamplingPlan:
     absence_confirmation_frames: int = 3
     absence_cadence_seconds: int = 1
     maximum_consecutive_indeterminate_targets: int = 3
+    support_direction: SupportDirection = SupportDirection.FORWARD
 
     def __post_init__(self) -> None:
         """Reject plans that could drift, duplicate, or leave the requested window."""
         _validate_plan(self)
 
 
-def build_coarse_sampling_plan(policy: RecordingSearchPolicy) -> CoarseSamplingPlan:
+def build_coarse_sampling_plan(
+    policy: RecordingSearchPolicy,
+    *,
+    support_direction: SupportDirection = SupportDirection.FORWARD,
+) -> CoarseSamplingPlan:
     """Build the bounded chronological grid prescribed by the policy snapshot."""
     start = policy.search_start_utc
     end = policy.search_end_utc
@@ -89,6 +102,7 @@ def build_coarse_sampling_plan(policy: RecordingSearchPolicy) -> CoarseSamplingP
         policy.absence_confirmation_frames,
         policy.absence_cadence_seconds,
         policy.maximum_consecutive_indeterminate_targets,
+        support_direction,
     )
 
 
@@ -114,23 +128,50 @@ def confirmation_run_id_for(
     """Return the canonical identity for one policy-derived support batch."""
     if target not in plan.target_times:
         raise ValueError
+    payload_value = {
+        "identity_schema": "phase7c-confirmation-v2",
+        "investigation_id": identity.investigation_id,
+        "search_run_id": identity.search_run_id,
+        "phase6_confirmation_id": identity.phase6_confirmation_id,
+        "baseline_identity": identity.baseline_identity,
+        "plan_id": plan.plan_id,
+        "origin_target_utc": target.isoformat(),
+        "support_count": plan.absence_confirmation_frames,
+        "support_cadence_seconds": plan.absence_cadence_seconds,
+    }
+    if plan.support_direction is SupportDirection.BACKWARD_FROM_END:
+        payload_value["support_direction"] = plan.support_direction.value
     payload = json.dumps(
-        {
-            "identity_schema": "phase7c-confirmation-v2",
-            "investigation_id": identity.investigation_id,
-            "search_run_id": identity.search_run_id,
-            "phase6_confirmation_id": identity.phase6_confirmation_id,
-            "baseline_identity": identity.baseline_identity,
-            "plan_id": plan.plan_id,
-            "origin_target_utc": target.isoformat(),
-            "support_count": plan.absence_confirmation_frames,
-            "support_cadence_seconds": plan.absence_cadence_seconds,
-        },
+        payload_value,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
     return f"coarse-confirmation-{hashlib.sha256(payload).hexdigest()}"
+
+
+def support_target_times(
+    plan: CoarseSamplingPlan,
+    target: datetime,
+) -> tuple[datetime, ...]:
+    """Return the closed direction-aware support targets for one plan target."""
+    if target not in plan.target_times:
+        raise ValueError
+    cadence = plan.absence_cadence_seconds
+    count = plan.absence_confirmation_frames
+    if plan.support_direction is SupportDirection.BACKWARD_FROM_END:
+        if target != plan.search_end_utc:
+            return ()
+        values = tuple(
+            target - index * cadence * timedelta(seconds=1) for index in range(count, 0, -1)
+        )
+        if any(value < plan.search_start_utc or value >= plan.search_end_utc for value in values):
+            return ()
+        return values
+    values = tuple(target + index * cadence * timedelta(seconds=1) for index in range(count))
+    if any(value < plan.search_start_utc or value > plan.search_end_utc for value in values):
+        return ()
+    return values
 
 
 def _target_times(start: datetime, end: datetime, interval: int) -> tuple[datetime, ...]:
@@ -152,6 +193,8 @@ def _require_whole_utc(value: datetime) -> None:
 
 def _validate_plan(plan: CoarseSamplingPlan) -> None:
     if type(plan.interval_seconds) is not int or plan.interval_seconds <= 0:
+        raise ValueError
+    if type(plan.support_direction) is not SupportDirection:
         raise ValueError
     if (
         type(plan.absence_confirmation_frames) is not int

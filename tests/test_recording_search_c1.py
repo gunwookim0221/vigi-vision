@@ -42,6 +42,7 @@ from vigi_vision.recording_search_c1_models import CoarseSampleStatus, CoarseSup
 from vigi_vision.recording_search_c1_planner import (
     CoarseSamplingIdentity,
     CoarseSamplingPlan,
+    SupportDirection,
     build_coarse_sampling_plan,
     confirmation_run_id_for,
 )
@@ -102,6 +103,16 @@ def test_plan_identity_is_stable_for_same_policy() -> None:
 
     assert first.plan_id == second.plan_id
     assert first.plan_id.startswith("coarse-plan-")
+
+
+def test_forward_support_direction_remains_the_default() -> None:
+    policy = default_policy(_START, _START + timedelta(seconds=30))
+
+    implicit = build_coarse_sampling_plan(policy)
+    explicit = build_coarse_sampling_plan(policy, support_direction=SupportDirection.FORWARD)
+
+    assert implicit == explicit
+    assert implicit.support_direction is SupportDirection.FORWARD
 
 
 def test_confirmation_identity_binds_every_execution_owner() -> None:
@@ -266,6 +277,45 @@ def test_absent_target_derives_bounded_support_from_one_acquisition_batch() -> N
         first + timedelta(seconds=1),
         first + timedelta(seconds=2),
     )
+    assert len({sample.probe_request_id for sample in support.samples}) == 3
+
+
+def test_backward_support_uses_only_frames_strictly_before_logical_end() -> None:
+    end = _START + timedelta(seconds=4)
+    plan = build_coarse_sampling_plan(
+        default_policy(_START, end),
+        support_direction=SupportDirection.BACKWARD_FROM_END,
+    )
+    support_times = tuple(_START + timedelta(seconds=value) for value in (1, 2, 3))
+    requested = (end, *support_times)
+    requests = {
+        target: _probe_request(target, f"probe-request-backward-{index:02d}")
+        for index, target in enumerate(requested, start=1)
+    }
+    host = _Host(
+        requests,
+        {
+            request.probe_request_id: _published(
+                request.probe_request_id, ClassificationOutcome.ABSENT
+            )
+            for request in requests.values()
+        },
+    )
+
+    result = CoarseSamplingExecutor(host).execute(_Handle(), plan)
+
+    assert result.complete is True
+    assert host.acquired == list(requested)
+    assert len(result.support_results) == 1
+    assert (
+        tuple(sample.requested_time_utc for sample in result.support_results[0].samples)
+        == support_times
+    )
+    assert all(_START <= value < end for value in support_times)
+    support = result.support_results[0]
+    assert isinstance(support, CoarseSupportResult)
+    assert support.origin_target_utc == end
+    assert tuple(sample.requested_time_utc for sample in support.samples) == support_times
     assert len({sample.probe_request_id for sample in support.samples}) == 3
 
 

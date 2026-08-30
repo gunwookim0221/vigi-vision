@@ -17,6 +17,7 @@ from vigi_vision.recording_models import RecordingSegment, RecordingWindow, Repl
 from vigi_vision.recording_search_7e_1c import (
     CommonSessionAcquisition,
     CommonSessionCancelledError,
+    CommonSessionDeadlineError,
     CommonSessionDecoderError,
     CommonSessionPolicy,
     CommonSessionRequest,
@@ -54,6 +55,7 @@ from vigi_vision.recording_search_7e_repository import (
     RecordingSearch7ERepository,
 )
 from vigi_vision.recording_search_7e_validation import Schema5Envelope, Schema6Envelope
+from vigi_vision.recording_search_d1_service import BinaryNarrowingService
 from vigi_vision.recording_search_d2_terminal_models import TerminalResultKind
 from vigi_vision.replay import ReplayClip
 
@@ -445,6 +447,240 @@ def test_phase7e_1d_cancellation_never_becomes_visual_terminal(tmp_path: Path) -
     assert repo.reopen_schema6("inv-01", "run-01").manifest_id == run.manifest_id
 
 
+def test_live_status_is_running_without_reacquiring_execution_authority(tmp_path: Path) -> None:
+    repo, run = _create_golden_schema6(tmp_path)
+    manifest_before = (run.root / "manifest.json").read_bytes()
+    with repo.invocation_ownership("inv-01", "run-01", timeout_seconds=0):
+        status = read_phase7_status(repo, "inv-01", "run-01")
+    assert status.schema_version == 6
+    assert status.status == "RUNNING"
+    assert (run.root / "manifest.json").read_bytes() == manifest_before
+
+
+def test_status_during_atomic_publication_is_never_false_terminal(
+    tmp_path: Path,
+) -> None:
+    repo, run = _create_golden_schema6(tmp_path)
+    manifest, source, snapshot, result = _terminal_records(run)
+    observed: list[str] = []
+
+    def publication_check() -> None:
+        observed.append(read_phase7_status(repo, "inv-01", "run-01").status)
+
+    published = repo.publish_schema7(
+        "inv-01",
+        "run-01",
+        manifest,
+        source,
+        snapshot,
+        result,
+        publication_check=publication_check,
+    )
+    assert observed
+    assert set(observed) <= {"RUNNING"}
+    assert published.run.is_schema7
+    assert read_phase7_status(repo, "inv-01", "run-01").status == "FOUND"
+
+
+class _MutableClock:
+    def __init__(self) -> None:
+        self.value: float = 0.0
+
+    def __call__(self) -> float:
+        return self.value
+
+
+class _AdvanceBeforePublication:
+    def __init__(self, clock: _MutableClock, value: float) -> None:
+        self.clock: _MutableClock = clock
+        self.value: float = value
+
+    def interpret(self, run: Phase7ERun) -> Phase7ETerminalDecision:
+        self.clock.value = self.value
+        return _found_decision(run)
+
+
+def test_terminal_interpretation_does_not_start_after_deadline(tmp_path: Path) -> None:
+    repo, run = _create_golden_schema6(tmp_path)
+    policy_record = next(item for item in run.records if item.family == "policy")
+    request = CommonSessionRequest(
+        "inv-01",
+        "run-01",
+        1,
+        _utc("2026-07-20T03:00:00Z"),
+        _utc("2026-07-20T03:00:04Z"),
+        CommonSessionPolicy.from_payload(policy_record.payload),
+    )
+    clock = _MutableClock()
+    budget = InvocationBudget(request.policy, clock)
+    clock.value = budget.deadline
+    with (
+        repo.invocation_ownership("inv-01", "run-01", timeout_seconds=0) as owner,
+        pytest.raises(CommonSessionDeadlineError),
+    ):
+        Phase7E1DService(repo).execute(Phase7EInvocation(request, owner, budget))
+    assert repo.reopen_schema6("inv-01", "run-01").manifest_id == run.manifest_id
+
+
+def test_publication_requires_reserved_strict_readback_budget(tmp_path: Path) -> None:
+    repo, run = _create_golden_schema6(tmp_path)
+    policy_record = next(item for item in run.records if item.family == "policy")
+    request = CommonSessionRequest(
+        "inv-01",
+        "run-01",
+        1,
+        _utc("2026-07-20T03:00:00Z"),
+        _utc("2026-07-20T03:00:04Z"),
+        CommonSessionPolicy.from_payload(policy_record.payload),
+    )
+    clock = _MutableClock()
+    budget = InvocationBudget(request.policy, clock)
+    remaining_without_readback = (
+        budget.deadline
+        - request.policy.cleanup_reserve_seconds
+        - request.policy.strict_readback_seconds
+    )
+    boundary = _AdvanceBeforePublication(clock, remaining_without_readback)
+    with (
+        repo.invocation_ownership("inv-01", "run-01", timeout_seconds=0) as owner,
+        pytest.raises(CommonSessionDeadlineError),
+    ):
+        Phase7E1DService(repo, decision_boundary=boundary).execute(
+            Phase7EInvocation(request, owner, budget)
+        )
+    assert repo.reopen_schema6("inv-01", "run-01").manifest_id == run.manifest_id
+
+
+def test_readback_timeout_preserves_committed_schema7_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, run = _create_golden_schema6(tmp_path)
+    policy_record = next(item for item in run.records if item.family == "policy")
+    request = CommonSessionRequest(
+        "inv-01",
+        "run-01",
+        1,
+        _utc("2026-07-20T03:00:00Z"),
+        _utc("2026-07-20T03:00:04Z"),
+        CommonSessionPolicy.from_payload(policy_record.payload),
+    )
+    clock = _MutableClock()
+    budget = InvocationBudget(request.policy, clock)
+    original = repo.publish_schema7
+
+    def publish_with_expired_readback(
+        *args: Any,  # noqa: ANN401 - transparent repository hook.
+        **kwargs: Any,  # noqa: ANN401 - transparent repository hook.
+    ) -> object:
+        readback_check = kwargs["readback_check"]
+
+        def expire_then_check() -> None:
+            clock.value = budget.deadline
+            assert callable(readback_check)
+            readback_check()
+
+        kwargs["readback_check"] = expire_then_check
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "publish_schema7", publish_with_expired_readback)
+    with (
+        repo.invocation_ownership("inv-01", "run-01", timeout_seconds=0) as owner,
+        pytest.raises(CommonSessionDeadlineError),
+    ):
+        Phase7E1DService(repo).execute(Phase7EInvocation(request, owner, budget))
+    committed = repo.reopen_schema7("inv-01", "run-01")
+    assert committed.is_schema7
+    assert committed.result_kind == "FOUND"
+
+
+def test_publication_timeout_does_not_commit_schema7(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, run = _create_golden_schema6(tmp_path)
+    policy_record = next(item for item in run.records if item.family == "policy")
+    request = CommonSessionRequest(
+        "inv-01",
+        "run-01",
+        1,
+        _utc("2026-07-20T03:00:00Z"),
+        _utc("2026-07-20T03:00:04Z"),
+        CommonSessionPolicy.from_payload(policy_record.payload),
+    )
+    clock = _MutableClock()
+    budget = InvocationBudget(request.policy, clock)
+    original = repo.publish_schema7
+
+    def publish_with_timeout(
+        *args: Any,  # noqa: ANN401 - transparent repository hook.
+        **kwargs: Any,  # noqa: ANN401 - transparent repository hook.
+    ) -> object:
+        publication_check = kwargs["publication_check"]
+        checks = 0
+
+        def expire_during_publication() -> None:
+            nonlocal checks
+            checks += 1
+            if checks == 2:
+                clock.value = request.policy.publication_seconds
+            assert callable(publication_check)
+            publication_check()
+
+        kwargs["publication_check"] = expire_during_publication
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "publish_schema7", publish_with_timeout)
+    with (
+        repo.invocation_ownership("inv-01", "run-01", timeout_seconds=0) as owner,
+        pytest.raises(CommonSessionDeadlineError),
+    ):
+        Phase7E1DService(repo).execute(Phase7EInvocation(request, owner, budget))
+    assert repo.reopen_schema6("inv-01", "run-01").manifest_id == run.manifest_id
+
+
+def test_cancellation_after_commit_preserves_schema7_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, run = _create_golden_schema6(tmp_path)
+    policy_record = next(item for item in run.records if item.family == "policy")
+    request = CommonSessionRequest(
+        "inv-01",
+        "run-01",
+        1,
+        _utc("2026-07-20T03:00:00Z"),
+        _utc("2026-07-20T03:00:04Z"),
+        CommonSessionPolicy.from_payload(policy_record.payload),
+    )
+    cancelled = False
+    budget = InvocationBudget(request.policy, lambda: 0.0, cancellation=lambda: cancelled)
+    original = repo.publish_schema7
+
+    def publish_with_cancellation(
+        *args: Any,  # noqa: ANN401 - transparent repository hook.
+        **kwargs: Any,  # noqa: ANN401 - transparent repository hook.
+    ) -> object:
+        readback_check = kwargs["readback_check"]
+
+        def cancel_then_check() -> None:
+            nonlocal cancelled
+            cancelled = True
+            assert callable(readback_check)
+            readback_check()
+
+        kwargs["readback_check"] = cancel_then_check
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "publish_schema7", publish_with_cancellation)
+    with (
+        repo.invocation_ownership("inv-01", "run-01", timeout_seconds=0) as owner,
+        pytest.raises(CommonSessionCancelledError),
+    ):
+        Phase7E1DService(repo).execute(Phase7EInvocation(request, owner, budget))
+    assert repo.reopen_schema7("inv-01", "run-01").result_kind == "FOUND"
+
+
 def test_schema7_conflicting_duplicate_preserves_winner(tmp_path: Path) -> None:
     repo, run = _create_golden_schema6(tmp_path)
     manifest, source, snapshot, result = _terminal_records(run)
@@ -576,6 +812,67 @@ class _VisualClassifier:
         return StrictIdentityEnvelope.from_payload("classification-operation", payload)
 
 
+class _TimelineDecoder:
+    def __init__(self) -> None:
+        self.session_ids: list[str] = []
+
+    def decode(
+        self,
+        session: CommonSessionAcquisition,
+        targets: tuple[datetime, ...],
+        timeout_seconds: float,
+    ) -> tuple[DecodedLocalFrame, ...]:
+        assert timeout_seconds > 0
+        self.session_ids.append(session.common_session_id)
+        result: list[DecodedLocalFrame] = []
+        for target in targets:
+            offset = int((target - session.request.start_utc).total_seconds())
+            selected = min(offset, int(session.request.duration_seconds) - 1)
+            result.append(
+                DecodedLocalFrame(
+                    target,
+                    selected,
+                    selected,
+                    4,
+                    4,
+                    bytes([selected]) * (4 * 4 * 3),
+                    decode_session_id=session.common_session_id,
+                )
+            )
+        return tuple(result)
+
+
+class _TimelineClassifier:
+    def classify(self, authoritative: Phase7EB4Input) -> object:
+        assert authoritative.frame_record in authoritative.run.records
+        assert (
+            authoritative.run.frame_bytes[authoritative.frame_record.identity]
+            == authoritative.frame_jpeg_bytes
+        )
+        outcome = (
+            "PRESENT"
+            if authoritative.target_request.payload["requested_time_utc"] == "2026-07-20T03:00:00Z"
+            else "ABSENT"
+        )
+        template = next(
+            item
+            for item in _vectors()
+            if item["family"] == "classification-operation"
+            and item["payload"]["outcome"] == outcome
+        )
+        return StrictIdentityEnvelope.from_payload(
+            "classification-operation",
+            {
+                **template["payload"],
+                "investigation_id": authoritative.run.investigation_id,
+                "run_id": authoritative.run.run_id,
+                "frame_id": authoritative.frame_record.identity,
+                "target_request_id": authoritative.target_request.identity,
+                "classifier_policy_id": authoritative.run.manifest.payload["classifier_policy_id"],
+            },
+        )
+
+
 def _test_acquisition(
     tmp_path: Path,
     run: Phase7ERun,
@@ -607,7 +904,7 @@ def _test_acquisition(
 def test_local_evidence_adapter_reuses_classification_for_repeated_frame_alias(
     tmp_path: Path,
 ) -> None:
-    repo, run = _create_golden_schema6(tmp_path / "runs", complete=False)
+    repo, run = _create_golden_schema6(tmp_path / "runs", complete=False, active_index=0)
     policy_record = next(item for item in run.records if item.family == "policy")
     request = CommonSessionRequest(
         "inv-01",
@@ -697,6 +994,101 @@ def test_local_evidence_adapter_admits_same_pass_physical_alias_once(tmp_path: P
     assert len(result.manifest.payload["indexes"]["frame_ids"]) == 1
     assert len(result.manifest.payload["indexes"]["observation_ids"]) == 1
     assert len(result.manifest.payload["indexes"]["alias_ids"]) == 1
+
+
+def test_1d_runs_real_c1_c2_d1_d2_path_from_retained_common_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, run = _create_golden_schema6(tmp_path / "runs", complete=False, active_index=0)
+    policy_record = next(item for item in run.records if item.family == "policy")
+    request = CommonSessionRequest(
+        "inv-01",
+        "run-01",
+        1,
+        _utc("2026-07-20T03:00:00Z"),
+        _utc("2026-07-20T03:00:04Z"),
+        CommonSessionPolicy.from_payload(policy_record.payload),
+    )
+    acquisition = _test_acquisition(tmp_path, run, request)
+    decoder = _TimelineDecoder()
+    adapter = Phase7ELocalEvidenceAdapter(
+        repo,
+        decoder,
+        _TimelineClassifier(),
+    )
+    first_target = Phase7EC1PlannerAdapter().build(request, policy_record).coarse_targets[0]
+    with repo.invocation_ownership("inv-01", "run-01", timeout_seconds=0) as owner:
+        intermediate = adapter.execute(
+            Phase7EInvocation(
+                request,
+                owner,
+                InvocationBudget(request.policy, lambda: 0.0),
+            ),
+            acquisition,
+            (first_target,),
+        )
+    first_observation = next(
+        item
+        for item in intermediate.records
+        if item.family == "observation"
+        and item.payload["target_request_id"] == first_target.identity
+    )
+    narrowing_calls = 0
+    original_narrow = BinaryNarrowingService.narrow
+
+    def track_narrow(
+        *args: Any,  # noqa: ANN401 - transparent service spy.
+        **kwargs: Any,  # noqa: ANN401 - transparent service spy.
+    ) -> object:
+        nonlocal narrowing_calls
+        narrowing_calls += 1
+        return original_narrow(*args, **kwargs)
+
+    monkeypatch.setattr(BinaryNarrowingService, "narrow", track_narrow)
+    with repo.invocation_ownership("inv-01", "run-01", timeout_seconds=0) as owner:
+        result = Phase7E1DService(repo, local_evidence=adapter).execute(
+            Phase7EInvocation(
+                request,
+                owner,
+                InvocationBudget(request.policy, lambda: 0.0),
+            ),
+            acquisition,
+        )
+    assert result.run.is_schema7
+    assert result.run.result_kind == "FOUND"
+    reopened = repo.reopen_schema7("inv-01", "run-01")
+    assert reopened.result_kind == "FOUND"
+    assert narrowing_calls == 1
+    assert any(item.identity == first_observation.identity for item in reopened.records)
+    assert set(decoder.session_ids) == {acquisition.common_session_id}
+    assert acquisition.retained_mp4_path == tmp_path / "replay.mp4"
+    families = {item.family for item in reopened.records}
+    assert {
+        "support-group",
+        "c2-bracket",
+        "d1-input",
+        "d1-history",
+        "narrowed-bracket",
+    } <= families
+    support = next(item for item in reopened.records if item.family == "support-group")
+    assert len(set(support.payload["member_frame_ids"])) == 3
+    assert len(set(support.payload["member_observation_ids"])) == 3
+    logical_end = next(
+        item
+        for item in reopened.records
+        if item.family == "target-request"
+        and item.payload["selection_rule"] == "FINAL_STRICTLY_BEFORE_END"
+    )
+    alias = next(
+        item
+        for item in reopened.records
+        if item.family == "alias" and item.payload["target_request_id"] == logical_end.identity
+    )
+    assert alias.payload["frame_id"] == support.payload["member_frame_ids"][-1]
+    terminal = next(item for item in reopened.records if item.family == "terminal-result")
+    assert terminal.payload["interval_start_requested_time_utc"] == "2026-07-20T03:00:00Z"
+    assert terminal.payload["interval_end_requested_time_utc"] == "2026-07-20T03:00:01Z"
 
 
 class _MismatchedAliasDecoder:

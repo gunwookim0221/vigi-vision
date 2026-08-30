@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from vigi_vision.recording_search_c1_planner import (
     CoarseSamplingIdentity,
+    SupportDirection,
     confirmation_run_id_for,
 )
 
@@ -94,7 +95,7 @@ class CoarseSamplingResult:
     complete: bool
     support_results: tuple[CoarseSupportResult, ...] = ()
 
-    def __post_init__(self) -> None:  # noqa: C901 - validates ordered evidence invariants.
+    def __post_init__(self) -> None:  # noqa: C901, PLR0912 - ordered evidence invariants.
         """Ensure results remain aligned with the immutable target plan."""
         if len(self.samples) > len(self.plan.target_times):
             raise ValueError
@@ -122,13 +123,30 @@ class CoarseSamplingResult:
                 self.plan, support.origin_target_utc, self.identity
             ):
                 raise ValueError
-            expected = tuple(
-                support.origin_target_utc
-                + index * self.plan.absence_cadence_seconds * timedelta(seconds=1)
-                for index in range(self.plan.absence_confirmation_frames)
-            )
+            if self.plan.support_direction is SupportDirection.FORWARD:
+                expected = tuple(
+                    support.origin_target_utc
+                    + index * self.plan.absence_cadence_seconds * timedelta(seconds=1)
+                    for index in range(self.plan.absence_confirmation_frames)
+                )
+            else:
+                expected = tuple(
+                    support.origin_target_utc
+                    - index * self.plan.absence_cadence_seconds * timedelta(seconds=1)
+                    for index in range(self.plan.absence_confirmation_frames, 0, -1)
+                )
             actual = tuple(sample.requested_time_utc for sample in support.samples)
-            if actual != expected or any(value > self.plan.search_end_utc for value in actual):
+            if (
+                actual != expected
+                or any(
+                    value < self.plan.search_start_utc or value > self.plan.search_end_utc
+                    for value in actual
+                )
+                or (
+                    self.plan.support_direction is SupportDirection.BACKWARD_FROM_END
+                    and any(value >= self.plan.search_end_utc for value in actual)
+                )
+            ):
                 raise ValueError
             if any(sample.probe_request_id is None for sample in support.samples):
                 raise ValueError

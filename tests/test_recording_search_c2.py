@@ -17,6 +17,7 @@ from vigi_vision.recording_search_c1_models import (
 )
 from vigi_vision.recording_search_c1_planner import (
     CoarseSamplingIdentity,
+    SupportDirection,
     build_coarse_sampling_plan,
     confirmation_run_id_for,
 )
@@ -187,6 +188,120 @@ def test_qualifying_absence_returns_exact_nonpersistent_bracket() -> None:
         _START + timedelta(seconds=3),
         _START + timedelta(seconds=4),
     )
+
+
+def test_backward_final_support_forms_bracket_without_counting_logical_end_alias() -> None:
+    end = _START + timedelta(seconds=4)
+    policy = default_policy(_START, end)
+    plan = build_coarse_sampling_plan(
+        policy,
+        support_direction=SupportDirection.BACKWARD_FROM_END,
+    )
+    identity = _IDENTITY
+    logical = CoarseSampleResult(
+        end,
+        CoarseSampleStatus.SUCCESS,
+        "probe-logical-end",
+        ClassificationOutcome.ABSENT,
+    )
+    support_times = tuple(_START + timedelta(seconds=value) for value in (1, 2, 3))
+    confirmation_id = confirmation_run_id_for(plan, end, identity)
+    support_samples = tuple(
+        CoarseSampleResult(
+            target,
+            CoarseSampleStatus.SUCCESS,
+            f"probe-support-{index}",
+            ClassificationOutcome.ABSENT,
+        )
+        for index, target in enumerate(support_times, start=1)
+    )
+    support_evidence = tuple(
+        CoarseTargetEvidence(
+            requested_time_utc=target,
+            status=CoarseSampleStatus.SUCCESS,
+            classification=ClassificationOutcome.ABSENT,
+            probe_request_id=sample.probe_request_id,
+            observation_id=f"observation-support-{index}",
+            canonical_frame_id=f"frame-support-{index}",
+            decode_session_id="decode-session-test",
+            decoded_frame_utc=target,
+            decoded_pts=index,
+            decoded_ordinal=index,
+            origin_coarse_target_utc=end,
+            confirmation_run_id=confirmation_id,
+            support_identity=identity,
+        )
+        for index, (target, sample) in enumerate(
+            zip(support_times, support_samples, strict=True), 1
+        )
+    )
+    logical_evidence = CoarseTargetEvidence(
+        requested_time_utc=end,
+        status=CoarseSampleStatus.SUCCESS,
+        classification=ClassificationOutcome.ABSENT,
+        probe_request_id="probe-logical-end",
+        observation_id=support_evidence[-1].observation_id,
+        canonical_frame_id=support_evidence[-1].canonical_frame_id,
+        decode_session_id="decode-session-test",
+        decoded_frame_utc=support_times[-1],
+        decoded_pts=3,
+        decoded_ordinal=3,
+        is_alias=True,
+    )
+    initial_present = CoarseTargetEvidence(
+        requested_time_utc=_START,
+        status=CoarseSampleStatus.SUCCESS,
+        classification=ClassificationOutcome.PRESENT,
+        probe_request_id="probe-in-session-start",
+        observation_id="observation-in-session-start",
+        canonical_frame_id="frame-in-session-start",
+        decode_session_id="decode-session-test",
+        decoded_frame_utc=_START,
+        decoded_pts=0,
+        decoded_ordinal=0,
+    )
+    execution = CoarseSamplingResult(
+        identity,
+        plan,
+        (logical,),
+        complete=True,
+        support_results=(
+            CoarseSupportResult(
+                identity,
+                end,
+                confirmation_id,
+                (0, 1, 2),
+                support_samples,
+            ),
+        ),
+    )
+    snapshot = CoarseEvidenceSnapshot(
+        investigation_id=identity.investigation_id,
+        search_run_id=identity.search_run_id,
+        identity=identity,
+        plan=plan,
+        policy_version=policy.policy_version,
+        absence_confirmation_frames=3,
+        absence_cadence_seconds=1,
+        baseline_observation_id="baseline-test",
+        manifest_digest="a" * 64,
+        execution=execution,
+        targets=(initial_present, logical_evidence, *support_evidence),
+        initial_present_evidence=initial_present,
+    )
+
+    result = interpret_coarse_evidence(snapshot)
+
+    assert result.status is CoarseInterpretationStatus.BRACKET_READY
+    assert result.bracket is not None
+    assert not result.bracket.last_present_is_baseline
+    assert result.bracket.last_present_probe_request_id == "probe-in-session-start"
+    assert result.bracket.first_absent_requested_time_utc == support_times[0]
+    assert result.bracket.support_target_times == support_times
+    assert result.bracket.support_observation_ids == tuple(
+        item.observation_id for item in support_evidence
+    )
+    assert len(set(result.bracket.support_observation_ids)) == 3
 
 
 @pytest.mark.parametrize("support_count", [1, 2, 4])

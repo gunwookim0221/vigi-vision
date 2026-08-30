@@ -274,7 +274,8 @@ capability.
    schema-6 transition, incremental admission, and strict reopen; 7E-1C owns one
    replay/remux, retained `.media` MP4, sparse/adaptive decoding, end-target
    selection (including logical-E mapping), RGB24, A2/B4 integration, and deadline propagation; 7E-1D owns
-   the Phase 7E-specific C1 planning adapter with `S` and backward final support,
+   the Phase 7E C1 planning adapter with `S` and the shared explicit
+   `BACKWARD_FROM_END` support mode (legacy C1/C2 remains default `FORWARD`),
    C2/D1/D2, complete source reconstruction, immutable schema 7, and Phase 7
    status; 7E-2 owns the synchronous CLI, disabled POST, cleanup, and the
    separate Phase 8 clip/handoff/retry/deletion repository; 7E-3 owns bounded

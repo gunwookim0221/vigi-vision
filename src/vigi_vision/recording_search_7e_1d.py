@@ -10,14 +10,17 @@ Schema-7 identity family through the existing Phase 7E repository.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
+from vigi_vision.object_presence_values import ClassificationOutcome, VisualReason
 from vigi_vision.recording_search_7e_1c import (
     B4Bridge,
     CommonSessionAcquisition,
+    CommonSessionDeadlineError,
     CommonSessionRequest,
     DecodedLocalFrame,
     Decoder,
@@ -32,6 +35,7 @@ from vigi_vision.recording_search_7e_1c import (
 from vigi_vision.recording_search_7e_models import Schema6TargetState, StrictIdentityEnvelope
 from vigi_vision.recording_search_7e_repository import (
     Phase7ECorruptError,
+    Phase7EInProgressError,
     Phase7ENotFoundError,
     Phase7ERun,
     PublicationResult,
@@ -39,12 +43,68 @@ from vigi_vision.recording_search_7e_repository import (
     RecordingSearch7ERepository,
 )
 from vigi_vision.recording_search_7e_validation import Schema6Envelope
-from vigi_vision.recording_search_c1_planner import build_coarse_sampling_plan
+from vigi_vision.recording_search_a2_models import ProbeFrameRequestRecord, ProbeRequestStatus
+from vigi_vision.recording_search_b4_models import (
+    ClassificationPublicationOutcome,
+    PublishedClassificationResult,
+)
+from vigi_vision.recording_search_c1_models import (
+    CoarseSampleResult,
+    CoarseSampleStatus,
+    CoarseSamplingResult,
+    CoarseSupportResult,
+)
+from vigi_vision.recording_search_c1_planner import (
+    CoarseSamplingIdentity,
+    SupportDirection,
+    build_coarse_sampling_plan,
+    confirmation_run_id_for,
+    support_target_times,
+)
+from vigi_vision.recording_search_c2_interpreter import interpret_coarse_evidence
+from vigi_vision.recording_search_c2_models import (
+    CoarseCandidateBracket,
+    CoarseEvidenceSnapshot,
+    CoarseInterpretationStatus,
+    CoarseTargetEvidence,
+)
+from vigi_vision.recording_search_c2_support import coarse_target_id
+from vigi_vision.recording_search_d1_identity import policy_identity, source_bracket_identity
+from vigi_vision.recording_search_d1_models import (
+    NarrowingBoundEvidence,
+    NarrowingProbeEvidence,
+    NarrowingResult,
+    NarrowingState,
+    NarrowingStatus,
+)
 from vigi_vision.recording_search_d1_planner import maximum_narrowing_iterations
-from vigi_vision.recording_search_d2_terminal_models import TerminalResultKind
+from vigi_vision.recording_search_d1_service import BinaryNarrowingService
+from vigi_vision.recording_search_d2_c2_adapter import adapt_c2_result
+from vigi_vision.recording_search_d2_d1_adapter import adapt_d1_result
+from vigi_vision.recording_search_d2_enums import D2EvidenceRole
+from vigi_vision.recording_search_d2_evidence import (
+    D2EvidenceReference,
+    D2EvidenceSnapshot,
+    D2SourceRevision,
+    D2SupportGroup,
+)
+from vigi_vision.recording_search_d2_terminal_interpreter import interpret_terminal
+from vigi_vision.recording_search_d2_terminal_models import (
+    FoundResult,
+    InconclusiveResult,
+    NotFoundResult,
+    OperationalOutcome,
+    TerminalInputSnapshot,
+    TerminalResultKind,
+)
+from vigi_vision.recording_search_models import RecordingSearchPolicy, default_policy
 
 if TYPE_CHECKING:
-    from vigi_vision.recording_search_models import RecordingSearchPolicy
+    from collections.abc import Callable, Generator
+
+    from vigi_vision.recording_search_b3_models import ClassifyRecordingProbeRequest
+
+_DIGEST_HEX_LENGTH = 64
 
 
 class Phase7E1DError(RuntimeError):
@@ -229,7 +289,8 @@ class Phase7EC1PlannerAdapter:
             raise Phase7EAdapterError
         legacy = _C1PolicyView(request, policy.payload)
         existing_plan = build_coarse_sampling_plan(
-            cast("RecordingSearchPolicy", cast("object", legacy))
+            cast("RecordingSearchPolicy", cast("object", legacy)),
+            support_direction=SupportDirection.BACKWARD_FROM_END,
         )  # existing C1 policy component
         targets = (request.start_utc, *existing_plan.target_times)
         if len(targets) != len(set(targets)) or targets[-1] != request.end_utc:
@@ -259,13 +320,9 @@ class Phase7EC1PlannerAdapter:
                     else "NEAREST_IN_HALF_OPEN_SESSION"
                 ),
             )
-            for sequence, target in enumerate(targets, start=1)
+            for sequence, target in enumerate(targets)
         )
-        count = int(policy.payload["support_count"])
-        cadence = int(policy.payload["support_cadence_seconds"])
-        support_times = tuple(
-            request.end_utc - timedelta(seconds=index * cadence) for index in range(count, 0, -1)
-        )
+        support_times = support_target_times(existing_plan, request.end_utc)
         if not support_times or support_times[0] < request.start_utc:
             raise Phase7EIncompleteEvidenceError
         origin = coarse[-1].identity
@@ -273,7 +330,7 @@ class Phase7EC1PlannerAdapter:
             make_target_envelope(
                 request,
                 plan.identity,
-                len(coarse) + index + 1,
+                len(coarse) + index,
                 target,
                 kind="SUPPORT",
                 selection_rule="NEAREST_IN_HALF_OPEN_SESSION",
@@ -282,6 +339,342 @@ class Phase7EC1PlannerAdapter:
             for index, target in enumerate(support_times)
         )
         return Phase7ECoarsePlanBundle(plan, coarse, support)
+
+
+@dataclass(frozen=True, slots=True)
+class Phase7EAdaptiveOrchestrator:
+    """Compose existing C1, C2, D1, and D2 over one retained local session."""
+
+    repository: RecordingSearch7ERepository
+    local_evidence: Phase7ELocalEvidenceAdapter
+
+    def execute(  # noqa: PLR0915 - explicit composition of approved boundaries.
+        self,
+        invocation: Phase7EInvocation,
+        acquisition: CommonSessionAcquisition,
+    ) -> Phase7ERun:
+        """Progress an actual 1C Schema-6 run to strictly persisted D2 evidence."""
+        invocation.validate(self.repository)
+        run = self.repository.reopen_schema6(
+            invocation.request.investigation_id,
+            invocation.request.run_id,
+            ownership=invocation.ownership,
+        )
+        _require_acquisition_binding(run, invocation, acquisition)
+        policy_record = _one_family(run, "policy")
+        policy = _legacy_policy(invocation.request, policy_record)
+        plan = build_coarse_sampling_plan(
+            policy,
+            support_direction=SupportDirection.BACKWARD_FROM_END,
+        )
+        schema5 = _one_family(run, "schema5-manifest")
+        bundle = Phase7EC1PlannerAdapter().build(invocation.request, policy_record)
+        if bundle.plan.identity != run.manifest.payload["plan_id"] or tuple(
+            schema5.payload["coarse_target_request_ids"]
+        ) != tuple(item.identity for item in bundle.coarse_targets):
+            raise Phase7ECorruptError
+        coarse = bundle.coarse_targets
+        logical_end = next(
+            item for item in coarse if item.payload["selection_rule"] == "FINAL_STRICTLY_BEFORE_END"
+        )
+        preceding_coarse = tuple(item for item in coarse if item.identity != logical_end.identity)
+        run = self.local_evidence.execute(invocation, acquisition, preceding_coarse)
+        # Decode backward support first so E aliases the authoritative E-cadence
+        # frame. Existing C2/D2 support evidence therefore remains non-alias and
+        # the logical endpoint still resolves to the last eligible frame before E.
+        run = self.local_evidence.execute(
+            invocation,
+            acquisition,
+            (*bundle.final_support_targets, logical_end),
+        )
+        if _target_outcome(run, logical_end.identity) == ClassificationOutcome.ABSENT.value:
+            support = bundle.final_support_targets
+            expected = support_target_times(plan, invocation.request.end_utc)
+            if (
+                tuple(
+                    _parse_whole_text(str(item.payload["requested_time_utc"])) for item in support
+                )
+                != expected
+            ):
+                raise Phase7EIncompleteEvidenceError
+            if any(not _target_is_admitted(run, item.identity) for item in support):
+                raise Phase7EIncompleteEvidenceError
+        c2_snapshot = _build_c2_snapshot(run, invocation.request, policy, plan)
+        c2 = interpret_coarse_evidence(c2_snapshot)
+        if c2.status is CoarseInterpretationStatus.BRACKET_READY:
+            if c2.bracket is None:
+                raise Phase7EAdapterError
+            run, bracket, c2_record = _persist_c2_bracket(
+                self.repository,
+                invocation,
+                run,
+                c2.bracket,
+            )
+            handle = _Phase7ENarrowingHandle(
+                invocation,
+                acquisition,
+                self.local_evidence,
+                baseline_identity=c2_snapshot.identity.baseline_identity,
+            )
+            host = _Phase7ENarrowingHost(handle)
+            store = _Phase7ENarrowingStore(handle, bracket, policy)
+            narrowing = BinaryNarrowingService(host, store).narrow(handle, bracket, policy)
+            if narrowing.status is not NarrowingStatus.READY or narrowing.narrowed_bracket is None:
+                raise Phase7EIncompleteEvidenceError
+            run, phase7_support_id = _persist_d1_result(
+                self.repository,
+                invocation,
+                c2_record,
+                narrowing,
+            )
+            persisted_c2 = replace(c2, bracket=bracket)
+            d2_snapshot = _build_d2_snapshot(
+                run,
+                c2_snapshot,
+                persisted_c2,
+                narrowing,
+                policy,
+            )
+            terminal_input = TerminalInputSnapshot(
+                d2_snapshot,
+                plan,
+                policy,
+                adapt_c2_result(persisted_c2, d2_snapshot),
+                adapt_d1_result(narrowing, d2_snapshot),
+                narrowing.narrowed_bracket.d1_input_bracket,
+            )
+            d2 = interpret_terminal(terminal_input)
+            if not isinstance(d2, FoundResult):
+                raise Phase7EOperationalEvidenceError
+            narrowed_id = run.manifest.payload["indexes"]["narrowed_bracket_ids"][-1]
+            narrowed_record = next(item for item in run.records if item.identity == narrowed_id)
+            if narrowed_record.payload["upper_support_group_id"] != phase7_support_id:
+                raise Phase7EAdapterError
+            return run
+        d2_snapshot = _build_d2_snapshot(run, c2_snapshot, c2, None, policy)
+        d2 = interpret_terminal(
+            TerminalInputSnapshot(
+                d2_snapshot,
+                plan,
+                policy,
+                adapt_c2_result(c2, d2_snapshot),
+            )
+        )
+        if not isinstance(d2, (NotFoundResult, InconclusiveResult)):
+            if isinstance(d2, OperationalOutcome):
+                raise Phase7EOperationalEvidenceError
+            raise Phase7EIncompleteEvidenceError
+        return run
+
+
+@dataclass(slots=True)
+class _Phase7ENarrowingHandle:
+    invocation: Phase7EInvocation
+    acquisition: CommonSessionAcquisition
+    local_evidence: Phase7ELocalEvidenceAdapter
+    baseline_identity: str
+    target_by_time: dict[datetime, StrictIdentityEnvelope] = field(default_factory=dict)
+
+    @property
+    def investigation_id(self) -> str:
+        return self.invocation.request.investigation_id
+
+    @property
+    def search_run_id(self) -> str:
+        return self.invocation.request.run_id
+
+    @property
+    def phase6_confirmation_id(self) -> str:
+        return self.invocation.request.investigation_id
+
+    @property
+    def closed(self) -> bool:
+        return not self.invocation.ownership.active
+
+
+@dataclass(frozen=True, slots=True)
+class _Phase7ENarrowingHost:
+    handle: _Phase7ENarrowingHandle
+
+    @contextmanager
+    def a2_mutation(self, handle: _Phase7ENarrowingHandle) -> Generator[None, None, None]:
+        _require_same_handle(self.handle, handle)
+        handle.invocation.validate(handle.local_evidence.repository)
+        yield
+        handle.invocation.validate(handle.local_evidence.repository)
+
+    def acquire_targets(
+        self,
+        handle: _Phase7ENarrowingHandle,
+        requested_times: tuple[datetime, ...],
+    ) -> tuple[ProbeFrameRequestRecord, ...]:
+        _require_same_handle(self.handle, handle)
+        run = handle.local_evidence.repository.reopen_schema6(
+            handle.investigation_id,
+            handle.search_run_id,
+            ownership=handle.invocation.ownership,
+        )
+        targets: list[StrictIdentityEnvelope] = []
+        origin: StrictIdentityEnvelope | None = None
+        for requested in requested_times:
+            target = _target_at(run, requested)
+            if target is None:
+                sequence = (
+                    max(
+                        int(item.payload["sequence"])
+                        for item in run.records
+                        if item.family == "target-request"
+                    )
+                    + 1
+                )
+                target = make_target_envelope(
+                    handle.invocation.request,
+                    str(run.manifest.payload["plan_id"]),
+                    sequence,
+                    requested,
+                    kind="BINARY" if origin is None else "SUPPORT",
+                    selection_rule="NEAREST_IN_HALF_OPEN_SESSION",
+                    origin_target_request_id=None if origin is None else origin.identity,
+                )
+            if origin is None:
+                origin = target
+            handle.target_by_time[requested] = target
+            targets.append(target)
+        _ = handle.local_evidence.execute(handle.invocation, handle.acquisition, tuple(targets))
+        return tuple(_synthetic_probe_request(handle, target) for target in targets)
+
+    def classify(
+        self,
+        handle: _Phase7ENarrowingHandle,
+        request: ClassifyRecordingProbeRequest,
+    ) -> PublishedClassificationResult:
+        _require_same_handle(self.handle, handle)
+        run = handle.local_evidence.repository.reopen_schema6(
+            handle.investigation_id,
+            handle.search_run_id,
+            ownership=handle.invocation.ownership,
+        )
+        evidence = _target_evidence(run, request.probe_request_id, request.probe_request_id)
+        if (
+            evidence.state is None
+            or evidence.observation_id is None
+            or evidence.canonical_frame_id is None
+        ):
+            raise Phase7EOperationalEvidenceError
+        observation = next(item for item in run.records if item.identity == evidence.observation_id)
+        reason = observation.payload["reason_code"]
+        return PublishedClassificationResult(
+            ClassificationPublicationOutcome.REUSED,
+            evidence.observation_id,
+            evidence.alias_id,
+            request.probe_request_id,
+            evidence.canonical_frame_id,
+            evidence.state,
+            None if reason is None else VisualReason(str(reason)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _Phase7ENarrowingStore:
+    handle: _Phase7ENarrowingHandle
+    bracket: CoarseCandidateBracket
+    policy: RecordingSearchPolicy
+
+    def validate_bracket(
+        self,
+        handle: _Phase7ENarrowingHandle,
+        bracket: CoarseCandidateBracket,
+        policy: RecordingSearchPolicy,
+    ) -> None:
+        _require_same_handle(self.handle, handle)
+        run = _strict_schema6(handle)
+        if (
+            bracket != self.bracket
+            or policy != self.policy
+            or _manifest_digest(run) != bracket.manifest_digest
+        ):
+            raise ValueError
+
+    def load_state(
+        self,
+        handle: _Phase7ENarrowingHandle,
+        bracket: CoarseCandidateBracket,
+    ) -> NarrowingState:
+        self.validate_bracket(handle, bracket, self.policy)
+        run = _strict_schema6(handle)
+        lower = (
+            NarrowingBoundEvidence(
+                target_id="source-baseline",
+                requested_time_utc=bracket.last_present_requested_time_utc,
+                state=ClassificationOutcome.PRESENT,
+                observation_id=bracket.last_present_observation_id,
+                probe_request_id=None,
+                canonical_frame_id=None,
+                operation_id=None,
+                decode_session_id=None,
+                decoded_frame_utc=None,
+                decoded_pts=None,
+                decoded_ordinal=None,
+                is_baseline=True,
+            )
+            if bracket.last_present_is_baseline
+            else _bound_from_target(
+                _target_evidence(
+                    run,
+                    str(bracket.last_present_probe_request_id),
+                    str(bracket.last_present_target_id or bracket.last_present_probe_request_id),
+                )
+            )
+        )
+        upper = tuple(
+            _bound_from_target(_target_evidence(run, target_id, target_id))
+            for target_id in bracket.support_probe_request_ids
+        )
+        return NarrowingState(
+            handle.investigation_id,
+            handle.search_run_id,
+            handle.phase6_confirmation_id,
+            handle.baseline_identity,
+            source_bracket_identity(bracket),
+            self.policy.policy_version,
+            bracket.last_present_requested_time_utc,
+            bracket.first_absent_requested_time_utc,
+            lower,
+            upper,
+            (),
+            (),
+            0,
+            _manifest_digest(run),
+        )
+
+    def find_existing(
+        self,
+        handle: _Phase7ENarrowingHandle,
+        requested_time_utc: datetime,
+        target_id: str,
+    ) -> NarrowingProbeEvidence | None:
+        _require_same_handle(self.handle, handle)
+        run = _strict_schema6(handle)
+        target = handle.target_by_time.get(requested_time_utc) or _target_at(
+            run, requested_time_utc
+        )
+        if target is None or not _target_is_admitted(run, target.identity):
+            return None
+        handle.target_by_time[requested_time_utc] = target
+        return _target_evidence(run, target.identity, target_id)
+
+    def resolve_request(
+        self,
+        handle: _Phase7ENarrowingHandle,
+        request: ProbeFrameRequestRecord,
+        target_id: str,
+    ) -> NarrowingProbeEvidence:
+        _require_same_handle(self.handle, handle)
+        return _target_evidence(_strict_schema6(handle), request.probe_request_id, target_id)
+
+    def current_manifest_digest(self, handle: _Phase7ENarrowingHandle) -> str:
+        _require_same_handle(self.handle, handle)
+        return _manifest_digest(_strict_schema6(handle))
 
 
 @dataclass(frozen=True, slots=True)
@@ -390,16 +783,764 @@ class Phase7ED2DecisionAdapter:
         )
 
 
+def _require_acquisition_binding(
+    run: Phase7ERun,
+    invocation: Phase7EInvocation,
+    acquisition: CommonSessionAcquisition,
+) -> None:
+    if (
+        acquisition.request != invocation.request
+        or acquisition.common_session_id != run.manifest.payload.get("common_session_id")
+        or acquisition.session.identity != acquisition.common_session_id
+        or acquisition.retained_mp4_path is None
+    ):
+        raise Phase7EAdapterError
+
+
+def _one_family(run: Phase7ERun, family: str) -> StrictIdentityEnvelope:
+    values = tuple(item for item in run.records if item.family == family)
+    if len(values) != 1:
+        raise Phase7ECorruptError
+    return values[0]
+
+
+def _legacy_policy(
+    request: CommonSessionRequest,
+    policy: StrictIdentityEnvelope,
+) -> RecordingSearchPolicy:
+    if policy.family != "policy":
+        raise Phase7EAdapterError
+    return default_policy(request.start_utc, request.end_utc).model_copy(
+        update={
+            "maximum_requested_span_seconds": int(
+                policy.payload["maximum_search_duration_seconds"]
+            ),
+            "coarse_interval_seconds": int(policy.payload["coarse_interval_seconds"]),
+            "binary_stop_resolution_seconds": int(policy.payload["binary_stop_seconds"]),
+            "absence_confirmation_frames": int(policy.payload["support_count"]),
+            "absence_cadence_seconds": int(policy.payload["support_cadence_seconds"]),
+            "maximum_consecutive_indeterminate_targets": int(
+                policy.payload["maximum_consecutive_indeterminate_targets"]
+            ),
+        }
+    )
+
+
+def _target_at(run: Phase7ERun, requested: datetime) -> StrictIdentityEnvelope | None:
+    matches = tuple(
+        item
+        for item in run.records
+        if item.family == "target-request"
+        and _parse_whole_text(str(item.payload["requested_time_utc"])) == requested
+    )
+    admitted = tuple(item for item in matches if _target_is_admitted(run, item.identity))
+    candidates = admitted or matches
+    if not candidates:
+        return None
+    binary = tuple(item for item in candidates if item.payload["kind"] == "BINARY")
+    selected = binary or candidates
+    if len(selected) != 1:
+        raise Phase7ECorruptError
+    return selected[0]
+
+
+def _target_outcome(run: Phase7ERun, target_id: str) -> str:
+    return _target_binding(run, target_id)[2].payload["outcome"]
+
+
+def _target_binding(
+    run: Phase7ERun,
+    target_id: str,
+) -> tuple[
+    StrictIdentityEnvelope,
+    StrictIdentityEnvelope,
+    StrictIdentityEnvelope,
+    StrictIdentityEnvelope | None,
+]:
+    aliases = tuple(
+        item
+        for item in run.records
+        if item.family == "alias" and item.payload["target_request_id"] == target_id
+    )
+    if len(aliases) > 1:
+        raise Phase7ECorruptError
+    alias = aliases[0] if aliases else None
+    canonical_target = (
+        str(alias.payload["alias_of_target_request_id"]) if alias is not None else target_id
+    )
+    observations = tuple(
+        item
+        for item in run.records
+        if item.family == "observation" and item.payload["target_request_id"] == canonical_target
+    )
+    if len(observations) != 1:
+        raise Phase7ECorruptError
+    observation = observations[0]
+    frame = next(
+        (item for item in run.records if item.identity == observation.payload["frame_id"]),
+        None,
+    )
+    operation = next(
+        (
+            item
+            for item in run.records
+            if item.identity == observation.payload["classification_operation_id"]
+        ),
+        None,
+    )
+    if frame is None or frame.family != "frame" or operation is None:
+        raise Phase7ECorruptError
+    decoder = next(
+        (item for item in run.records if item.identity == frame.payload["decoder_operation_id"]),
+        None,
+    )
+    if decoder is None or decoder.family != "decoder-operation":
+        raise Phase7ECorruptError
+    return frame, operation, observation, alias
+
+
+def _target_evidence(
+    run: Phase7ERun,
+    target_request_id: str,
+    target_id: str,
+) -> NarrowingProbeEvidence:
+    target = next(
+        (item for item in run.records if item.identity == target_request_id),
+        None,
+    )
+    if target is None or target.family != "target-request":
+        raise Phase7ECorruptError
+    frame, operation, observation, alias = _target_binding(run, target_request_id)
+    return NarrowingProbeEvidence(
+        target_id=target_id,
+        requested_time_utc=_parse_whole_text(str(target.payload["requested_time_utc"])),
+        status=CoarseSampleStatus.SUCCESS,
+        state=ClassificationOutcome(str(observation.payload["outcome"])),
+        probe_request_id=target_request_id,
+        observation_id=observation.identity,
+        alias_id=None if alias is None else alias.identity,
+        canonical_frame_id=frame.identity,
+        operation_id=str(frame.payload["decoder_operation_id"]),
+        classification_operation_id=operation.identity,
+        decode_session_id=str(frame.payload["common_session_id"]),
+        decoded_frame_utc=_parse_whole_text(str(frame.payload["estimated_requested_time_utc"])),
+        decoded_pts=int(frame.payload["raw_pts"]),
+        decoded_ordinal=int(frame.payload["ordinal"]),
+    )
+
+
+def _bound_from_target(value: NarrowingProbeEvidence) -> NarrowingBoundEvidence:
+    if value.state is None or value.observation_id is None:
+        raise Phase7ECorruptError
+    return NarrowingBoundEvidence(
+        value.target_id,
+        value.requested_time_utc,
+        value.state,
+        value.observation_id,
+        value.probe_request_id,
+        value.canonical_frame_id,
+        value.operation_id,
+        value.decode_session_id,
+        value.decoded_frame_utc,
+        value.decoded_pts,
+        value.decoded_ordinal,
+    )
+
+
+def _coarse_evidence(
+    run: Phase7ERun,
+    target: StrictIdentityEnvelope,
+    *,
+    origin: datetime | None = None,
+    confirmation_id: str | None = None,
+    identity: CoarseSamplingIdentity | None = None,
+) -> CoarseTargetEvidence:
+    evidence = _target_evidence(run, target.identity, target.identity)
+    return CoarseTargetEvidence(
+        evidence.requested_time_utc,
+        evidence.status,
+        evidence.state,
+        evidence.probe_request_id,
+        evidence.observation_id,
+        evidence.canonical_frame_id,
+        evidence.decode_session_id,
+        evidence.decoded_frame_utc,
+        evidence.decoded_pts,
+        evidence.decoded_ordinal,
+        evidence.alias_id is not None,
+        origin,
+        confirmation_id,
+        identity,
+    )
+
+
+def _build_c2_snapshot(
+    run: Phase7ERun,
+    request: CommonSessionRequest,
+    policy: RecordingSearchPolicy,
+    plan: object,
+) -> CoarseEvidenceSnapshot:
+    if not run.is_schema6:
+        raise Phase7ECorruptError
+    typed_plan = cast("Any", plan)
+    operations = tuple(item for item in run.records if item.family == "classification-operation")
+    baselines = {str(item.payload["baseline_identity"]) for item in operations}
+    if len(baselines) != 1:
+        raise Phase7EIncompleteEvidenceError
+    baseline_identity = baselines.pop()
+    identity = CoarseSamplingIdentity(
+        run.investigation_id,
+        run.run_id,
+        run.investigation_id,
+        baseline_identity,
+    )
+    coarse_targets = tuple(_target_at(run, target) for target in typed_plan.target_times)
+    if any(item is None for item in coarse_targets):
+        raise Phase7EIncompleteEvidenceError
+    coarse = tuple(cast("StrictIdentityEnvelope", item) for item in coarse_targets)
+    evidence = tuple(_coarse_evidence(run, item) for item in coarse)
+    initial_target = _target_at(run, request.start_utc)
+    if initial_target is None:
+        raise Phase7EIncompleteEvidenceError
+    initial_evidence = _coarse_evidence(run, initial_target)
+    if initial_evidence.classification is not ClassificationOutcome.PRESENT:
+        raise Phase7EIncompleteEvidenceError
+    samples = tuple(
+        CoarseSampleResult(
+            item.requested_time_utc,
+            CoarseSampleStatus.SUCCESS,
+            item.probe_request_id,
+            item.classification,
+        )
+        for item in evidence
+    )
+    support_results: tuple[CoarseSupportResult, ...] = ()
+    support_evidence: tuple[CoarseTargetEvidence, ...] = ()
+    if evidence[-1].classification is ClassificationOutcome.ABSENT:
+        expected = support_target_times(typed_plan, request.end_utc)
+        support = tuple(_target_at(run, target) for target in expected)
+        if any(item is None for item in support):
+            raise Phase7EIncompleteEvidenceError
+        typed_support = tuple(cast("StrictIdentityEnvelope", item) for item in support)
+        confirmation_id = confirmation_run_id_for(typed_plan, request.end_utc, identity)
+        support_evidence = tuple(
+            _coarse_evidence(
+                run,
+                item,
+                origin=request.end_utc,
+                confirmation_id=confirmation_id,
+                identity=identity,
+            )
+            for item in typed_support
+        )
+        support_samples = tuple(
+            CoarseSampleResult(
+                item.requested_time_utc,
+                CoarseSampleStatus.SUCCESS,
+                item.probe_request_id,
+                item.classification,
+            )
+            for item in support_evidence
+        )
+        support_results = (
+            CoarseSupportResult(
+                identity,
+                request.end_utc,
+                confirmation_id,
+                tuple(range(len(support_samples))),
+                support_samples,
+            ),
+        )
+    execution = CoarseSamplingResult(
+        identity,
+        typed_plan,
+        samples,
+        complete=True,
+        support_results=support_results,
+    )
+    return CoarseEvidenceSnapshot(
+        run.investigation_id,
+        run.run_id,
+        identity,
+        typed_plan,
+        policy.policy_version,
+        typed_plan.absence_confirmation_frames,
+        typed_plan.absence_cadence_seconds,
+        baseline_identity,
+        _manifest_digest(run),
+        execution,
+        (initial_evidence, *evidence, *support_evidence),
+        typed_plan.maximum_consecutive_indeterminate_targets,
+        None,
+        initial_evidence,
+    )
+
+
+def _append_analysis_records(
+    repository: RecordingSearch7ERepository,
+    invocation: Phase7EInvocation,
+    records: tuple[StrictIdentityEnvelope, ...],
+) -> Phase7ERun:
+    current = repository.reopen_schema6(
+        invocation.request.investigation_id,
+        invocation.request.run_id,
+        ownership=invocation.ownership,
+    )
+    index_names = {
+        "support-group": "support_group_ids",
+        "c2-bracket": "c2_bracket_ids",
+        "d1-input": "d1_input_ids",
+        "d1-history": "d1_history_ids",
+        "narrowed-bracket": "narrowed_bracket_ids",
+    }
+    existing = {item.identity for item in current.records}
+    additions = tuple(item for item in records if item.identity not in existing)
+    if not additions:
+        return current
+    if not isinstance(current.state, Schema6Envelope):
+        raise Phase7ECorruptError
+    manifest = append_schema6_indexes(
+        current.manifest,
+        **{index_names[item.family]: item.identity for item in additions},
+    )
+    children = tuple(item for item in current.records if item.family != "schema5-manifest")
+    result = repository.admit_schema6(
+        current.investigation_id,
+        current.run_id,
+        manifest,
+        current.state,
+        (*children, *additions),
+        expected_manifest_id=current.manifest_id,
+        ownership=invocation.ownership,
+    ).run
+    invocation.validate(repository)
+    return repository.reopen_schema6(
+        result.investigation_id,
+        result.run_id,
+        ownership=invocation.ownership,
+    )
+
+
+def _persist_c2_bracket(
+    repository: RecordingSearch7ERepository,
+    invocation: Phase7EInvocation,
+    run: Phase7ERun,
+    bracket: CoarseCandidateBracket,
+) -> tuple[Phase7ERun, CoarseCandidateBracket, StrictIdentityEnvelope]:
+    members = tuple(_target_evidence(run, item, item) for item in bracket.support_probe_request_ids)
+    support = StrictIdentityEnvelope.from_payload(
+        "support-group",
+        {
+            "investigation_id": run.investigation_id,
+            "run_id": run.run_id,
+            "origin_target_request_id": str(
+                next(
+                    item.payload["origin_target_request_id"]
+                    for item in run.records
+                    if item.identity == bracket.support_probe_request_ids[0]
+                )
+            ),
+            "member_target_request_ids": [item.probe_request_id for item in members],
+            "member_frame_ids": [item.canonical_frame_id for item in members],
+            "member_observation_ids": [item.observation_id for item in members],
+            "outcome": "SUPPORTED_ABSENT",
+        },
+    )
+    c2_record = StrictIdentityEnvelope.from_payload(
+        "c2-bracket",
+        {
+            "investigation_id": run.investigation_id,
+            "run_id": run.run_id,
+            "lower_observation_id": bracket.last_present_observation_id,
+            "upper_observation_id": bracket.support_observation_ids[0],
+            "upper_support_group_id": support.identity,
+            "status": "BRACKET_READY",
+        },
+    )
+    fresh = _append_analysis_records(repository, invocation, (support, c2_record))
+    return (
+        fresh,
+        replace(
+            bracket,
+            manifest_digest=_manifest_digest(fresh),
+            support_group_id=support.identity,
+        ),
+        c2_record,
+    )
+
+
+def _persist_d1_result(
+    repository: RecordingSearch7ERepository,
+    invocation: Phase7EInvocation,
+    c2_record: StrictIdentityEnvelope,
+    narrowing: NarrowingResult,
+) -> tuple[Phase7ERun, str]:
+    narrowed = narrowing.narrowed_bracket
+    if narrowed is None or not narrowed.upper_support_evidence:
+        raise Phase7EIncompleteEvidenceError
+    run = repository.reopen_schema6(
+        invocation.request.investigation_id,
+        invocation.request.run_id,
+        ownership=invocation.ownership,
+    )
+    support_members = narrowed.upper_support_evidence
+    support = StrictIdentityEnvelope.from_payload(
+        "support-group",
+        {
+            "investigation_id": run.investigation_id,
+            "run_id": run.run_id,
+            "origin_target_request_id": str(support_members[0].probe_request_id),
+            "member_target_request_ids": [item.probe_request_id for item in support_members],
+            "member_frame_ids": [item.canonical_frame_id for item in support_members],
+            "member_observation_ids": [item.observation_id for item in support_members],
+            "outcome": "SUPPORTED_ABSENT",
+        },
+    )
+    d1_input = StrictIdentityEnvelope.from_payload(
+        "d1-input",
+        {
+            "investigation_id": run.investigation_id,
+            "run_id": run.run_id,
+            "c2_bracket_id": c2_record.identity,
+            "policy_id": run.manifest.payload["policy_id"],
+        },
+    )
+    history = StrictIdentityEnvelope.from_payload(
+        "d1-history",
+        {
+            "investigation_id": run.investigation_id,
+            "run_id": run.run_id,
+            "d1_input_id": d1_input.identity,
+            "steps": [entry.to_payload() for entry in narrowing.history],
+        },
+    )
+    stop_reason = {
+        "target_precision_reached": "TARGET_PRECISION_REACHED",
+        "no_distinct_midpoint": "NO_DISTINCT_MIDPOINT",
+        "maximum_iterations": "MAXIMUM_ITERATIONS",
+    }[narrowed.stop_reason.value]
+    record = StrictIdentityEnvelope.from_payload(
+        "narrowed-bracket",
+        {
+            "investigation_id": run.investigation_id,
+            "run_id": run.run_id,
+            "d1_input_id": d1_input.identity,
+            "d1_history_id": history.identity,
+            "lower_observation_id": narrowed.lower_evidence.observation_id,
+            "upper_observation_id": support_members[0].observation_id,
+            "upper_support_group_id": support.identity,
+            "interval_start_requested_time_utc": _whole_text(narrowed.lower_bound_utc),
+            "interval_end_requested_time_utc": _whole_text(narrowed.upper_bound_utc),
+            "stop_reason": stop_reason,
+        },
+    )
+    return _append_analysis_records(
+        repository,
+        invocation,
+        (support, d1_input, history, record),
+    ), support.identity
+
+
+def _build_d2_snapshot(
+    run: Phase7ERun,
+    c2_snapshot: CoarseEvidenceSnapshot,
+    c2_result: object,
+    narrowing: NarrowingResult | None,
+    policy: RecordingSearchPolicy,
+) -> D2EvidenceSnapshot:
+    evidence_manifest_digest = _manifest_digest(run)
+    if narrowing is not None and narrowing.narrowed_bracket is not None:
+        evidence_manifest_digest = narrowing.narrowed_bracket.manifest_digest
+    baseline = D2EvidenceReference(
+        role=D2EvidenceRole.BASELINE,
+        target_id=None,
+        requested_time_utc=c2_snapshot.plan.search_start_utc,
+        acquisition_operation_id=None,
+        probe_request_id=None,
+        classification_operation_id=None,
+        observation_id=c2_snapshot.baseline_observation_id,
+        canonical_frame_id=None,
+        alias_id=None,
+        decode_session_id=None,
+        decoded_frame_utc=None,
+        decoded_pts=None,
+        decoded_ordinal=None,
+        support_group_id=None,
+        support_index=None,
+        is_phase6_baseline=True,
+        classification=ClassificationOutcome.PRESENT,
+    )
+    coarse_refs: list[D2EvidenceReference] = []
+    for item in c2_snapshot.targets:
+        if item.origin_coarse_target_utc is not None or item.is_alias:
+            continue
+        coarse_refs.append(_d2_reference(run, item, D2EvidenceRole.COARSE_TARGET))
+    d1_refs: list[D2EvidenceReference] = []
+    support_refs: list[D2EvidenceReference] = []
+    groups: list[D2SupportGroup] = []
+    bracket = getattr(c2_result, "bracket", None)
+    source_c2 = "phase7e-c2-" + evidence_manifest_digest
+    if isinstance(bracket, CoarseCandidateBracket):
+        source_c2 = source_bracket_identity(bracket)
+        support_items = tuple(
+            next(item for item in c2_snapshot.targets if item.probe_request_id == target_id)
+            for target_id in bracket.support_probe_request_ids
+        )
+        group_id = str(bracket.support_group_id)
+        support_refs.extend(
+            _d2_reference(
+                run,
+                item,
+                D2EvidenceRole.ABSENCE_SUPPORT,
+                support_group_id=group_id,
+                support_index=index,
+            )
+            for index, item in enumerate(support_items)
+        )
+        groups.append(_d2_group(group_id, support_refs[-len(support_items) :], c2_snapshot))
+    source_d1 = source_c2
+    if narrowing is not None and narrowing.narrowed_bracket is not None:
+        narrowed = narrowing.narrowed_bracket
+        source_d1 = narrowed.source_bracket_id
+        used = {item.observation_id for item in (*coarse_refs, *support_refs)}
+        final_observations = {item.observation_id for item in narrowed.upper_support_evidence}
+        for evidence in narrowed.evidence:
+            if (
+                evidence.observation_id in used
+                or evidence.observation_id in final_observations
+                or evidence.alias_id is not None
+            ):
+                continue
+            d1_refs.append(_d2_from_narrowing(evidence, D2EvidenceRole.D1_MIDPOINT))
+            used.add(evidence.observation_id)
+        final_members = narrowed.upper_support_evidence
+        final_group = str(narrowed.upper_support_group_id)
+        final_refs = tuple(
+            _d2_from_bound(
+                run,
+                item,
+                support_group_id=final_group,
+                support_index=index,
+            )
+            for index, item in enumerate(final_members)
+        )
+        support_refs = [
+            item
+            for item in support_refs
+            if item.observation_id not in {x.observation_id for x in final_refs}
+        ]
+        support_refs.extend(final_refs)
+        groups = [item for item in groups if item.support_group_id != final_group]
+        groups.append(_d2_group(final_group, final_refs, c2_snapshot))
+    return D2EvidenceSnapshot(
+        run.investigation_id,
+        run.run_id,
+        run.investigation_id,
+        c2_snapshot.baseline_observation_id,
+        c2_snapshot.plan.plan_id,
+        policy_identity(policy),
+        D2SourceRevision(evidence_manifest_digest, source_c2, source_d1),
+        (baseline, *coarse_refs, *d1_refs, *support_refs),
+        tuple(groups),
+    )
+
+
+def _d2_reference(
+    run: Phase7ERun,
+    value: CoarseTargetEvidence,
+    role: D2EvidenceRole,
+    *,
+    support_group_id: str | None = None,
+    support_index: int | None = None,
+) -> D2EvidenceReference:
+    evidence = _target_evidence(
+        run,
+        str(value.probe_request_id),
+        coarse_target_id(
+            run.investigation_id,
+            run.run_id,
+            value.requested_time_utc,
+        ),
+    )
+    return _d2_from_narrowing(
+        evidence,
+        role,
+        support_group_id=support_group_id,
+        support_index=support_index,
+    )
+
+
+def _d2_from_narrowing(
+    value: NarrowingProbeEvidence,
+    role: D2EvidenceRole,
+    *,
+    support_group_id: str | None = None,
+    support_index: int | None = None,
+) -> D2EvidenceReference:
+    return D2EvidenceReference(
+        role=role,
+        target_id=value.target_id,
+        requested_time_utc=value.requested_time_utc,
+        acquisition_operation_id=value.operation_id,
+        probe_request_id=value.probe_request_id,
+        classification_operation_id=value.classification_operation_id,
+        observation_id=value.observation_id,
+        canonical_frame_id=value.canonical_frame_id,
+        alias_id=value.alias_id,
+        decode_session_id=value.decode_session_id,
+        decoded_frame_utc=value.decoded_frame_utc,
+        decoded_pts=value.decoded_pts,
+        decoded_ordinal=value.decoded_ordinal,
+        support_group_id=support_group_id,
+        support_index=support_index,
+        is_phase6_baseline=False,
+        classification=value.state,
+    )
+
+
+def _d2_from_bound(
+    run: Phase7ERun,
+    value: NarrowingBoundEvidence,
+    *,
+    support_group_id: str,
+    support_index: int,
+) -> D2EvidenceReference:
+    observation = next(
+        (item for item in run.records if item.identity == value.observation_id),
+        None,
+    )
+    if observation is None or observation.family != "observation":
+        raise Phase7ECorruptError
+    return D2EvidenceReference(
+        role=D2EvidenceRole.ABSENCE_SUPPORT,
+        target_id=value.target_id,
+        requested_time_utc=value.requested_time_utc,
+        acquisition_operation_id=value.operation_id,
+        probe_request_id=value.probe_request_id,
+        classification_operation_id=str(observation.payload["classification_operation_id"]),
+        observation_id=value.observation_id,
+        canonical_frame_id=value.canonical_frame_id,
+        alias_id=None,
+        decode_session_id=value.decode_session_id,
+        decoded_frame_utc=value.decoded_frame_utc,
+        decoded_pts=value.decoded_pts,
+        decoded_ordinal=value.decoded_ordinal,
+        support_group_id=support_group_id,
+        support_index=support_index,
+        is_phase6_baseline=False,
+        classification=value.state,
+    )
+
+
+def _d2_group(
+    group_id: str,
+    members: tuple[D2EvidenceReference, ...] | list[D2EvidenceReference],
+    snapshot: CoarseEvidenceSnapshot,
+) -> D2SupportGroup:
+    values = tuple(members)
+    return D2SupportGroup(
+        group_id,
+        str(values[0].target_id),
+        len(values),
+        snapshot.absence_cadence_seconds,
+        str(values[0].decode_session_id),
+        tuple(str(item.target_id) for item in values),
+        tuple(str(item.observation_id) for item in values),
+        tuple(str(item.canonical_frame_id) for item in values),
+    )
+
+
+def _synthetic_probe_request(
+    handle: _Phase7ENarrowingHandle,
+    target: StrictIdentityEnvelope,
+) -> ProbeFrameRequestRecord:
+    evidence = _target_evidence(_strict_schema6(handle), target.identity, target.identity)
+    return ProbeFrameRequestRecord.model_construct(
+        record_type="probe_frame_request",
+        probe_request_id=target.identity,
+        investigation_id=handle.investigation_id,
+        search_run_id=handle.search_run_id,
+        operation_id=str(evidence.operation_id),
+        channel_id=handle.invocation.request.channel_id,
+        requested_time_utc=evidence.requested_time_utc,
+        status=ProbeRequestStatus.SUCCEEDED,
+        canonical_frame_id=evidence.canonical_frame_id,
+        alias_of_probe_request_id=evidence.alias_id,
+        failure_reason=None,
+        created_at_utc=evidence.requested_time_utc,
+        completed_at_utc=evidence.requested_time_utc,
+    )
+
+
+def _strict_schema6(handle: _Phase7ENarrowingHandle) -> Phase7ERun:
+    handle.invocation.validate(handle.local_evidence.repository)
+    return handle.local_evidence.repository.reopen_schema6(
+        handle.investigation_id,
+        handle.search_run_id,
+        ownership=handle.invocation.ownership,
+    )
+
+
+def _require_same_handle(
+    expected: _Phase7ENarrowingHandle,
+    actual: _Phase7ENarrowingHandle,
+) -> None:
+    if actual is not expected:
+        raise Phase7EAdapterError
+
+
+def _manifest_digest(run: Phase7ERun) -> str:
+    digest = run.manifest_id.rsplit("-", 1)[-1]
+    if len(digest) != _DIGEST_HEX_LENGTH:
+        raise Phase7ECorruptError
+    return digest
+
+
+def _operation_check(
+    invocation: Phase7EInvocation,
+    timeout_seconds: float,
+) -> Callable[[], None]:
+    deadline = invocation.budget.monotonic_clock() + timeout_seconds
+
+    def check() -> None:
+        invocation.validate(invocation.ownership.repository)
+        if invocation.budget.monotonic_clock() >= deadline:
+            raise CommonSessionDeadlineError
+
+    return check
+
+
+def _lazy_operation_check(
+    invocation: Phase7EInvocation,
+    ceiling_seconds: float,
+) -> Callable[[], None]:
+    active: Callable[[], None] | None = None
+
+    def check() -> None:
+        nonlocal active
+        if active is None:
+            timeout = invocation.budget.operation_timeout(
+                ceiling_seconds,
+                minimum_start_seconds=0.001,
+            )
+            active = _operation_check(invocation, timeout)
+        active()
+
+    return check
+
+
 @dataclass(frozen=True, slots=True)
 class Phase7E1DService:
     """Strict Schema-6 reconstruction, D2 interpretation, and Schema-7 commit."""
 
     repository: RecordingSearch7ERepository
     decision_boundary: TerminalDecisionBoundary = Phase7ED2DecisionAdapter()
+    local_evidence: Phase7ELocalEvidenceAdapter | None = None
 
     def execute(
         self,
         invocation: Phase7EInvocation,
+        acquisition: CommonSessionAcquisition | None = None,
     ) -> PublicationResult:
         """Terminalize one owned run and strictly reopen the immutable winner."""
         invocation.validate(self.repository)
@@ -414,26 +1555,41 @@ class Phase7E1DService:
         if not current.is_schema6:
             raise Phase7EIncompleteEvidenceError
         run = current
-        _ = invocation.budget.operation_timeout(
+        indexes = run.manifest.payload["indexes"]
+        if not indexes["narrowed_bracket_ids"] and (
+            acquisition is not None or self.local_evidence is not None
+        ):
+            if acquisition is None or self.local_evidence is None:
+                raise Phase7EIncompleteEvidenceError
+            run = Phase7EAdaptiveOrchestrator(
+                self.repository,
+                self.local_evidence,
+            ).execute(invocation, acquisition)
+        interpretation_timeout = invocation.budget.operation_timeout(
             invocation.request.policy.terminal_interpretation_seconds,
             minimum_start_seconds=0.001,
         )
+        interpretation_check = _operation_check(invocation, interpretation_timeout)
+        interpretation_check()
         decision = self.decision_boundary.interpret(run)
+        interpretation_check()
         invocation.validate(self.repository)
         invocation.budget.check()
         source_set = build_source_record_set(run)
         snapshot = build_evidence_snapshot(run, source_set, decision)
         terminal = build_terminal_result(run, source_set, snapshot, decision)
         manifest = build_schema7_manifest(run, source_set, snapshot, terminal)
-        _ = invocation.budget.operation_timeout(
+        publication_timeout = invocation.budget.operation_timeout(
             invocation.request.policy.publication_seconds,
             minimum_start_seconds=0.001,
+            downstream_reserve_seconds=invocation.request.policy.strict_readback_seconds,
         )
-        _ = invocation.budget.operation_timeout(
+        publication_check = _operation_check(invocation, publication_timeout)
+        readback_check = _lazy_operation_check(
+            invocation,
             invocation.request.policy.strict_readback_seconds,
-            minimum_start_seconds=0.001,
         )
-        published = self.repository.publish_schema7(
+        return self.repository.publish_schema7(
             run.investigation_id,
             run.run_id,
             manifest,
@@ -442,13 +1598,9 @@ class Phase7E1DService:
             terminal,
             expected_schema6_manifest_id=run.manifest_id,
             ownership=invocation.ownership,
+            publication_check=publication_check,
+            readback_check=readback_check,
         )
-        _ = self.repository.reopen_schema7(
-            run.investigation_id,
-            run.run_id,
-            ownership=invocation.ownership,
-        )
-        return published
 
 
 def build_source_record_set(run: Phase7ERun) -> StrictIdentityEnvelope:
@@ -569,7 +1721,9 @@ def read_phase7_status(
 ) -> Phase7EStatus:
     """Return a safe status derived only from strict repository reopen."""
     try:
-        run = repository.reopen_current(investigation_id, run_id)
+        run = repository.inspect_current_read_only(investigation_id, run_id)
+    except Phase7EInProgressError:
+        return Phase7EStatus(investigation_id, run_id, 0, "RUNNING", None, None)
     except Phase7ENotFoundError:
         return Phase7EStatus(investigation_id, run_id, 0, "UNAVAILABLE", None, None)
     except Phase7ECorruptError:

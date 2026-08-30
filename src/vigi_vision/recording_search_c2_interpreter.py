@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from vigi_vision.object_presence_values import ClassificationOutcome
 from vigi_vision.recording_search_c1_models import CoarseSampleStatus
+from vigi_vision.recording_search_c1_planner import SupportDirection
 from vigi_vision.recording_search_c2_models import (
     CoarseCandidateBracket,
     CoarseEvidenceSnapshot,
@@ -162,7 +163,12 @@ def _process_success(
     target: CoarseTargetEvidence,
     last_present: CoarseTargetEvidence | None,
 ) -> _TargetStep:
-    if target.is_alias:
+    backward_logical_end = (
+        context.snapshot.plan.support_direction is SupportDirection.BACKWARD_FROM_END
+        and target.requested_time_utc == context.snapshot.plan.search_end_utc
+        and target.classification is ClassificationOutcome.ABSENT
+    )
+    if target.is_alias and not backward_logical_end:
         return _TargetStep(last_present, unusable=False)
     if target.classification is None:
         return _TargetStep(last_present, unusable=True)
@@ -203,6 +209,8 @@ def _process_absent(
 
 
 def _baseline_evidence(snapshot: CoarseEvidenceSnapshot) -> CoarseTargetEvidence | None:
+    if snapshot.initial_present_evidence is not None:
+        return snapshot.initial_present_evidence
     if snapshot.baseline_requested_time_utc is None:
         return None
     return CoarseTargetEvidence(

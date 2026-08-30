@@ -271,11 +271,14 @@ the policy `support_cadence_seconds`; comparison uses exact rational ticks and
 the inclusive bound. This derived one-second default is the decoder-alignment
 tolerance and is not an independently configurable or implicit default.
 
-For a normal target `t`, absence support requests
-`[t,t+cadence,...]`. For the end-boundary target, support is the final
-backward-safe sequence
-`[E-support_count*cadence,...,E-cadence]`; its last canonical frame is also the
-end target's selected frame. Requested times are never clamped. If a short
+The shared C1/C2 support policy has a closed direction mode. `FORWARD` is the
+default and preserves the existing C1/C2 request sequence
+`[t,t+cadence,...]`, validation, and identity behavior. Phase 7E explicitly
+uses `BACKWARD_FROM_END`; for logical end `E`, support is the backward-safe
+sequence `[E-support_count*cadence,...,E-cadence]`. Every member is strictly
+inside `[S,E)`, and the last canonical support frame is also selected for the
+logical end through an alias. Neither `E` nor a target after `E` is requested
+or persisted as support. Requested times are never clamped. If a short
 window places a support request before `S`, or sparse media cannot provide every
 requested member within that exact decoder-alignment tolerance, the group is
 `insufficient_support`. Support beyond `E`, a touching segment, or a frame at
@@ -287,15 +290,25 @@ existing frame/observation for ordinary reuse, but an aliased member never
 counts twice. A recording gap, duplicate content, reset, decode failure, or
 missing member supplies no `ABSENT` evidence.
 
-This is a new Phase 7E-specific adapter; it does not alter the existing C1
-implementation, schemas 1–4, or Phase 7D behavior. Slice 7E-1C owns the
+The direction mode extends the shared C1/C2 typed input instead of creating a
+parallel implementation. Omitting it selects `FORWARD`, so schemas 1–4 and
+Phase 7D retain their existing behavior and identities. A backward confirmation
+identity binds the explicit direction; the request-relative schemas 5–7
+identity payloads and the 59 golden vectors are unchanged. Slice 7E-1C owns the
 same-session decoded-frame selector, exact rational target-to-frame mapping,
 logical-`E` strict-before rule, distance/tie rules, and duplicate/alias
 rejection. Slice 7E-1D owns the Phase 7E C1 planner/composition adapter: include
 `S`, append logical `E`, build backward final support
-`[E-count×cadence,...,E-cadence]`, never invoke legacy forward final support,
+`[E-count×cadence,...,E-cadence]` through `BACKWARD_FROM_END`, never invoke
+forward final support for Phase 7E,
 and translate missing/sparse/duplicate/aliased/out-of-range support to
 `insufficient_support` or `duplicate_frame` without clamping.
+
+Phase 7E supplies the classified in-session `S` observation to C2 as the
+initial PRESENT lower-bound evidence. The Phase 6 baseline remains identity
+context only and cannot establish FOUND by itself. Backward support is admitted
+before logical `E`, so its distinct members remain canonical and logical `E`
+reuses `E-cadence` as an alias; that alias never adds another confirmation.
 
 With cadence one second and support count three, the deterministic examples are:
 
@@ -306,7 +319,7 @@ With cadence one second and support count three, the deterministic examples are:
 | `[00,04)`, no eligible frame before `04` | logical `04` is unavailable; no terminal ABSENT |
 | `[00,04)`, only frames `00,03` | `[01,02,03]` cannot all resolve within tolerance to distinct frames; reject sparse support |
 | `[00,04)`, targets `02` and `03` both select frame `03` | duplicate frame/RGB24 identity; neither supplies two confirmations |
-| `[00,04)`, support alias maps `03` to the logical-end observation | alias is useful for reuse but counts once; group remains insufficient |
+| `[00,04)`, support frames `01,02,03`; logical `04` aliases frame `03` | support has three distinct physical frames and is sufficient; the logical-end alias adds no fourth confirmation |
 | `[00,03)`, frames `00,01,02` | requested support `[00,01,02]` contains three distinct frames and is sufficient; otherwise reject, never reduce the required count |
 
 ### Canonical identities and B4 evidence
@@ -1097,7 +1110,7 @@ with the separate Phase 8 status.
 | 7E-1A | All request-relative models, closed enums, search/classifier/media policies, 26 identity families and golden vectors, schema dispatch, exact schema-5/6 state matrices, and pure validators. No persistence, NVR, classifier, or CLI. |
 | 7E-1B | Schema-5 pre-acquisition publication, schema-5→6 zero-evidence transition, incremental schema-6 manifests/children, strict reopen, staging and interruption handling. No NVR acquisition. |
 | 7E-1C | One replay/remux, `.media` ownership, ffprobe, common session, sparse/adaptive local decoding, the Phase 7E same-session selector (including logical-E strict-before mapping and duplicate/alias rejection), RGB24, persisted-frame A2/B4 adapters, and deadline propagation. |
-| 7E-1D | The new Phase 7E C1 planner/composition adapter (`S` inclusion, logical `E`, backward final support, no clamp), C2/D1/D2 composition, complete source reconstruction, schema-7 atomic publication/reopen, and Phase 7 public status. It does not modify legacy C1/schemas 1–4 and performs no Phase 8 mutation. |
+| 7E-1D | The Phase 7E C1 planner/composition adapter (`S` inclusion, logical `E`, explicit shared `BACKWARD_FROM_END` support mode, no clamp), C2/D1/D2 composition, complete source reconstruction, schema-7 atomic publication/reopen, and Phase 7 public status. Shared C1/C2 defaults to legacy `FORWARD`, schemas 1–4 remain unchanged, and this slice performs no Phase 8 mutation. |
 | 7E-2 | Synchronous CLI, POST 503, cleanup reserve, separate Phase 8 clip/request/retry repository, status join, and deletion command. |
 | 7E-3 | Bounded real-NVR acceptance and local fault injection only after 1A–2 approval. |
 

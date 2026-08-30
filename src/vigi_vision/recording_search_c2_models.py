@@ -132,6 +132,7 @@ class _CoarseEvidenceSnapshot:
     targets: tuple[CoarseTargetEvidence, ...]
     maximum_consecutive_indeterminate_targets: int = 3
     baseline_requested_time_utc: datetime | None = None
+    initial_present_evidence: CoarseTargetEvidence | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -170,6 +171,17 @@ class _CoarseEvidenceSnapshot:
             _require_whole_utc(self.baseline_requested_time_utc)
             if self.baseline_requested_time_utc != self.plan.search_start_utc:
                 raise ValueError
+        initial = self.initial_present_evidence
+        if initial is not None and (
+            initial not in self.targets
+            or initial.requested_time_utc != self.plan.search_start_utc
+            or initial.status is not CoarseSampleStatus.SUCCESS
+            or initial.classification is not ClassificationOutcome.PRESENT
+            or initial.is_alias
+            or initial.is_baseline
+            or initial.origin_coarse_target_utc is not None
+        ):
+            raise ValueError
 
 
 @dataclass(frozen=True, slots=True)
