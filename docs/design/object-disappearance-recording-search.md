@@ -185,8 +185,10 @@ zero observations. Probe, media, or archive admission failure leaves schema 5
 
 Schema 6 admits evidence incrementally in this exact production order:
 
-1. Admit one target request and decoder-operation intent in a successor
-   manifest.
+1. Admit the complete deterministic batch of target requests referenced by the
+   next decoder operation, then admit that decoder-operation intent in a
+   successor manifest. Every referenced target is strictly reopened before the
+   decoder operation is admitted.
 2. Decode only from the admitted common MP4.
 3. Atomically persist the frame record and JPEG, strictly reopen them, verify
    JPEG bytes/dimensions/RGB24, then index the frame in a successor manifest.

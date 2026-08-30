@@ -100,7 +100,7 @@ from vigi_vision.recording_search_d2_terminal_models import (
 from vigi_vision.recording_search_models import RecordingSearchPolicy, default_policy
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator
+    from collections.abc import Callable, Generator, Sequence
 
     from vigi_vision.recording_search_b3_models import ClassifyRecordingProbeRequest
 
@@ -194,6 +194,7 @@ class Phase7ELocalEvidenceAdapter:
             raise Phase7EAdapterError
         session_id = acquisition.common_session_id
         pending: list[StrictIdentityEnvelope] = []
+        pending_by_identity: dict[str, StrictIdentityEnvelope] = {}
         for target in targets:
             invocation.validate(self.repository)
             current = self.repository.reopen_schema6(
@@ -203,9 +204,25 @@ class Phase7ELocalEvidenceAdapter:
             )
             if current.manifest.payload.get("common_session_id") != session_id:
                 raise Phase7EAdapterError
+            existing = next(
+                (
+                    item
+                    for item in current.records
+                    if item.family == "target-request" and item.identity == target.identity
+                ),
+                None,
+            )
+            if existing is not None and existing != target:
+                raise Phase7EAdapterError
             if _target_is_admitted(current, target.identity):
                 continue
             _validate_target_for_session(current, target, invocation.request)
+            previous = pending_by_identity.get(target.identity)
+            if previous is not None:
+                if previous != target:
+                    raise Phase7EAdapterError
+                continue
+            pending_by_identity[target.identity] = target
             pending.append(target)
         if not pending:
             return self.repository.reopen_schema6(
@@ -230,6 +247,18 @@ class Phase7ELocalEvidenceAdapter:
             ),
             allow_aliases=True,
             budget=invocation.budget,
+        )
+        current = self.repository.reopen_schema6(
+            invocation.request.investigation_id,
+            invocation.request.run_id,
+            ownership=invocation.ownership,
+        )
+        current = _request_schema6_targets(
+            self.repository,
+            invocation,
+            current,
+            pending,
+            session_id=session_id,
         )
         decoder_operation = make_decoder_envelope(
             acquisition,
@@ -1781,7 +1810,15 @@ def _validate_target_for_session(
         or target.payload.get("plan_id") != run.manifest.payload.get("plan_id")
     ):
         raise Phase7EAdapterError
-    requested = _parse_whole_text(str(target.payload.get("requested_time_utc")))
+    try:
+        requested = _parse_whole_text(str(target.payload.get("requested_time_utc")))
+    except (TypeError, ValueError) as exc:
+        raise Phase7EAdapterError from exc
+    sequence = target.payload.get("sequence")
+    if type(sequence) is not int or sequence < 0:
+        raise Phase7EAdapterError
+    if target.payload.get("kind") not in {"COARSE", "SUPPORT", "BINARY"}:
+        raise Phase7EAdapterError
     logical_end = target.payload.get("selection_rule") == "FINAL_STRICTLY_BEFORE_END"
     if requested < request.start_utc or requested > request.end_utc:
         raise Phase7EAdapterError
@@ -1844,6 +1881,135 @@ def _request_schema6_target(
         expected_manifest_id=current.manifest_id,
         ownership=invocation.ownership,
     ).run
+
+
+def _request_schema6_targets(  # noqa: PLR0912
+    repository: RecordingSearch7ERepository,
+    invocation: Phase7EInvocation,
+    current: Phase7ERun,
+    targets: Sequence[StrictIdentityEnvelope],
+    *,
+    session_id: str,
+) -> Phase7ERun:
+    """Admit and strictly reopen every target before a decoder operation."""
+    if not isinstance(current.state, Schema6Envelope):
+        raise Phase7EAdapterError
+    if current.manifest.payload.get("common_session_id") != session_id:
+        raise Phase7EAdapterError
+    ordered = tuple(sorted(targets, key=_target_sort_key))
+    if not ordered or len({item.identity for item in ordered}) != len(ordered):
+        raise Phase7EAdapterError
+    if len(ordered) > invocation.request.policy.maximum_targets_per_decoder_pass:
+        raise Phase7EAdapterError
+    for target in ordered:
+        _validate_target_for_session(current, target, invocation.request)
+    _validate_target_batch(ordered, current)
+
+    records_by_id = {
+        item.identity: item for item in current.records if item.family == "target-request"
+    }
+    indexes = current.manifest.payload["indexes"]["target_request_ids"]
+    missing: list[StrictIdentityEnvelope] = []
+    for target in ordered:
+        existing = records_by_id.get(target.identity)
+        if existing is not None and existing != target:
+            raise Phase7EAdapterError
+        if target.identity not in indexes:
+            missing.append(target)
+        elif existing is None:
+            raise Phase7ECorruptError
+
+    if current.state.target_state is Schema6TargetState.REQUESTED:
+        if missing:
+            raise Phase7EAdapterError
+        if current.state.active_target_request_id not in {item.identity for item in ordered}:
+            raise Phase7EAdapterError
+        reopened = current
+    elif current.state.target_state is Schema6TargetState.OBSERVED:
+        if missing:
+            manifest = current.manifest
+            for target in missing:
+                manifest = append_schema6_indexes(manifest, target_request_ids=target.identity)
+            records = tuple(item for item in current.records if item.family != "schema5-manifest")
+            records = (*records, *missing)
+            state = Schema6Envelope(
+                run_state="RUNNING",
+                target_state=Schema6TargetState.REQUESTED,
+                active_target_request_id=ordered[0].identity,
+                active_decoder_operation_id=None,
+                active_frame_id=None,
+                active_classification_attempt_id=None,
+                active_classification_operation_id=None,
+                active_observation_id=None,
+                reason_code=None,
+                attempt_count=0,
+                predecessor_target_state=Schema6TargetState.OBSERVED,
+            )
+            reopened = repository.admit_schema6(
+                current.investigation_id,
+                current.run_id,
+                manifest,
+                state,
+                records,
+                expected_manifest_id=current.manifest_id,
+                ownership=invocation.ownership,
+            ).run
+        else:
+            reopened = current
+    else:
+        raise Phase7EAdapterError
+
+    reopened_targets = {
+        item.identity: item for item in reopened.records if item.family == "target-request"
+    }
+    reopened_ids = set(reopened.manifest.payload["indexes"]["target_request_ids"])
+    for target in ordered:
+        if target.identity not in reopened_ids or reopened_targets.get(target.identity) != target:
+            raise Phase7ECorruptError
+    return reopened
+
+
+def _target_sort_key(target: StrictIdentityEnvelope) -> tuple[str, int, str]:
+    """Return the deterministic decoder order for one target request."""
+    sequence = target.payload.get("sequence")
+    if type(sequence) is not int or sequence < 0:
+        raise Phase7EAdapterError
+    return str(target.payload.get("requested_time_utc")), sequence, target.identity
+
+
+def _validate_target_batch(
+    targets: Sequence[StrictIdentityEnvelope],
+    current: Phase7ERun,
+) -> None:
+    """Validate closed support/logical-end ordering before admission."""
+    logical_end = tuple(
+        target
+        for target in targets
+        if target.payload.get("selection_rule") == "FINAL_STRICTLY_BEFORE_END"
+    )
+    if len(logical_end) > 1:
+        raise Phase7EAdapterError
+    support = tuple(target for target in targets if target.payload.get("kind") == "SUPPORT")
+    support_times = tuple(str(target.payload["requested_time_utc"]) for target in support)
+    if len(set(support_times)) != len(support_times) or support_times != tuple(
+        sorted(support_times)
+    ):
+        raise Phase7EAdapterError
+    if support:
+        origins = [target.payload.get("origin_target_request_id") for target in support]
+        if any(type(origin) is not str or not origin for origin in origins):
+            raise Phase7EAdapterError
+        if len(set(origins)) != 1:
+            raise Phase7EAdapterError
+        origin = origins[0]
+        known_targets = {
+            item.identity for item in current.records if item.family == "target-request"
+        }
+        if origin not in known_targets and not any(item.identity == origin for item in targets):
+            raise Phase7EAdapterError
+    for target in logical_end:
+        if target.payload.get("kind") not in {"COARSE", "BINARY"}:
+            raise Phase7EAdapterError
 
 
 def _find_frame_alias(

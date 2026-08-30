@@ -7,14 +7,15 @@ import base64
 import json
 import re
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from vigi_vision.recording_models import RecordingSegment, RecordingWindow, ReplayRequest
 from vigi_vision.recording_search_7e_1c import (
+    CommonSessionAcquirer,
     CommonSessionAcquisition,
     CommonSessionCancelledError,
     CommonSessionDeadlineError,
@@ -24,6 +25,7 @@ from vigi_vision.recording_search_7e_1c import (
     DecodedLocalFrame,
     InvocationBudget,
     MediaProbeFacts,
+    Phase7E1CExecutor,
     Phase7EB4Input,
     Phase7EInvocation,
     execute_local_targets,
@@ -1089,6 +1091,112 @@ def test_1d_runs_real_c1_c2_d1_d2_path_from_retained_common_session(
     terminal = next(item for item in reopened.records if item.family == "terminal-result")
     assert terminal.payload["interval_start_requested_time_utc"] == "2026-07-20T03:00:00Z"
     assert terminal.payload["interval_end_requested_time_utc"] == "2026-07-20T03:00:01Z"
+
+
+def test_1d_from_actual_1c_output_admits_all_decoder_target_dependencies(
+    tmp_path: Path,
+) -> None:
+    """Start at 1C's real zero-evidence state, not a terminal-ready fixture."""
+    vectors = _vectors()
+    by_family = {item["family"]: item for item in vectors}
+    policy_record = _envelope(by_family["policy"])
+    policy = CommonSessionPolicy.from_payload(policy_record.payload)
+    request = CommonSessionRequest.from_start_and_duration(
+        "inv-01",
+        "run-01",
+        1,
+        _utc("2026-07-20T03:00:00Z"),
+        duration_seconds=4,
+        policy=policy,
+    )
+    schema5 = _envelope(by_family["schema5-manifest"])
+    plan = _envelope(by_family["coarse-plan"])
+    target_ids = tuple(schema5.payload["coarse_target_request_ids"])
+    target_by_id = {
+        item["expected_id"]: _envelope(item)
+        for item in vectors
+        if item["family"] == "target-request"
+    }
+    targets = tuple(target_by_id[item] for item in target_ids)
+    classifier_policy = _envelope(by_family["classifier-policy"])
+    start = request.start_utc
+    segment = RecordingSegment(
+        1,
+        date(2026, 7, 20),
+        int(start.timestamp()),
+        int((start + timedelta(seconds=30)).timestamp()),
+        start,
+        start + timedelta(seconds=30),
+    )
+    replay_path = tmp_path / "replay.mp4"
+
+    class Planner:
+        def find_segments_for_window(self, window: RecordingWindow) -> tuple[RecordingSegment, ...]:
+            _ = window
+            return (segment,)
+
+        def plan_for_segment(
+            self, segment: RecordingSegment, window: RecordingWindow
+        ) -> ReplayRequest:
+            _ = segment
+            return ReplayRequest(window, "rtsp://redacted.example/replay")
+
+    class Extractor:
+        def extract(self, replay_request: ReplayRequest) -> ReplayClip:
+            replay_path.write_bytes(b"one-retained-session")
+            return ReplayClip(
+                replay_request.window.channel_id,
+                replay_request.window.start_utc,
+                replay_request.window.end_utc,
+                replay_request.replay_url,
+                replay_path,
+                replay_request.window.duration_seconds,
+            )
+
+    class Probe:
+        def probe(self, path: Path, timeout_seconds: float) -> MediaProbeFacts:
+            _ = (path, timeout_seconds)
+            return MediaProbeFacts(
+                selected_video_stream_index=0,
+                video_stream_count=1,
+                audio_stream_count=0,
+                container_start_pts=0,
+                time_base_num=1,
+                time_base_den=1,
+                duration_ticks=4,
+                codec="h264",
+                profile="High",
+                pixel_format="yuv420p",
+                width=8,
+                height=8,
+                average_frame_rate_num=1,
+                average_frame_rate_den=1,
+            )
+
+    repository = RecordingSearch7ERepository(tmp_path / "runs", lock_timeout_seconds=0)
+    acquirer = CommonSessionAcquirer(cast("Any", Planner()), Extractor(), Probe())
+    executor = Phase7E1CExecutor(repository, acquirer)
+    admission = executor.execute(
+        request,
+        schema5,
+        (policy_record, plan, *targets),
+        classifier_policy,
+        targets,
+    )
+    initial = admission.run
+    assert initial.is_schema6
+    assert set(initial.manifest.payload["indexes"]["target_request_ids"]) == set(target_ids)
+    assert initial.manifest.payload["indexes"]["decoder_operation_ids"] == []
+
+    adapter = Phase7ELocalEvidenceAdapter(repository, _TimelineDecoder(), _TimelineClassifier())
+    with executor.invocation(request) as invocation:
+        result = Phase7E1DService(repository, local_evidence=adapter).execute(
+            invocation,
+            admission.acquisition,
+        )
+
+    assert result.run.is_schema7
+    assert result.run.result_kind == "FOUND"
 
 
 class _MismatchedAliasDecoder:
