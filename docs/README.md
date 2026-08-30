@@ -17,6 +17,11 @@ documentation route is added, removed, or relocated.
 - **Architecture — `architecture/`:** implemented system boundaries, component
   relationships, and runtime data flow. Read when changing cross-component
   structure.
+- **Development — `development/`:** mandatory implementation and review
+  workflow. Read
+  [development/implementation-review-gates.md](development/implementation-review-gates.md)
+  before implementation or correction work, and when reviewing whether a
+  claimed production path is actually proven.
 - **Design — `design/`:** user-visible behavior, workflows, and concrete feature
   contracts. Read when implementing or revising a product experience. The
   implemented pure multi-camera planning contract is in

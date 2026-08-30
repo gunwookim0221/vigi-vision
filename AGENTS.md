@@ -28,6 +28,38 @@ become stale. Completed work must not remain described as future work.
   `docs/integrations/sdk-change-requests/`; do not work around the boundary by
   moving AI logic into the SDK.
 
+## Implementation and review gates
+
+The mandatory project-wide implementation and review workflow is in
+[docs/development/implementation-review-gates.md](docs/development/implementation-review-gates.md).
+Before editing, an implementation agent must:
+
+1. Read every applicable `AGENTS.md` and every routed authoritative contract.
+2. Establish repository, branch, ancestry, worktree, index, and Git-operation
+   preconditions.
+3. Identify the exact predecessor production artifact or state and required
+   successor state.
+4. Trace the intended production call path before implementation.
+5. Check that the requested composition is supported by existing contracts and
+   typed boundaries.
+6. Stop before editing when a contract conflict requires an unapproved
+   semantic, schema, or identity decision.
+7. Never invent a parallel algorithm to bypass an incompatible approved
+   boundary.
+8. For a demonstrated defect or missing path, add a deterministic test from the
+   real predecessor boundary and prove the expected failure before correction.
+9. Never treat a manually fabricated terminal-ready state as proof of an
+   end-to-end production path.
+10. Persist and strictly reopen evidence at every required boundary.
+11. Run focused, related, full, static, documentation, and diff validation for
+    the affected scope.
+12. Perform a pre-commit self-review using the independent review's
+    BLOCKER/MAJOR criteria.
+13. Commit and push only when required gates pass and no contract conflict
+    remains.
+14. Preserve unrelated user changes and never weaken tests to hide failures.
+15. Keep implementation, correction, review, and later-phase scopes separate.
+
 ## Documentation policy
 
 Documentation maintenance is part of feature completion.
