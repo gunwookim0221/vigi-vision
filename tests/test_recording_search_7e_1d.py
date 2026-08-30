@@ -20,6 +20,7 @@ from vigi_vision.recording_search_7e_1c import (
     CommonSessionCancelledError,
     CommonSessionDeadlineError,
     CommonSessionDecoderError,
+    CommonSessionDecoderTimeoutError,
     CommonSessionPolicy,
     CommonSessionRequest,
     DecodedLocalFrame,
@@ -28,7 +29,9 @@ from vigi_vision.recording_search_7e_1c import (
     Phase7E1CExecutor,
     Phase7EB4Input,
     Phase7EInvocation,
+    admit_decoder_operation,
     execute_local_targets,
+    make_decoder_envelope,
 )
 from vigi_vision.recording_search_7e_1d import (
     Phase7E1DService,
@@ -57,6 +60,7 @@ from vigi_vision.recording_search_7e_repository import (
     RecordingSearch7ERepository,
 )
 from vigi_vision.recording_search_7e_validation import Schema5Envelope, Schema6Envelope
+from vigi_vision.recording_search_d1_models import NarrowingResult
 from vigi_vision.recording_search_d1_service import BinaryNarrowingService
 from vigi_vision.recording_search_d2_terminal_models import TerminalResultKind
 from vigi_vision.replay import ReplayClip
@@ -845,6 +849,9 @@ class _TimelineDecoder:
 
 
 class _TimelineClassifier:
+    def __init__(self, present_times: set[str] | None = None) -> None:
+        self.present_times: set[str] = present_times or {"2026-07-20T03:00:00Z"}
+
     def classify(self, authoritative: Phase7EB4Input) -> object:
         assert authoritative.frame_record in authoritative.run.records
         assert (
@@ -853,7 +860,7 @@ class _TimelineClassifier:
         )
         outcome = (
             "PRESENT"
-            if authoritative.target_request.payload["requested_time_utc"] == "2026-07-20T03:00:00Z"
+            if authoritative.target_request.payload["requested_time_utc"] in self.present_times
             else "ABSENT"
         )
         template = next(
@@ -1093,8 +1100,9 @@ def test_1d_runs_real_c1_c2_d1_d2_path_from_retained_common_session(
     assert terminal.payload["interval_end_requested_time_utc"] == "2026-07-20T03:00:01Z"
 
 
-def test_1d_from_actual_1c_output_admits_all_decoder_target_dependencies(
+def test_1d_from_actual_1c_output_admits_all_decoder_target_dependencies(  # noqa: PLR0915
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Start at 1C's real zero-evidence state, not a terminal-ready fixture."""
     vectors = _vectors()
@@ -1106,18 +1114,23 @@ def test_1d_from_actual_1c_output_admits_all_decoder_target_dependencies(
         "run-01",
         1,
         _utc("2026-07-20T03:00:00Z"),
-        duration_seconds=4,
+        duration_seconds=5,
         policy=policy,
     )
-    schema5 = _envelope(by_family["schema5-manifest"])
-    plan = _envelope(by_family["coarse-plan"])
-    target_ids = tuple(schema5.payload["coarse_target_request_ids"])
-    target_by_id = {
-        item["expected_id"]: _envelope(item)
-        for item in vectors
-        if item["family"] == "target-request"
-    }
-    targets = tuple(target_by_id[item] for item in target_ids)
+    planned = Phase7EC1PlannerAdapter().build(request, policy_record)
+    plan = planned.plan
+    targets = planned.coarse_targets
+    target_ids = tuple(item.identity for item in targets)
+    schema5_template = _envelope(by_family["schema5-manifest"])
+    schema5 = StrictIdentityEnvelope.from_payload(
+        "schema5-manifest",
+        {
+            **schema5_template.payload,
+            "policy_id": policy_record.identity,
+            "plan_id": plan.identity,
+            "coarse_target_request_ids": list(target_ids),
+        },
+    )
     classifier_policy = _envelope(by_family["classifier-policy"])
     start = request.start_utc
     segment = RecordingSegment(
@@ -1129,6 +1142,7 @@ def test_1d_from_actual_1c_output_admits_all_decoder_target_dependencies(
         start + timedelta(seconds=30),
     )
     replay_path = tmp_path / "replay.mp4"
+    replay_calls = 0
 
     class Planner:
         def find_segments_for_window(self, window: RecordingWindow) -> tuple[RecordingSegment, ...]:
@@ -1143,6 +1157,8 @@ def test_1d_from_actual_1c_output_admits_all_decoder_target_dependencies(
 
     class Extractor:
         def extract(self, replay_request: ReplayRequest) -> ReplayClip:
+            nonlocal replay_calls
+            replay_calls += 1
             replay_path.write_bytes(b"one-retained-session")
             return ReplayClip(
                 replay_request.window.channel_id,
@@ -1163,7 +1179,7 @@ def test_1d_from_actual_1c_output_admits_all_decoder_target_dependencies(
                 container_start_pts=0,
                 time_base_num=1,
                 time_base_den=1,
-                duration_ticks=4,
+                duration_ticks=5,
                 codec="h264",
                 profile="High",
                 pixel_format="yuv420p",
@@ -1188,7 +1204,53 @@ def test_1d_from_actual_1c_output_admits_all_decoder_target_dependencies(
     assert set(initial.manifest.payload["indexes"]["target_request_ids"]) == set(target_ids)
     assert initial.manifest.payload["indexes"]["decoder_operation_ids"] == []
 
-    adapter = Phase7ELocalEvidenceAdapter(repository, _TimelineDecoder(), _TimelineClassifier())
+    events: list[str] = []
+    original_admit_schema6 = repository.admit_schema6
+
+    def traced_admit_schema6(
+        *args: Any,  # noqa: ANN401
+        **kwargs: Any,  # noqa: ANN401
+    ) -> object:
+        records = args[4] if len(args) > 4 else kwargs.get("records", ())
+        if any(
+            isinstance(item, StrictIdentityEnvelope) and item.family == "decoder-operation"
+            for item in records
+        ):
+            events.append("operation-admitted")
+        return original_admit_schema6(*args, **kwargs)
+
+    class TracingDecoder:
+        def __init__(self, delegate: _TimelineDecoder) -> None:
+            self.delegate: _TimelineDecoder = delegate
+
+        def decode(
+            self,
+            session: CommonSessionAcquisition,
+            targets: tuple[datetime, ...],
+            timeout_seconds: float,
+        ) -> tuple[DecodedLocalFrame, ...]:
+            events.append("decoder-callback")
+            return self.delegate.decode(session, targets, timeout_seconds)
+
+    monkeypatch.setattr(repository, "admit_schema6", traced_admit_schema6)
+    decoder = _TimelineDecoder()
+    adapter = Phase7ELocalEvidenceAdapter(
+        repository,
+        TracingDecoder(decoder),
+        _TimelineClassifier(present_times={"2026-07-20T03:00:00Z", "2026-07-20T03:00:01Z"}),
+    )
+    narrowing_results: list[NarrowingResult] = []
+    original_narrow = BinaryNarrowingService.narrow
+
+    def trace_narrow(
+        *args: Any,  # noqa: ANN401 - transparent service spy.
+        **kwargs: Any,  # noqa: ANN401 - transparent service spy.
+    ) -> NarrowingResult:
+        result = original_narrow(*args, **kwargs)
+        narrowing_results.append(result)
+        return result
+
+    monkeypatch.setattr(BinaryNarrowingService, "narrow", trace_narrow)
     with executor.invocation(request) as invocation:
         result = Phase7E1DService(repository, local_evidence=adapter).execute(
             invocation,
@@ -1197,6 +1259,277 @@ def test_1d_from_actual_1c_output_admits_all_decoder_target_dependencies(
 
     assert result.run.is_schema7
     assert result.run.result_kind == "FOUND"
+    assert narrowing_results
+    narrowing = narrowing_results[0]
+    narrowing_bracket = narrowing.narrowed_bracket
+    assert narrowing_bracket is not None
+    reopened = repository.reopen_schema7("inv-01", "run-01")
+    assert replay_calls == 1
+    assert events.index("operation-admitted") < events.index("decoder-callback")
+    assert events.count("decoder-callback") >= 2
+    steps = narrowing_bracket.history
+    assert steps
+    midpoint_step = steps[0]
+    assert midpoint_step.entry_kind.value == "PRESENT_TRANSITION"
+    midpoint = next(item for item in midpoint_step.evidence if item.role == "MIDPOINT")
+    midpoint_target = next(
+        item
+        for item in reopened.records
+        if item.family == "target-request" and item.identity == midpoint.probe_request_id
+    )
+    assert midpoint_target.payload["kind"] == "BINARY"
+    assert midpoint_step.midpoint_requested_time_utc == _utc("2026-07-20T03:00:01Z")
+    assert midpoint.probe_request_id == midpoint_target.identity
+    frame = next(item for item in reopened.records if item.identity == midpoint.canonical_frame_id)
+    assert frame.family == "frame"
+    assert frame.payload["target_request_id"] == midpoint_target.identity
+    decoder = next(
+        item for item in reopened.records if item.identity == midpoint.acquisition_operation_id
+    )
+    assert decoder.family == "decoder-operation"
+    assert midpoint_target.identity in decoder.payload["target_request_ids"]
+    classification = next(
+        item for item in reopened.records if item.identity == midpoint.classification_operation_id
+    )
+    assert classification.family == "classification-operation"
+    observation = next(
+        item for item in reopened.records if item.identity == midpoint.observation_id
+    )
+    assert observation.family == "observation"
+    assert observation.payload["target_request_id"] == midpoint_target.identity
+    assert midpoint_step.bracket_before.lower_requested_time_utc == _utc("2026-07-20T03:00:00Z")
+    assert midpoint_step.bracket_before.upper_requested_time_utc == _utc("2026-07-20T03:00:02Z")
+    assert (
+        midpoint_step.bracket_after.lower_requested_time_utc
+        == midpoint_step.midpoint_requested_time_utc
+    )
+    assert midpoint_step.bracket_after.upper_requested_time_utc == _utc("2026-07-20T03:00:02Z")
+    history = next(item for item in reopened.records if item.family == "d1-history")
+    assert history.payload["steps"]
+    source_set = next(item for item in reopened.records if item.family == "source-record-set")
+    assert source_set.identity == reopened.manifest.payload["source_record_set_id"]
+    source_ids = {
+        identity for group in source_set.payload["record_groups"] for identity in group["ids"]
+    }
+    assert source_ids == {
+        item.identity
+        for item in reopened.records
+        if item.family
+        not in {
+            "schema6-manifest",
+            "source-record-set",
+            "evidence-snapshot",
+            "terminal-result",
+            "schema7-manifest",
+        }
+    }
+    common_sessions = [item for item in reopened.records if item.family == "common-session"]
+    assert len(common_sessions) == 1
+    decoder_operations = [item for item in reopened.records if item.family == "decoder-operation"]
+    assert decoder_operations
+    assert {item.payload["common_session_id"] for item in decoder_operations} == {
+        common_sessions[0].identity
+    }
+    initial_target_ids = {
+        item.identity for item in initial.records if item.family == "target-request"
+    }
+    midpoint_targets = {
+        evidence.target_id
+        for step in steps
+        for evidence in step.evidence
+        if evidence.role == "MIDPOINT"
+    }
+    assert midpoint_targets
+    assert midpoint_targets.isdisjoint(initial_target_ids)
+
+
+def test_decoder_operation_is_reused_after_restart_before_decode(tmp_path: Path) -> None:
+    repo, run = _create_golden_schema6(tmp_path / "runs", complete=False, active_index=0)
+    policy_record = next(item for item in run.records if item.family == "policy")
+    request = CommonSessionRequest(
+        "inv-01",
+        "run-01",
+        1,
+        _utc("2026-07-20T03:00:00Z"),
+        _utc("2026-07-20T03:00:04Z"),
+        CommonSessionPolicy.from_payload(policy_record.payload),
+    )
+    acquisition = _test_acquisition(tmp_path, run, request)
+    target = next(
+        item
+        for item in run.records
+        if item.family == "target-request"
+        and isinstance(run.state, Schema6Envelope)
+        and item.identity == run.state.active_target_request_id
+    )
+    operation = make_decoder_envelope(acquisition, 1, (target.identity,))
+    with repo.invocation_ownership("inv-01", "run-01", timeout_seconds=0) as owner:
+        invocation = Phase7EInvocation(
+            request,
+            owner,
+            InvocationBudget(request.policy, lambda: 0.0),
+        )
+        first = admit_decoder_operation(
+            repo,
+            acquisition,
+            target,
+            operation,
+            invocation=invocation,
+        )
+        second = admit_decoder_operation(
+            repo,
+            acquisition,
+            target,
+            operation,
+            invocation=invocation,
+        )
+    assert first.manifest_id == second.manifest_id
+    assert isinstance(second.state, Schema6Envelope)
+    assert second.state.target_state is Schema6TargetState.DECODING
+    assert second.state.active_decoder_operation_id == operation.identity
+
+
+@pytest.mark.parametrize(
+    ("failure", "reason"),
+    [
+        (CommonSessionDecoderError, "decoder_failed"),
+        (CommonSessionDecoderTimeoutError, "decoder_timeout"),
+        (CommonSessionCancelledError, "interrupted"),
+        (RuntimeError, "decoder_failed"),
+    ],
+)
+def test_decoder_failure_is_persisted_after_durable_intent(
+    tmp_path: Path,
+    failure: type[BaseException],
+    reason: str,
+) -> None:
+    repo, run = _create_golden_schema6(tmp_path / "runs", complete=False, active_index=0)
+    policy_record = next(item for item in run.records if item.family == "policy")
+    request = CommonSessionRequest(
+        "inv-01",
+        "run-01",
+        1,
+        _utc("2026-07-20T03:00:00Z"),
+        _utc("2026-07-20T03:00:04Z"),
+        CommonSessionPolicy.from_payload(policy_record.payload),
+    )
+    acquisition = _test_acquisition(tmp_path, run, request)
+    target = next(
+        item
+        for item in run.records
+        if item.family == "target-request"
+        and isinstance(run.state, Schema6Envelope)
+        and item.identity == run.state.active_target_request_id
+    )
+
+    class FailingDecoder:
+        def decode(
+            self,
+            session: CommonSessionAcquisition,
+            targets: tuple[datetime, ...],
+            timeout_seconds: float,
+        ) -> tuple[DecodedLocalFrame, ...]:
+            _ = (session, targets, timeout_seconds)
+            raise failure
+
+    with repo.invocation_ownership("inv-01", "run-01", timeout_seconds=0) as owner:
+        invocation = Phase7EInvocation(
+            request,
+            owner,
+            InvocationBudget(request.policy, lambda: 0.0),
+        )
+        with pytest.raises(failure):
+            Phase7ELocalEvidenceAdapter(repo, FailingDecoder(), _VisualClassifier()).execute(
+                invocation,
+                acquisition,
+                (target,),
+            )
+    reopened = repo.reopen_schema6("inv-01", "run-01")
+    assert isinstance(reopened.state, Schema6Envelope)
+    assert reopened.state.target_state is Schema6TargetState.ACQUISITION_FAILED
+    assert reopened.state.reason_code == reason
+    assert len(reopened.manifest.payload["indexes"]["decoder_operation_ids"]) == 1
+    assert reopened.manifest.payload["indexes"]["frame_ids"] == []
+
+
+def test_cancellation_after_intent_before_decoder_is_persisted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, run = _create_golden_schema6(tmp_path / "runs", complete=False, active_index=0)
+    policy_record = next(item for item in run.records if item.family == "policy")
+    request = CommonSessionRequest(
+        "inv-01",
+        "run-01",
+        1,
+        _utc("2026-07-20T03:00:00Z"),
+        _utc("2026-07-20T03:00:04Z"),
+        CommonSessionPolicy.from_payload(policy_record.payload),
+    )
+    acquisition = _test_acquisition(tmp_path, run, request)
+    target = next(
+        item
+        for item in run.records
+        if item.family == "target-request"
+        and isinstance(run.state, Schema6Envelope)
+        and item.identity == run.state.active_target_request_id
+    )
+    cancelled = False
+    decoder_calls = 0
+    original_admit = admit_decoder_operation
+
+    def admit_then_cancel(
+        repository: RecordingSearch7ERepository,
+        acquisition: CommonSessionAcquisition,
+        target_request: StrictIdentityEnvelope,
+        decoder_operation: StrictIdentityEnvelope,
+        *,
+        invocation: Phase7EInvocation,
+    ) -> Phase7ERun:
+        nonlocal cancelled
+        result = original_admit(
+            repository,
+            acquisition,
+            target_request,
+            decoder_operation,
+            invocation=invocation,
+        )
+        cancelled = True
+        return result
+
+    class UnexpectedDecoder:
+        def decode(
+            self,
+            session: CommonSessionAcquisition,
+            targets: tuple[datetime, ...],
+            timeout_seconds: float,
+        ) -> tuple[DecodedLocalFrame, ...]:
+            nonlocal decoder_calls
+            _ = (session, targets, timeout_seconds)
+            decoder_calls += 1
+            raise AssertionError
+
+    monkeypatch.setattr(
+        "vigi_vision.recording_search_7e_1d.admit_decoder_operation", admit_then_cancel
+    )
+    with repo.invocation_ownership("inv-01", "run-01", timeout_seconds=0) as owner:
+        invocation = Phase7EInvocation(
+            request,
+            owner,
+            InvocationBudget(request.policy, lambda: 0.0, cancellation=lambda: cancelled),
+        )
+        with pytest.raises(CommonSessionCancelledError):
+            Phase7ELocalEvidenceAdapter(repo, UnexpectedDecoder(), _VisualClassifier()).execute(
+                invocation,
+                acquisition,
+                (target,),
+            )
+    reopened = repo.reopen_schema6("inv-01", "run-01")
+    assert isinstance(reopened.state, Schema6Envelope)
+    assert reopened.state.target_state is Schema6TargetState.ACQUISITION_FAILED
+    assert reopened.state.reason_code == "interrupted"
+    assert decoder_calls == 0
+    assert len(reopened.manifest.payload["indexes"]["decoder_operation_ids"]) == 1
 
 
 class _MismatchedAliasDecoder:

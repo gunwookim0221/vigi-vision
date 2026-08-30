@@ -10,7 +10,7 @@ Schema-7 identity family through the existing Phase 7E repository.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -20,11 +20,16 @@ from vigi_vision.object_presence_values import ClassificationOutcome, VisualReas
 from vigi_vision.recording_search_7e_1c import (
     B4Bridge,
     CommonSessionAcquisition,
+    CommonSessionCapacityError,
     CommonSessionDeadlineError,
+    CommonSessionDecoderError,
+    CommonSessionError,
     CommonSessionRequest,
     DecodedLocalFrame,
     Decoder,
     Phase7EInvocation,
+    admit_decoder_failure,
+    admit_decoder_operation,
     admit_frame_then_classify,
     append_schema6_indexes,
     execute_local_targets,
@@ -69,7 +74,17 @@ from vigi_vision.recording_search_c2_models import (
     CoarseTargetEvidence,
 )
 from vigi_vision.recording_search_c2_support import coarse_target_id
-from vigi_vision.recording_search_d1_identity import policy_identity, source_bracket_identity
+from vigi_vision.recording_search_d1_history import (
+    D1BracketState,
+    history_digest,
+    narrowed_bracket_id,
+)
+from vigi_vision.recording_search_d1_identity import (
+    D1SourceRevision,
+    d1_input_bracket_id,
+    policy_identity,
+    source_bracket_identity,
+)
 from vigi_vision.recording_search_d1_models import (
     NarrowingBoundEvidence,
     NarrowingProbeEvidence,
@@ -183,7 +198,7 @@ class Phase7ELocalEvidenceAdapter:
     decoder: Decoder
     classifier: B4Bridge
 
-    def execute(
+    def execute(  # noqa: PLR0912, PLR0915
         self,
         invocation: Phase7EInvocation,
         acquisition: CommonSessionAcquisition,
@@ -237,17 +252,6 @@ class Phase7ELocalEvidenceAdapter:
         }
         ordered = tuple(dict.fromkeys(requested_by_target.values()))
         pass_number = invocation.budget.decoder_passes + 1
-        frames = execute_local_targets(
-            acquisition,
-            self.decoder,
-            ordered,
-            pass_number=pass_number,
-            logical_end=any(
-                item.payload["selection_rule"] == "FINAL_STRICTLY_BEFORE_END" for item in pending
-            ),
-            allow_aliases=True,
-            budget=invocation.budget,
-        )
         current = self.repository.reopen_schema6(
             invocation.request.investigation_id,
             invocation.request.run_id,
@@ -260,11 +264,99 @@ class Phase7ELocalEvidenceAdapter:
             pending,
             session_id=session_id,
         )
-        decoder_operation = make_decoder_envelope(
+        if (
+            isinstance(current.state, Schema6Envelope)
+            and current.state.target_state is Schema6TargetState.OBSERVED
+        ):
+            current = _request_schema6_target(self.repository, invocation, current, pending[0])
+        decoder_operation: StrictIdentityEnvelope
+        if (
+            isinstance(current.state, Schema6Envelope)
+            and current.state.target_state is Schema6TargetState.DECODING
+        ):
+            active_operation_id = current.state.active_decoder_operation_id
+            persisted_operation = next(
+                (
+                    item
+                    for item in current.records
+                    if item.family == "decoder-operation" and item.identity == active_operation_id
+                ),
+                None,
+            )
+            if persisted_operation is None:
+                raise Phase7EAdapterError
+            decoder_operation = persisted_operation
+            persisted_pass = decoder_operation.payload.get("pass_number")
+            if type(persisted_pass) is not int or persisted_pass <= 0:
+                raise Phase7EAdapterError
+            pass_number = persisted_pass
+            if invocation.budget.decoder_passes == 0:
+                prior_operations = tuple(
+                    item
+                    for item in current.records
+                    if item.family == "decoder-operation"
+                    and item.identity != decoder_operation.identity
+                )
+                invocation.budget.decoder_passes = len(prior_operations)
+                invocation.budget.selected_rgb24_frames = sum(
+                    len(item.payload.get("target_request_ids", ())) for item in prior_operations
+                )
+        else:
+            decoder_operation = make_decoder_envelope(
+                acquisition,
+                pass_number,
+                tuple(item.identity for item in pending),
+            )
+        if pass_number > invocation.request.policy.maximum_decoder_passes:
+            raise CommonSessionCapacityError
+        invocation.validate(self.repository)
+        current = admit_decoder_operation(
+            self.repository,
             acquisition,
-            pass_number,
-            tuple(item.identity for item in pending),
+            pending[0],
+            decoder_operation,
+            invocation=invocation,
         )
+        try:
+            # Keep post-admission authority/budget checks inside the failure
+            # boundary so a deadline or cancellation after durable DECODING
+            # intent is attributed to that exact operation before returning.
+            invocation.validate(self.repository)
+            frames = execute_local_targets(
+                acquisition,
+                self.decoder,
+                ordered,
+                pass_number=pass_number,
+                logical_end=any(
+                    item.payload["selection_rule"] == "FINAL_STRICTLY_BEFORE_END"
+                    for item in pending
+                ),
+                allow_aliases=True,
+                budget=invocation.budget,
+            )
+        except CommonSessionError as primary:
+            with suppress(Exception):
+                _ = admit_decoder_failure(
+                    self.repository,
+                    acquisition,
+                    pending[0],
+                    decoder_operation,
+                    primary.code,
+                    invocation=invocation,
+                )
+            raise
+        except Exception as unexpected:
+            primary = CommonSessionDecoderError()
+            with suppress(Exception):
+                _ = admit_decoder_failure(
+                    self.repository,
+                    acquisition,
+                    pending[0],
+                    decoder_operation,
+                    primary.code,
+                    invocation=invocation,
+                )
+            raise primary from unexpected
         frame_by_requested_time = dict(zip(ordered, frames, strict=True))
         for target in pending:
             frame = frame_by_requested_time[requested_by_target[target.identity]]
@@ -274,7 +366,15 @@ class Phase7ELocalEvidenceAdapter:
                 invocation.request.run_id,
                 ownership=invocation.ownership,
             )
-            current = _request_schema6_target(self.repository, invocation, current, target)
+            if not isinstance(current.state, Schema6Envelope):
+                raise Phase7EAdapterError
+            if current.state.target_state is Schema6TargetState.OBSERVED:
+                current = _request_schema6_target(self.repository, invocation, current, target)
+            elif current.state.target_state not in {
+                Schema6TargetState.REQUESTED,
+                Schema6TargetState.DECODING,
+            }:
+                raise Phase7EAdapterError
             alias = _find_frame_alias(current, frame)
             if alias is not None:
                 _ = _admit_alias_observation(
@@ -456,12 +556,23 @@ class Phase7EAdaptiveOrchestrator:
                 c2_record,
                 narrowing,
             )
-            persisted_c2 = replace(c2, bracket=bracket)
+            terminal_narrowing = _rebase_narrowing_for_terminal(
+                narrowing,
+                _manifest_digest(run),
+            )
+            terminal_bracket_value = terminal_narrowing.narrowed_bracket
+            if terminal_bracket_value is None:
+                raise Phase7EIncompleteEvidenceError
+            terminal_bracket = replace(
+                bracket,
+                manifest_digest=terminal_bracket_value.manifest_digest,
+            )
+            persisted_c2 = replace(c2, bracket=terminal_bracket)
             d2_snapshot = _build_d2_snapshot(
                 run,
                 c2_snapshot,
                 persisted_c2,
-                narrowing,
+                terminal_narrowing,
                 policy,
             )
             terminal_input = TerminalInputSnapshot(
@@ -469,8 +580,8 @@ class Phase7EAdaptiveOrchestrator:
                 plan,
                 policy,
                 adapt_c2_result(persisted_c2, d2_snapshot),
-                adapt_d1_result(narrowing, d2_snapshot),
-                narrowing.narrowed_bracket.d1_input_bracket,
+                adapt_d1_result(terminal_narrowing, d2_snapshot),
+                terminal_bracket_value.d1_input_bracket,
             )
             d2 = interpret_terminal(terminal_input)
             if not isinstance(d2, FoundResult):
@@ -1279,6 +1390,9 @@ def _build_d2_snapshot(
 ) -> D2EvidenceSnapshot:
     evidence_manifest_digest = _manifest_digest(run)
     if narrowing is not None and narrowing.narrowed_bracket is not None:
+        # D1 source identities are bound to the manifest revision captured when
+        # C2 was persisted; appending D1 records must not rewrite that source
+        # revision used by terminal validation.
         evidence_manifest_digest = narrowing.narrowed_bracket.manifest_digest
     baseline = D2EvidenceReference(
         role=D2EvidenceRole.BASELINE,
@@ -1353,13 +1467,24 @@ def _build_d2_snapshot(
             )
             for index, item in enumerate(final_members)
         )
+        superseded_groups = {
+            item.support_group_id
+            for item in support_refs
+            if item.observation_id in final_observations and item.support_group_id is not None
+        }
         support_refs = [
             item
             for item in support_refs
-            if item.observation_id not in {x.observation_id for x in final_refs}
+            if item.support_group_id not in superseded_groups
+            and item.observation_id not in {x.observation_id for x in final_refs}
         ]
         support_refs.extend(final_refs)
-        groups = [item for item in groups if item.support_group_id != final_group]
+        groups = [
+            item
+            for item in groups
+            if item.support_group_id != final_group
+            and item.support_group_id not in superseded_groups
+        ]
         groups.append(_d2_group(final_group, final_refs, c2_snapshot))
     return D2EvidenceSnapshot(
         run.investigation_id,
@@ -1371,6 +1496,57 @@ def _build_d2_snapshot(
         D2SourceRevision(evidence_manifest_digest, source_c2, source_d1),
         (baseline, *coarse_refs, *d1_refs, *support_refs),
         tuple(groups),
+    )
+
+
+def _rebase_narrowing_for_terminal(
+    narrowing: NarrowingResult,
+    manifest_digest: str,
+) -> NarrowingResult:
+    """Bind the in-memory D2 proposal to the final persisted Schema-6 revision."""
+    narrowed = narrowing.narrowed_bracket
+    if narrowed is None or narrowed.d1_input_bracket is None or narrowed.source_bracket is None:
+        raise Phase7EIncompleteEvidenceError
+    source = replace(narrowed.source_bracket, manifest_digest=manifest_digest)
+    source_id = source_bracket_identity(source)
+    input_bracket = replace(
+        narrowed.d1_input_bracket,
+        source_revision=D1SourceRevision(source_id, manifest_digest),
+    )
+    input_id = d1_input_bracket_id(input_bracket)
+    history = narrowed.history
+    history_id = history_digest(input_bracket, input_id, history)
+    lower_reference = (
+        history[-1].bracket_after.lower_reference if history else input_bracket.lower_bound
+    )
+    final_bracket = D1BracketState(
+        narrowed.lower_bound_utc,
+        narrowed.upper_bound_utc,
+        lower_reference,
+        narrowed.upper_support_group_id or "",
+    )
+    narrowed_id = narrowed_bracket_id(
+        input_bracket,
+        history,
+        final_bracket,
+        history_id,
+        narrowed.iterations,
+        narrowed.achieved_precision_seconds,
+        narrowed.stop_reason.value,
+        manifest_digest,
+        source_bracket=source,
+    )
+    return replace(
+        narrowing,
+        narrowed_bracket=replace(
+            narrowed,
+            source_bracket_id=source_id,
+            manifest_digest=manifest_digest,
+            d1_input_bracket=input_bracket,
+            source_bracket=source,
+            history_digest=history_id,
+            narrowed_bracket_id=narrowed_id,
+        ),
     )
 
 
@@ -1883,7 +2059,7 @@ def _request_schema6_target(
     ).run
 
 
-def _request_schema6_targets(  # noqa: PLR0912
+def _request_schema6_targets(  # noqa: PLR0912, PLR0915
     repository: RecordingSearch7ERepository,
     invocation: Phase7EInvocation,
     current: Phase7ERun,
@@ -1956,6 +2132,27 @@ def _request_schema6_targets(  # noqa: PLR0912
             ).run
         else:
             reopened = current
+    elif current.state.target_state is Schema6TargetState.DECODING:
+        if missing:
+            raise Phase7EAdapterError
+        active_operation_id = current.state.active_decoder_operation_id
+        if not isinstance(active_operation_id, str) or not active_operation_id:
+            raise Phase7EAdapterError
+        operation = next(
+            (
+                item
+                for item in current.records
+                if item.family == "decoder-operation" and item.identity == active_operation_id
+            ),
+            None,
+        )
+        if operation is None or tuple(operation.payload.get("target_request_ids", ())) != tuple(
+            item.identity for item in ordered
+        ):
+            raise Phase7EAdapterError
+        if current.state.active_target_request_id not in {item.identity for item in ordered}:
+            raise Phase7EAdapterError
+        reopened = current
     else:
         raise Phase7EAdapterError
 
@@ -2092,7 +2289,7 @@ def _admit_alias_observation(  # noqa: PLR0913 - explicit persisted authority in
         active_observation_id=observation.identity,
         reason_code=None,
         attempt_count=1,
-        predecessor_target_state=Schema6TargetState.REQUESTED,
+        predecessor_target_state=current.state.target_state,
     )
     records = tuple(item for item in current.records if item.family != "schema5-manifest")
     additions = (alias,) if decoder_indexed else (decoder, alias)

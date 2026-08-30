@@ -48,6 +48,7 @@ from vigi_vision.recording_search_7e_models import (
     StrictIdentityEnvelope,
 )
 from vigi_vision.recording_search_7e_repository import (
+    Phase7EConflictError,
     Phase7ECorruptError,
     Phase7EReadbackError,
     Phase7ERepositoryError,
@@ -1782,6 +1783,18 @@ def admit_frame_then_classify(
     )
     if not isinstance(current.state, Schema6Envelope):
         raise CommonSessionValidationError
+    if current.state.target_state not in {
+        Schema6TargetState.REQUESTED,
+        Schema6TargetState.DECODING,
+    }:
+        raise CommonSessionValidationError
+    current = admit_decoder_operation(
+        repository,
+        acquisition,
+        target_request,
+        decoder_operation,
+        invocation=invocation,
+    )
     canonical_frame, canonical_jpeg = canonicalize_frame(frame)
     frame_envelope = _make_frame_envelope_from_canonical(
         acquisition,
@@ -1790,44 +1803,8 @@ def admit_frame_then_classify(
         canonical_frame,
         canonical_jpeg,
     )
-    if current.state.target_state is not Schema6TargetState.REQUESTED:
-        raise CommonSessionValidationError
-    decoder_indexed = (
-        decoder_operation.identity in current.manifest.payload["indexes"]["decoder_operation_ids"]
-    )
-    decoding_manifest = (
-        current.manifest
-        if decoder_indexed
-        else _schema6_successor_manifest(
-            current.manifest,
-            decoder_operation_ids=decoder_operation.identity,
-        )
-    )
-    decoding_state = Schema6Envelope(
-        run_state="RUNNING",
-        target_state=Schema6TargetState.DECODING,
-        active_target_request_id=target_request.identity,
-        active_decoder_operation_id=decoder_operation.identity,
-        active_frame_id=None,
-        active_classification_attempt_id=None,
-        active_classification_operation_id=None,
-        active_observation_id=None,
-        reason_code=None,
-        attempt_count=1,
-        predecessor_target_state=current.state.target_state,
-    )
+    decoding_manifest = current.manifest
     records = tuple(record for record in current.records if record.family != "schema5-manifest")
-    if not decoder_indexed:
-        records = (*records, decoder_operation)
-    repository.admit_schema6(
-        acquisition.request.investigation_id,
-        acquisition.request.run_id,
-        decoding_manifest,
-        decoding_state,
-        records,
-        expected_manifest_id=current.manifest_id,
-        ownership=invocation.ownership,
-    )
     ready_manifest = _schema6_successor_manifest(
         decoding_manifest,
         frame_ids=frame_envelope.identity,
@@ -1967,6 +1944,220 @@ def admit_frame_then_classify(
         published.run_id,
         ownership=invocation.ownership,
     )
+
+
+def admit_decoder_operation(
+    repository: RecordingSearch7ERepository,
+    acquisition: CommonSessionAcquisition,
+    target_request: StrictIdentityEnvelope,
+    decoder_operation: StrictIdentityEnvelope,
+    *,
+    invocation: Phase7EInvocation,
+) -> Phase7ERun:
+    """Admit and strictly reopen one decoder intent before local decoding."""
+    if (
+        target_request.family != "target-request"
+        or decoder_operation.family != "decoder-operation"
+        or invocation.request != acquisition.request
+    ):
+        raise CommonSessionValidationError
+    operation_payload = decoder_operation.payload
+    target_ids = operation_payload.get("target_request_ids")
+    if (
+        operation_payload.get("investigation_id") != acquisition.request.investigation_id
+        or operation_payload.get("run_id") != acquisition.request.run_id
+        or operation_payload.get("common_session_id") != acquisition.common_session_id
+        or not isinstance(target_ids, list)
+        or not target_ids
+        or any(type(value) is not str or not value for value in target_ids)
+        or len(target_ids) != len(set(target_ids))
+        or target_request.identity not in target_ids
+    ):
+        raise CommonSessionValidationError
+    invocation.validate(repository)
+    current = repository.reopen_schema6(
+        acquisition.request.investigation_id,
+        acquisition.request.run_id,
+        ownership=invocation.ownership,
+    )
+    if not isinstance(current.state, Schema6Envelope):
+        raise CommonSessionValidationError
+    indexes = current.manifest.payload["indexes"]
+    records_by_id = {
+        item.identity: item for item in current.records if item.family == "target-request"
+    }
+    for target_id in target_ids:
+        if target_id not in indexes["target_request_ids"] or target_id not in records_by_id:
+            raise CommonSessionValidationError
+    if records_by_id.get(target_request.identity) != target_request:
+        raise CommonSessionValidationError
+    decoder_ids = indexes["decoder_operation_ids"]
+    existing = next(
+        (
+            item
+            for item in current.records
+            if item.family == "decoder-operation" and item.identity == decoder_operation.identity
+        ),
+        None,
+    )
+    if existing is not None and existing != decoder_operation:
+        raise CommonSessionValidationError
+    if decoder_operation.identity in decoder_ids and existing is None:
+        raise CommonSessionValidationError
+    if current.state.target_state is Schema6TargetState.DECODING:
+        if (
+            current.state.active_decoder_operation_id != decoder_operation.identity
+            or current.state.active_target_request_id != target_request.identity
+            or existing is None
+        ):
+            raise CommonSessionValidationError
+    elif current.state.target_state is Schema6TargetState.REQUESTED:
+        if current.state.active_target_request_id != target_request.identity:
+            raise CommonSessionValidationError
+        decoding_manifest = (
+            current.manifest
+            if existing is not None
+            else _schema6_successor_manifest(
+                current.manifest,
+                decoder_operation_ids=decoder_operation.identity,
+            )
+        )
+        decoding_state = Schema6Envelope(
+            run_state="RUNNING",
+            target_state=Schema6TargetState.DECODING,
+            active_target_request_id=target_request.identity,
+            active_decoder_operation_id=decoder_operation.identity,
+            active_frame_id=None,
+            active_classification_attempt_id=None,
+            active_classification_operation_id=None,
+            active_observation_id=None,
+            reason_code=None,
+            attempt_count=1,
+            predecessor_target_state=Schema6TargetState.REQUESTED,
+        )
+        records = tuple(record for record in current.records if record.family != "schema5-manifest")
+        if existing is None:
+            records = (*records, decoder_operation)
+        current = repository.admit_schema6(
+            acquisition.request.investigation_id,
+            acquisition.request.run_id,
+            decoding_manifest,
+            decoding_state,
+            records,
+            expected_manifest_id=current.manifest_id,
+            ownership=invocation.ownership,
+        ).run
+    else:
+        raise CommonSessionValidationError
+    reopened = repository.reopen_schema6(
+        acquisition.request.investigation_id,
+        acquisition.request.run_id,
+        ownership=invocation.ownership,
+    )
+    if (
+        not isinstance(reopened.state, Schema6Envelope)
+        or reopened.state.target_state is not Schema6TargetState.DECODING
+        or reopened.state.active_decoder_operation_id != decoder_operation.identity
+        or next(
+            (
+                item
+                for item in reopened.records
+                if item.family == "decoder-operation"
+                and item.identity == decoder_operation.identity
+            ),
+            None,
+        )
+        != decoder_operation
+    ):
+        raise CommonSessionReadbackError
+    return reopened
+
+
+def admit_decoder_failure(
+    repository: RecordingSearch7ERepository,
+    acquisition: CommonSessionAcquisition,
+    target_request: StrictIdentityEnvelope,
+    decoder_operation: StrictIdentityEnvelope,
+    reason_code: str,
+    *,
+    invocation: Phase7EInvocation,
+) -> Phase7ERun:
+    """Persist a bounded decoder failure against its admitted operation."""
+    if (
+        not reason_code
+        or target_request.family != "target-request"
+        or decoder_operation.family != "decoder-operation"
+        or invocation.request != acquisition.request
+    ):
+        raise CommonSessionValidationError
+    # Failure attribution must remain possible after a timeout has consumed the
+    # invocation budget, so validate only the live owner here (not the budget).
+    invocation.ownership.validate(
+        repository,
+        acquisition.request.investigation_id,
+        acquisition.request.run_id,
+    )
+    current = repository.reopen_schema6(
+        acquisition.request.investigation_id,
+        acquisition.request.run_id,
+        ownership=invocation.ownership,
+    )
+    if not isinstance(current.state, Schema6Envelope):
+        raise CommonSessionValidationError
+    persisted_target = next(
+        (
+            item
+            for item in current.records
+            if item.family == "target-request" and item.identity == target_request.identity
+        ),
+        None,
+    )
+    persisted_operation = next(
+        (
+            item
+            for item in current.records
+            if item.family == "decoder-operation" and item.identity == decoder_operation.identity
+        ),
+        None,
+    )
+    if persisted_target != target_request or persisted_operation != decoder_operation:
+        raise CommonSessionValidationError
+    if current.state.target_state is Schema6TargetState.ACQUISITION_FAILED:
+        if (
+            current.state.active_decoder_operation_id == decoder_operation.identity
+            and current.state.reason_code == reason_code
+        ):
+            return current
+        raise Phase7EConflictError
+    if (
+        current.state.target_state is not Schema6TargetState.DECODING
+        or current.state.active_decoder_operation_id != decoder_operation.identity
+        or current.state.active_target_request_id != target_request.identity
+    ):
+        raise CommonSessionValidationError
+    failure_state = Schema6Envelope(
+        run_state="FAILED",
+        target_state=Schema6TargetState.ACQUISITION_FAILED,
+        active_target_request_id=target_request.identity,
+        active_decoder_operation_id=decoder_operation.identity,
+        active_frame_id=None,
+        active_classification_attempt_id=None,
+        active_classification_operation_id=None,
+        active_observation_id=None,
+        reason_code=reason_code,
+        attempt_count=1,
+        predecessor_target_state=Schema6TargetState.DECODING,
+    )
+    records = tuple(record for record in current.records if record.family != "schema5-manifest")
+    return repository.admit_schema6(
+        acquisition.request.investigation_id,
+        acquisition.request.run_id,
+        current.manifest,
+        failure_state,
+        records,
+        expected_manifest_id=current.manifest_id,
+        ownership=invocation.ownership,
+    ).run
 
 
 def _segment_id(segment: RecordingSegment) -> str:
@@ -2739,6 +2930,8 @@ __all__ = [
     "canonicalize_frame",
     "classify_after_readback",
     "collapse_target_aliases",
+    "admit_decoder_failure",
+    "admit_decoder_operation",
     "admit_frame_then_classify",
     "append_schema6_indexes",
     "execute_local_targets",

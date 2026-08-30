@@ -200,6 +200,11 @@ Schema 6 admits evidence incrementally in this exact production order:
    schema-5 transition predecessor, session, target, frame, and classifier
    authority before exposing the observation.
 
+The decoder-operation intent is durable before local decoding begins. A decoder
+timeout, cancellation, or other bounded decoder failure transitions that same
+operation to `ACQUISITION_FAILED` with its safe reason code; no frame or
+classification evidence is admitted from that failed pass.
+
 The schema-6 target envelope key set is exactly `run_state`, `target_state`,
 `active_target_request_id`, `active_decoder_operation_id`, `active_frame_id`,
 `active_classification_attempt_id`, `active_classification_operation_id`,

@@ -1450,7 +1450,8 @@ class RecordingSearch7ERepository:
         if (
             predecessor.is_schema6
             and isinstance(predecessor.state, Schema6Envelope)
-            and predecessor.state.target_state is Schema6TargetState.REQUESTED
+            and predecessor.state.target_state
+            in {Schema6TargetState.REQUESTED, Schema6TargetState.DECODING}
             and state.target_state is Schema6TargetState.OBSERVED
         ):
             _validate_alias_observation_successor(predecessor, state, children)
@@ -2562,6 +2563,7 @@ def _legal_schema6_successor(current: Schema6Envelope, proposed: Schema6Envelope
             Schema6TargetState.FRAME_READY,
             Schema6TargetState.ACQUISITION_FAILED,
             Schema6TargetState.INTERRUPTED,
+            Schema6TargetState.OBSERVED,
         },
         Schema6TargetState.FRAME_READY: {
             Schema6TargetState.CLASSIFYING,

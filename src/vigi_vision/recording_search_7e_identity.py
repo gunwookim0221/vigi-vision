@@ -708,6 +708,9 @@ _INTEGER_FIELDS = frozenset(
         "average_frame_rate_num",
         "average_frame_rate_den",
         "audio_stream_count",
+        "iteration",
+        "decoded_pts",
+        "decoded_ordinal",
         "baseline_mask_pixel_count",
         "probe_mask_pixel_count",
         "roi_pixel_count",
@@ -757,6 +760,9 @@ _NONNEGATIVE_INTEGER_FIELDS = frozenset(
         "input_stream_index",
         "video_stream_index",
         "audio_stream_count",
+        "iteration",
+        "decoded_pts",
+        "decoded_ordinal",
         "observed_duration_ticks",
         "baseline_mask_pixel_count",
         "probe_mask_pixel_count",
@@ -976,6 +982,16 @@ def _validate_list_value(key: str, value: list[Any]) -> None:
             raise IdentityValidationError("invalid D1 history step")
         for item in value:
             _validate_value_types(item)
+    elif key == "evidence":
+        if any(not isinstance(item, Mapping) for item in value):
+            raise IdentityValidationError("invalid D1 history evidence")
+        for item in value:
+            _validate_value_types(item)
+    elif key == "support_indexes":
+        if any(type(item) is not int or item < 0 for item in value):
+            raise IdentityValidationError("invalid D1 support indexes")
+        if len(value) != len(set(value)):
+            raise IdentityValidationError("duplicate D1 support index")
     else:
         raise IdentityValidationError("unsupported list field")
 
