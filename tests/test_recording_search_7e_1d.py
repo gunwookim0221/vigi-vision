@@ -30,6 +30,7 @@ from vigi_vision.recording_search_7e_1c import (
     Phase7EB4Input,
     Phase7EInvocation,
     admit_decoder_operation,
+    admit_frame_then_classify,
     execute_local_targets,
     make_decoder_envelope,
 )
@@ -55,6 +56,7 @@ from vigi_vision.recording_search_7e_models import (
 from vigi_vision.recording_search_7e_repository import (
     Phase7EConflictError,
     Phase7ECorruptError,
+    Phase7EInProgressError,
     Phase7ERun,
     PublicationStatus,
     RecordingSearch7ERepository,
@@ -1343,7 +1345,7 @@ def test_1d_from_actual_1c_output_admits_all_decoder_target_dependencies(  # noq
     assert midpoint_targets.isdisjoint(initial_target_ids)
 
 
-def test_decoder_operation_is_reused_after_restart_before_decode(tmp_path: Path) -> None:
+def test_decoder_operation_is_idempotent_before_decode_under_same_owner(tmp_path: Path) -> None:
     repo, run = _create_golden_schema6(tmp_path / "runs", complete=False, active_index=0)
     policy_record = next(item for item in run.records if item.family == "policy")
     request = CommonSessionRequest(
@@ -1387,6 +1389,172 @@ def test_decoder_operation_is_reused_after_restart_before_decode(tmp_path: Path)
     assert isinstance(second.state, Schema6Envelope)
     assert second.state.target_state is Schema6TargetState.DECODING
     assert second.state.active_decoder_operation_id == operation.identity
+
+
+def test_new_owner_rejects_preexisting_decoder_operation_without_decode(
+    tmp_path: Path,
+) -> None:
+    repo, run = _create_golden_schema6(tmp_path / "runs", complete=False, active_index=0)
+    policy_record = next(item for item in run.records if item.family == "policy")
+    request = CommonSessionRequest(
+        "inv-01",
+        "run-01",
+        1,
+        _utc("2026-07-20T03:00:00Z"),
+        _utc("2026-07-20T03:00:04Z"),
+        CommonSessionPolicy.from_payload(policy_record.payload),
+    )
+    acquisition = _test_acquisition(tmp_path, run, request)
+    target = next(
+        item
+        for item in run.records
+        if item.family == "target-request"
+        and isinstance(run.state, Schema6Envelope)
+        and item.identity == run.state.active_target_request_id
+    )
+    operation = make_decoder_envelope(acquisition, 1, (target.identity,))
+    with repo.invocation_ownership("inv-01", "run-01", timeout_seconds=0) as owner_a:
+        admit_decoder_operation(
+            repo,
+            acquisition,
+            target,
+            operation,
+            invocation=Phase7EInvocation(
+                request,
+                owner_a,
+                InvocationBudget(request.policy, lambda: 0.0),
+            ),
+        )
+
+    decoder = _OneFrameDecoder()
+
+    def expect_interrupted(invocation: Phase7EInvocation) -> bool:
+        try:
+            Phase7ELocalEvidenceAdapter(repo, decoder, _VisualClassifier()).execute(
+                invocation,
+                acquisition,
+                (target,),
+            )
+        except CommonSessionCancelledError:
+            return True
+        return False
+
+    with repo.invocation_ownership("inv-01", "run-01", timeout_seconds=0) as owner_b:
+        assert expect_interrupted(
+            Phase7EInvocation(
+                request,
+                owner_b,
+                InvocationBudget(request.policy, lambda: 0.0),
+            )
+        )
+    assert decoder.calls == 0
+    before_recovery = repo.reopen_schema6("inv-01", "run-01")
+    assert isinstance(before_recovery.state, Schema6Envelope)
+    assert before_recovery.state.target_state is Schema6TargetState.DECODING
+
+    recovered = repo.recover_active("inv-01", "run-01")
+    assert isinstance(recovered.state, Schema6Envelope)
+    assert recovered.state.target_state is Schema6TargetState.INTERRUPTED
+    assert recovered.manifest.payload["indexes"]["frame_ids"] == []
+    assert recovered.manifest.payload["indexes"]["observation_ids"] == []
+
+
+def test_late_decoder_output_cannot_cross_recovery_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, run = _create_golden_schema6(tmp_path / "runs", complete=False, active_index=0)
+    policy_record = next(item for item in run.records if item.family == "policy")
+    request = CommonSessionRequest(
+        "inv-01",
+        "run-01",
+        1,
+        _utc("2026-07-20T03:00:00Z"),
+        _utc("2026-07-20T03:00:04Z"),
+        CommonSessionPolicy.from_payload(policy_record.payload),
+    )
+    acquisition = _test_acquisition(tmp_path, run, request)
+    target = next(
+        item
+        for item in run.records
+        if item.family == "target-request"
+        and isinstance(run.state, Schema6Envelope)
+        and item.identity == run.state.active_target_request_id
+    )
+    captured_args: tuple[object, ...] = ()
+    captured_kwargs: dict[str, object] = {}
+
+    def fail_before_frame_admission(*args: object, **kwargs: object) -> Phase7ERun:
+        nonlocal captured_args, captured_kwargs
+        captured_args = args
+        captured_kwargs = kwargs
+        raise RuntimeError from None
+
+    monkeypatch.setattr(
+        "vigi_vision.recording_search_7e_1d.admit_frame_then_classify",
+        fail_before_frame_admission,
+    )
+    decoder_a = _OneFrameDecoder()
+
+    def expect_frame_admission_interrupt(owner: Phase7EInvocation) -> bool:
+        try:
+            Phase7ELocalEvidenceAdapter(repo, decoder_a, _VisualClassifier()).execute(
+                owner,
+                acquisition,
+                (target,),
+            )
+        except RuntimeError:
+            return True
+        return False
+
+    with repo.invocation_ownership("inv-01", "run-01", timeout_seconds=0) as owner_a:
+        assert expect_frame_admission_interrupt(
+            Phase7EInvocation(
+                request,
+                owner_a,
+                InvocationBudget(request.policy, lambda: 0.0),
+            )
+        )
+    assert decoder_a.calls == 1
+    decoder_b = _OneFrameDecoder()
+
+    def expect_second_owner_interrupt(owner: Phase7EInvocation) -> bool:
+        try:
+            Phase7ELocalEvidenceAdapter(repo, decoder_b, _VisualClassifier()).execute(
+                owner,
+                acquisition,
+                (target,),
+            )
+        except CommonSessionCancelledError:
+            return True
+        return False
+
+    with repo.invocation_ownership("inv-01", "run-01", timeout_seconds=0) as owner_b:
+        assert expect_second_owner_interrupt(
+            Phase7EInvocation(
+                request,
+                owner_b,
+                InvocationBudget(request.policy, lambda: 0.0),
+            )
+        )
+    assert decoder_b.calls == 0
+
+    recovered = repo.recover_active("inv-01", "run-01")
+    assert isinstance(recovered.state, Schema6Envelope)
+    assert recovered.state.target_state is Schema6TargetState.INTERRUPTED
+    assert recovered.manifest.payload["indexes"]["frame_ids"] == []
+    assert recovered.manifest.payload["indexes"]["observation_ids"] == []
+
+    late_admission = cast("Callable[..., Phase7ERun]", admit_frame_then_classify)
+
+    def expect_late_rejection() -> bool:
+        try:
+            late_admission(*captured_args, **captured_kwargs)
+        except Phase7EInProgressError:
+            return True
+        return False
+
+    assert expect_late_rejection()
 
 
 @pytest.mark.parametrize(

@@ -20,6 +20,7 @@ from vigi_vision.object_presence_values import ClassificationOutcome, VisualReas
 from vigi_vision.recording_search_7e_1c import (
     B4Bridge,
     CommonSessionAcquisition,
+    CommonSessionCancelledError,
     CommonSessionCapacityError,
     CommonSessionDeadlineError,
     CommonSessionDecoderError,
@@ -269,44 +270,21 @@ class Phase7ELocalEvidenceAdapter:
             and current.state.target_state is Schema6TargetState.OBSERVED
         ):
             current = _request_schema6_target(self.repository, invocation, current, pending[0])
-        decoder_operation: StrictIdentityEnvelope
         if (
             isinstance(current.state, Schema6Envelope)
             and current.state.target_state is Schema6TargetState.DECODING
         ):
-            active_operation_id = current.state.active_decoder_operation_id
-            persisted_operation = next(
-                (
-                    item
-                    for item in current.records
-                    if item.family == "decoder-operation" and item.identity == active_operation_id
-                ),
-                None,
-            )
-            if persisted_operation is None:
-                raise Phase7EAdapterError
-            decoder_operation = persisted_operation
-            persisted_pass = decoder_operation.payload.get("pass_number")
-            if type(persisted_pass) is not int or persisted_pass <= 0:
-                raise Phase7EAdapterError
-            pass_number = persisted_pass
-            if invocation.budget.decoder_passes == 0:
-                prior_operations = tuple(
-                    item
-                    for item in current.records
-                    if item.family == "decoder-operation"
-                    and item.identity != decoder_operation.identity
-                )
-                invocation.budget.decoder_passes = len(prior_operations)
-                invocation.budget.selected_rgb24_frames = sum(
-                    len(item.payload.get("target_request_ids", ())) for item in prior_operations
-                )
-        else:
-            decoder_operation = make_decoder_envelope(
-                acquisition,
-                pass_number,
-                tuple(item.identity for item in pending),
-            )
+            # A DECODING operation that existed when this boundary was entered
+            # belongs to an interrupted/unknown prior attempt.  The existing
+            # recovery boundary must classify it; this execution may not retry
+            # the decoder or admit any dependent evidence.
+            raise CommonSessionCancelledError
+        decoder_operation: StrictIdentityEnvelope
+        decoder_operation = make_decoder_envelope(
+            acquisition,
+            pass_number,
+            tuple(item.identity for item in pending),
+        )
         if pass_number > invocation.request.policy.maximum_decoder_passes:
             raise CommonSessionCapacityError
         invocation.validate(self.repository)
