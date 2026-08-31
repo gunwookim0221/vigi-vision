@@ -31,6 +31,7 @@ from vigi_vision.reference_frame_api_models import ReferenceFrameErrorResponse
 if TYPE_CHECKING:
     import anyio
 
+    from vigi_vision.recording_search_7e_public import Phase7EPublicService
     from vigi_vision.recording_search_service import RecordingSearchService
 
 
@@ -62,26 +63,47 @@ class RecordingSearchRequestBody(BaseModel):
         )
 
 
+class Phase7EStatusResponse(BaseModel):
+    """Credential-free request-relative status projection."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    investigation_id: str
+    run_id: str
+    schema_version: int
+    status: str
+    reason_code: str | None
+    terminal_result_id: str | None
+    phase8_status: str | None
+    phase8_reason: str | None
+
+
 @dataclass(frozen=True, slots=True)
 class RecordingSearchApiDependencies:
     """Route dependencies."""
 
     service: RecordingSearchService | None
     limiter: anyio.CapacityLimiter
+    phase7e_service: Phase7EPublicService | None
 
 
-def install_recording_search_routes(
+def install_recording_search_routes(  # noqa: C901 - explicit legacy/Phase 7E dispatch.
     app: FastAPI,
     service: RecordingSearchService | None,
     limiter: anyio.CapacityLimiter,
+    *,
+    phase7e_service: Phase7EPublicService | None = None,
 ) -> None:
     """Install the recording-search start and status routes."""
-    dependencies = RecordingSearchApiDependencies(service, limiter)
+    dependencies = RecordingSearchApiDependencies(service, limiter, phase7e_service)
+    app.state.phase7e_recording_search = phase7e_service is not None
     router = APIRouter(prefix="/api/v1/recording-searches", tags=["recording-searches"])
 
     async def start(
         body: RecordingSearchRequestBody, response: Response
     ) -> RecordingSearchManifest | RecordingSearchManifestV2 | JSONResponse:
+        if dependencies.phase7e_service is not None:
+            return _phase7e_cli_only()
         if dependencies.service is None:
             return _unavailable()
         try:
@@ -103,11 +125,32 @@ def install_recording_search_routes(
         )
         return result.manifest
 
-    async def get_status(
+    async def get_status(  # noqa: PLR0911 - explicit legacy/Phase 7E status dispatch.
         investigation_id: str, search_run_id: str
     ) -> (
         RecordingSearchManifest | RecordingSearchManifestV2 | RecordingSearchStatusV4 | JSONResponse
     ):
+        if dependencies.phase7e_service is not None:
+            try:
+                projected = await run_sync(
+                    dependencies.phase7e_service.status,
+                    investigation_id,
+                    search_run_id,
+                    limiter=dependencies.limiter,
+                )
+                if projected.phase7.status == "UNAVAILABLE":
+                    return ReferenceFrameApiError(
+                        status.HTTP_404_NOT_FOUND,
+                        "search_run_not_found",
+                        "The recording-search run was not found.",
+                    ).response()
+                return JSONResponse(status_code=status.HTTP_200_OK, content=projected.as_dict())
+            except Exception:  # noqa: BLE001 - HTTP boundary redacts unexpected failures.
+                return ReferenceFrameApiError(
+                    status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "The recording-search operation could not be completed safely.",
+                ).response()
         if dependencies.service is None:
             return _unavailable()
         try:
@@ -128,7 +171,8 @@ def install_recording_search_routes(
         methods=["POST"],
         response_model=RecordingSearchManifest
         | RecordingSearchManifestV2
-        | RecordingSearchStatusV4,
+        | RecordingSearchStatusV4
+        | Phase7EStatusResponse,
         status_code=status.HTTP_201_CREATED,
         responses={
             status.HTTP_400_BAD_REQUEST: {"model": ReferenceFrameErrorResponse},
@@ -143,7 +187,8 @@ def install_recording_search_routes(
         methods=["GET"],
         response_model=RecordingSearchManifest
         | RecordingSearchManifestV2
-        | RecordingSearchStatusV4,
+        | RecordingSearchStatusV4
+        | Phase7EStatusResponse,
         status_code=status.HTTP_200_OK,
         responses={
             status.HTTP_404_NOT_FOUND: {"model": ReferenceFrameErrorResponse},
@@ -160,6 +205,14 @@ def _unavailable() -> JSONResponse:
         status.HTTP_503_SERVICE_UNAVAILABLE,
         "recording_search_unavailable",
         "Recording search is unavailable.",
+    ).response()
+
+
+def _phase7e_cli_only() -> JSONResponse:
+    return ReferenceFrameApiError(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "recording_search_execution_requires_cli",
+        "Recording-search execution is available only through the CLI.",
     ).response()
 
 

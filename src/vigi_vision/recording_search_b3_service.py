@@ -23,7 +23,7 @@ from vigi_vision.recording_search_b2_models import RecordingSearchManifestV3
 from vigi_vision.recording_search_b3_duplicates import find_canonical_duplicate
 from vigi_vision.recording_search_b3_masks import (
     MaskPredictor,
-    predict_masks,
+    predict_masks_for_images,
 )
 from vigi_vision.recording_search_b3_media import DecodedMedia
 from vigi_vision.recording_search_b3_models import (
@@ -45,6 +45,9 @@ from vigi_vision.recording_search_models import (
 if TYPE_CHECKING:
     from collections.abc import Generator
 
+    from vigi_vision.investigation_confirmation_models import ConfirmationRoi
+    from vigi_vision.object_presence_evidence import ClassificationResult
+    from vigi_vision.object_presence_models import DecodedRgbImage
     from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
     from vigi_vision.recording_search_b3_contracts import (
         ClassificationHandle,
@@ -107,19 +110,15 @@ class RecordingSearchClassificationService:
         self, snapshot: ClassificationSnapshot
     ) -> NonAuthoritativeClassificationResult:
         """Classify only the immutable snapshot without repository authority."""
-        masks = predict_masks(snapshot, self.mask_predictor)
-        try:
-            result = ObjectPresenceClassifier(snapshot.policy).classify(
-                ClassifierInput(
-                    baseline_image=snapshot.baseline_image,
-                    probe_image=snapshot.probe_image,
-                    baseline_mask=masks[0],
-                    probe_mask=masks[1],
-                    roi=snapshot.confirmed_roi,
-                )
-            )
-        except Exception:  # noqa: BLE001 - classifier failures are one safe category.
-            _fail(ClassificationPreparationReason.INVALID_CLASSIFIER_OUTPUT)
+        result = classify_decoded_images(
+            baseline_image=snapshot.baseline_image,
+            probe_image=snapshot.probe_image,
+            source_width=snapshot.source_width,
+            source_height=snapshot.source_height,
+            roi=snapshot.confirmed_roi,
+            policy=snapshot.policy,
+            mask_predictor=self.mask_predictor,
+        )
         return NonAuthoritativeClassificationResult(snapshot, result)
 
     def find_duplicate_locked(
@@ -244,6 +243,45 @@ class RecordingSearchClassificationService:
             ):
                 _fail(ClassificationPreparationReason.INVALID_MEDIA_INPUT)
             return decoded
+
+
+def classify_decoded_images(  # noqa: PLR0913
+    *,
+    baseline_image: DecodedRgbImage,
+    probe_image: DecodedRgbImage,
+    source_width: int,
+    source_height: int,
+    roi: ConfirmationRoi,
+    policy: ObjectPresenceDecisionPolicy,
+    mask_predictor: MaskPredictor | None,
+) -> ClassificationResult:
+    """Run the authoritative B4 computation without legacy persistence.
+
+    Both the legacy B3 snapshot service and the Phase 7E production adapter
+    enter this function.  It owns only mask inference and deterministic
+    comparison; admission, claims, and publication remain in their callers.
+    """
+    masks = predict_masks_for_images(
+        baseline_image,
+        probe_image,
+        source_width,
+        source_height,
+        roi,
+        policy,
+        mask_predictor,
+    )
+    try:
+        return ObjectPresenceClassifier(policy).classify(
+            ClassifierInput(
+                baseline_image=baseline_image,
+                probe_image=probe_image,
+                baseline_mask=masks[0],
+                probe_mask=masks[1],
+                roi=roi,
+            )
+        )
+    except Exception:  # noqa: BLE001 - classifier failures are one safe category.
+        _fail(ClassificationPreparationReason.INVALID_CLASSIFIER_OUTPUT)
 
 
 def _fail(reason: ClassificationPreparationReason) -> NoReturn:

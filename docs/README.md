@@ -56,9 +56,10 @@ documentation route is added, removed, or relocated.
   and schema 7; 2 CLI and Phase 8 projection; 3 bounded acceptance. Read
   [ADR-0007](adr/ADR-0007-validated-recording-search.md) for the durable
   provenance/executor decision. The pure 7E-1A contract foundation, 7E-1B
-  persistence, 7E-1C common-session acquisition/local decoding, and 7E-1D
-  planning/evidence/terminal schema-7 orchestration are implemented locally;
-  7E-2 CLI/projection work, terminal real-NVR acceptance, and Phase 8
+  persistence, 7E-1C common-session acquisition/local decoding, 7E-1D
+  planning/evidence/terminal schema-7 orchestration, and 7E-2 synchronous
+  CLI/status/projection, CLI-only POST boundary, and no-media Phase 8 handoff
+  repository are implemented locally. Terminal real-NVR acceptance and Phase 8
   review-media processing remain unimplemented.
   Read
   [design/object-presence-classification.md](design/object-presence-classification.md)

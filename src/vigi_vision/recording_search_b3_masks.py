@@ -32,6 +32,7 @@ from vigi_vision.recording_search_b3_models import (
 )
 
 if TYPE_CHECKING:
+    from vigi_vision.investigation_confirmation_models import ConfirmationRoi
     from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
 
 
@@ -71,25 +72,52 @@ def predict_masks(
     predictor: MaskPredictor | None,
 ) -> tuple[BinaryMask, BinaryMask]:
     """Produce two validated source-aligned masks from immutable RGB values."""
+    return predict_masks_for_images(
+        snapshot.baseline_image,
+        snapshot.probe_image,
+        snapshot.source_width,
+        snapshot.source_height,
+        snapshot.confirmed_roi,
+        snapshot.policy,
+        predictor,
+    )
+
+
+def predict_masks_for_images(  # noqa: PLR0913
+    baseline_image: DecodedRgbImage,
+    probe_image: DecodedRgbImage,
+    source_width: int,
+    source_height: int,
+    roi: ConfirmationRoi,
+    policy: ObjectPresenceDecisionPolicy,
+    predictor: MaskPredictor | None,
+) -> tuple[BinaryMask, BinaryMask]:
+    """Produce masks from decoded pixels without requiring a persistence snapshot.
+
+    This is the persistence-neutral B4 preparation boundary.  The legacy
+    snapshot path and the Phase 7E adapter both call this function so that
+    prompt geometry, mask validation, and safe predictor error mapping remain
+    identical.
+    """
     if predictor is None:
         _fail(ClassificationPreparationReason.CLASSIFIER_UNAVAILABLE)
-    size = ImageSize(snapshot.source_width, snapshot.source_height)
+    size = ImageSize(source_width, source_height)
     point = Point(
-        snapshot.confirmed_roi.x + (snapshot.confirmed_roi.width - 1) // 2,
-        snapshot.confirmed_roi.y + (snapshot.confirmed_roi.height - 1) // 2,
+        roi.x + (roi.width - 1) // 2,
+        roi.y + (roi.height - 1) // 2,
     )
     try:
         baseline = _prediction_to_mask(
-            predictor.predict_from_rgb(snapshot.baseline_image, point, size),
+            predictor.predict_from_rgb(baseline_image, point, size),
             size,
             point,
-            snapshot.policy,
+            policy,
         )
         probe = _prediction_to_mask(
-            predictor.predict_from_rgb(snapshot.probe_image, point, size),
+            predictor.predict_from_rgb(probe_image, point, size),
             size,
             point,
-            snapshot.policy,
+            policy,
         )
     except ClassificationPreparationError:
         raise

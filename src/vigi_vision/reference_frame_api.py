@@ -45,6 +45,7 @@ from vigi_vision.investigation_confirmation_service import InvestigationConfirma
 from vigi_vision.nvr import SdkNvrGateway
 from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
 from vigi_vision.recording import RecordingPlanner
+from vigi_vision.recording_search_7e_public import Phase7EPublicService, build_phase7e_service
 from vigi_vision.recording_search_api import install_recording_search_routes
 from vigi_vision.recording_search_b3_masks import LimitedRgbMaskPredictor
 from vigi_vision.recording_search_b3_media import InMemoryRgbDecoder
@@ -128,6 +129,7 @@ class ReferenceFrameApiDependencies:
         default=None, repr=False
     )
     recording_search_service: RecordingSearchService | None = field(default=None, repr=False)
+    phase7e_service: Phase7EPublicService | None = field(default=None, repr=False)
 
 
 @final
@@ -153,6 +155,7 @@ def create_reference_frame_app(  # noqa: PLR0913 — each argument is an indepen
     channel_inventory: ChannelInventoryBoundary | None = None,
     confirmation_service: InvestigationConfirmationExecutionBoundary | None = None,
     recording_search_service: RecordingSearchService | None = None,
+    phase7e_service: Phase7EPublicService | None = None,
 ) -> FastAPI:
     """Create an injectable local API application without reading configuration in handlers."""
     dependencies = ReferenceFrameApiDependencies(
@@ -163,6 +166,7 @@ def create_reference_frame_app(  # noqa: PLR0913 — each argument is an indepen
         channel_inventory=channel_inventory,
         confirmation_service=confirmation_service,
         recording_search_service=recording_search_service,
+        phase7e_service=phase7e_service,
     )
     app = FastAPI(
         title="VIGI Vision Reference Frame API",
@@ -257,7 +261,10 @@ def create_reference_frame_app(  # noqa: PLR0913 — each argument is an indepen
         app, dependencies.confirmation_service, dependencies.limiter
     )
     install_recording_search_routes(
-        app, dependencies.recording_search_service, dependencies.limiter
+        app,
+        dependencies.recording_search_service,
+        dependencies.limiter,
+        phase7e_service=dependencies.phase7e_service,
     )
     if isinstance(suggestion_service, AssistedRoiSuggestionService):
         app.router.add_event_handler("shutdown", suggestion_service.close)
@@ -460,15 +467,16 @@ def create_reference_frame_app_from_environment() -> FastAPI:
             attempt_id_factory=lambda: f"classification-attempt-{token_hex(8)}",
             operation_id_factory=lambda: f"classification-op-{token_hex(8)}",
         )
+        replay_extractor = ReplayExtractor(
+            executable=ffmpeg,
+            username=connection.username.get_secret_value(),
+            password=connection.password,
+            timeout_diagnostic_directory=settings.replay_timeout_diagnostic_directory,
+            progress_diagnostics=settings.replay_progress_diagnostics,
+        )
         service = ReferenceFrameService(
             planner=planner,
-            replay_extractor=ReplayExtractor(
-                executable=ffmpeg,
-                username=connection.username.get_secret_value(),
-                password=connection.password,
-                timeout_diagnostic_directory=settings.replay_timeout_diagnostic_directory,
-                progress_diagnostics=settings.replay_progress_diagnostics,
-            ),
+            replay_extractor=replay_extractor,
             decoder=FfmpegReferenceFrameDecoder(ffmpeg, ffprobe),
             artifacts=artifacts,
             direct_acquirer=FfmpegDirectReferenceFrameAcquirer(
@@ -480,6 +488,15 @@ def create_reference_frame_app_from_environment() -> FastAPI:
             channel_inventory=channel_inventory,
             completed_resources=resources,
         )
+        phase7e_service = build_phase7e_service(
+            root=_RECORDING_SEARCH_ARTIFACT_ROOT,
+            confirmation_service=confirmation_service,
+            recording_planner=planner,
+            replay_extractor=replay_extractor,
+            ffmpeg=ffmpeg,
+            ffprobe=ffprobe,
+            mask_predictor=mask_predictor,
+        )
         return create_reference_frame_app(
             service,
             resources,
@@ -487,6 +504,7 @@ def create_reference_frame_app_from_environment() -> FastAPI:
             channel_inventory=channel_inventory,
             confirmation_service=confirmation_service,
             recording_search_service=recording_search_service,
+            phase7e_service=phase7e_service,
         )
     except ReferenceFrameApiStartupError:
         raise

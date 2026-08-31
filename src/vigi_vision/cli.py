@@ -32,6 +32,12 @@ from vigi_vision.profiles import (
     resolve_profile_alias,
 )
 from vigi_vision.recording_cli import analyze_recording
+from vigi_vision.recording_search_7e_cli import (
+    create_phase8_handoff,
+    delete_recording_search_media,
+    recording_search_status,
+    search_recordings,
+)
 from vigi_vision.sampling_cli import sample_recording
 from vigi_vision.snapshot_cli import snapshot
 from vigi_vision.video_cli import analyze_video
@@ -44,6 +50,10 @@ _ = app.command(name="analyze-recording")(analyze_recording)
 _ = app.command(name="investigate")(investigate)
 _ = app.command(name="snapshot")(snapshot)
 _ = app.command(name="sample-recording")(sample_recording)
+_ = app.command(name="search-recordings")(search_recordings)
+_ = app.command(name="recording-search-status")(recording_search_status)
+_ = app.command(name="create-phase8-handoff")(create_phase8_handoff)
+_ = app.command(name="delete-recording-search-media")(delete_recording_search_media)
 
 
 @final

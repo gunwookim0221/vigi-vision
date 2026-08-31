@@ -531,6 +531,7 @@ class MediaProbeFacts:
     height: int = 0
     average_frame_rate_num: int = 0
     average_frame_rate_den: int = 1
+    level: int = 0
 
     def validate(self) -> None:
         """Require one video stream, no audio, positive reduced timing facts."""
@@ -554,6 +555,8 @@ class MediaProbeFacts:
             or self.height <= 0
             or self.average_frame_rate_num <= 0
             or self.average_frame_rate_den <= 0
+            or type(self.level) is not int
+            or self.level < 0
         ):
             raise CommonSessionMediaError
 
@@ -998,6 +1001,12 @@ class FfprobeMediaProbe:
                 raise CommonSessionMediaError
             duration_ticks = _strict_integer_text(duration_value, nonnegative=False)
             start_pts = _strict_integer_text(start_value, nonnegative=True)
+            level_value = stream.get("level")
+            level = (
+                0
+                if level_value in (None, "", "N/A")
+                else _strict_integer_text(str(level_value), nonnegative=True)
+            )
             facts = MediaProbeFacts(
                 selected_video_stream_index=int(stream.get("index", 0)),
                 video_stream_count=len(video),
@@ -1013,6 +1022,7 @@ class FfprobeMediaProbe:
                 height=int(stream["height"]),
                 average_frame_rate_num=rate_num,
                 average_frame_rate_den=rate_den,
+                level=level,
             )
             facts.validate()
             return facts

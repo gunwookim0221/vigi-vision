@@ -1,5 +1,9 @@
 """Centralized credential-safe translation from domain failures to HTTP responses."""
 
+# FastAPI's request application is dynamically typed; this file only reads a
+# boolean composition marker and never serializes the dynamic object.
+# pyright: reportAny=false
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -325,7 +329,14 @@ async def safe_error_response(request: Request, error: Exception) -> JSONRespons
             if request.url.path == _RECORDING_SEARCH_API_PREFIX or request.url.path.startswith(
                 f"{_RECORDING_SEARCH_API_PREFIX}/"
             ):
-                return _recording_search_validation_error(error).response()
+                return _recording_search_validation_error(
+                    error,
+                    phase7e_enabled=getattr(
+                        request.app.state,
+                        "phase7e_recording_search",
+                        False,
+                    ),
+                ).response()
             return _validation_error(error).response()
         case _:
             return domain_error(error).response()
@@ -365,7 +376,9 @@ def _validation_error(error: RequestValidationError) -> ReferenceFrameApiError:
     return ReferenceFrameApiError(status_code, code, _INVALID_REQUEST_MESSAGE)
 
 
-def _recording_search_validation_error(error: RequestValidationError) -> ReferenceFrameApiError:
+def _recording_search_validation_error(
+    error: RequestValidationError, *, phase7e_enabled: bool = False
+) -> ReferenceFrameApiError:
     issues: Sequence[ErrorDetails] = error.errors()
     malformed_json = "json_invalid" in {issue["type"] for issue in issues}
     if malformed_json:
@@ -376,6 +389,6 @@ def _recording_search_validation_error(error: RequestValidationError) -> Referen
         )
     return ReferenceFrameApiError(
         _UNPROCESSABLE_CONTENT,
-        "invalid_request",
+        "invalid_recording_search_request" if phase7e_enabled else "invalid_request",
         "The recording-search request is invalid.",
     )

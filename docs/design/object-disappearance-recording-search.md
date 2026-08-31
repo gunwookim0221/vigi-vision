@@ -1074,6 +1074,16 @@ completed deletion returns success without mutation. Missing unindexed media,
 corruption, missing `--yes`, active execution, or an initial state other than
 strict `READY`/`CLIP_READY` refuses deletion.
 
+The Phase 7E-2 production composition uses a persistence-neutral B4 adapter.
+It validates the strictly reopened Phase 7E run, frame bytes, RGB/JPEG
+integrity, target ownership, and the Phase 6 baseline, then calls the same
+`classify_decoded_images` computation used by the legacy B3/B4 service. The
+adapter performs no repository writes and creates no schema-2 or schema-3
+records; the Phase 7E executor remains the sole owner of schema-6 admission
+and schema-7 publication. Classifier checkpoint, preprocessing, thresholds,
+evidence, timeout, and fixed failure categories remain those of the existing
+B4 computation.
+
 | Command result | Exit |
 | --- | --- |
 | success, identical reuse, already deleted | `0` |
@@ -1147,7 +1157,7 @@ The implementation composes existing services instead of copying them:
 | `RecordingPlanner` and `ReplayExtractor` | Plan and extract bounded temporary replay media. | Classification or durable search state. |
 | Existing reference-frame decoder boundary | Continue serving existing single-target callers unchanged. | Multi-target identity or transition reasoning. |
 | New Phase 7 batch decoder extension | Resolve one bounded target set in one decode session and return frame identity, order, timing, and digest facts. | Classification or search decisions. |
-| New `ObjectObservationClassifier` production adapter | Combine EfficientSAM-Ti masks with a deterministic aligned-ROI appearance comparison under the [Phase 7B classification contract](object-presence-classification.md). | Search order, recording acquisition, or interval reasoning. |
+| Shared persistence-neutral B4 computation (`classify_decoded_images`) and Phase 7E adapter | Combine EfficientSAM-Ti masks with the deterministic aligned-ROI appearance comparison under the [Phase 7B classification contract](object-presence-classification.md), after strict Phase 7E frame/baseline admission. | Legacy schema-2/3 persistence, search order, recording acquisition, or interval reasoning. |
 | New `RecordingSearchService` | Own run lifecycle and compose acquisition, classification, search, persistence, and handoff. | HTTP/CLI parsing or Phase 8 media generation. |
 
 The generic `sample-recording` command is neither subprocess nor search engine.

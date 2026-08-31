@@ -215,7 +215,10 @@ delayed-retry reuse. The production terminalization operation reconstructs its
 snapshot from indexed schema-2/3 evidence, reloads the post-D1 schema-3
 manifest under the mutation boundary, persists a validated D1 reconstruction
 envelope for FOUND, and publishes only after strict readback; a post-commit
-readback failure never downgrades schema 4. Phase 7E-2 CLI/projection integration,
+readback failure never downgrades schema 4. Phase 7E-2 public CLI/projection
+integration is implemented locally: the documented synchronous search/status/
+handoff/deletion commands, CLI-only HTTP execution boundary, strict status
+projection, and separate no-media Phase 8 handoff repository are available.
 Phase 7E-3 real-NVR acceptance, Phase 8 review-media processing, and Phase 9
 result UI remain unimplemented. The Phase 7E feasibility work proves that VIGI
 segment metadata supplies coverage only and that current replay exposes
@@ -238,9 +241,9 @@ Phase 8 state models, executable 59-vector conformance checks, one bounded
 replay/remux with durable `.media` retention, exact local target selection,
 RGB24/JPEG integrity, persisted-frame B4 admission, adaptive same-session
 evidence admission, C2/D1/D2 composition, complete source reconstruction,
-immutable schema 7, and strict terminal readback/status. CLI execution and
-real-NVR acceptance remain unimplemented in
-later 7E slices; no terminal real-NVR search has been completed.
+immutable schema 7, and strict terminal readback/status. CLI execution is
+implemented in the 7E-2 boundary; real-NVR acceptance remains unimplemented in
+the later 7E slice and no terminal real-NVR search has been completed.
 Absolute source-time calibration remains unavailable; Phase 4C-2
 provides transient frontend-only selection of one
 successful candidate, and Phase 5-1/5-2 provide the transient source-space
