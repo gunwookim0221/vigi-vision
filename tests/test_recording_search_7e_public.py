@@ -5,20 +5,14 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from types import SimpleNamespace
-
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from vigi_vision.recording_search_7e_1d import Phase7EStatus
 from vigi_vision.recording_search_7e_public import (
-    Phase7EPublicError,
     Phase7EPublicRequest,
     Phase7EPublicStatus,
-    Phase8HandoffRepository,
     approved_phase7e_policy,
 )
 from vigi_vision.reference_frame_api import create_reference_frame_app
@@ -71,101 +65,6 @@ def test_policy_snapshots_reproduce_approved_identities() -> None:
     assert classifier.identity == (
         "rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f"
     )
-
-
-def test_phase8_handoff_persists_strict_pair_and_reuses_it(tmp_path: Path) -> None:
-    media_root = tmp_path / "media"
-    media = media_root / "inv-01" / "run-01"
-    media.mkdir(parents=True)
-    common_id = "rr-common-session-v1-" + "0" * 64
-    clip = media / f"{common_id}.mp4"
-    clip.write_bytes(b"session")
-    repository = Phase8HandoffRepository(tmp_path / "phase8", media_root=media_root)
-    run = SimpleNamespace(
-        schema_version=7,
-        result_kind="FOUND",
-        investigation_id="inv-01",
-        run_id="run-01",
-    )
-    arguments = {
-        "terminal_result_id": "rr-terminal-result-v1-" + "1" * 64,
-        "common_session_id": common_id,
-        "selected_observation_ids": [],
-        "selected_support_group_ids": [],
-        "stream_index": 0,
-        "width": 32,
-        "height": 32,
-        "duration_ticks": 1,
-        "time_base_num": 1,
-        "time_base_den": 1,
-        "frame_rate_num": 1,
-        "frame_rate_den": 1,
-        "level": 41,
-        "codec": "h264",
-        "profile": "High",
-        "pixel_format": "yuv420p",
-        "audio_stream_count": 0,
-        "interval_start": "2026-07-20T03:00:00Z",
-        "interval_end": "2026-07-20T03:00:01Z",
-    }
-    first = repository.create_or_reuse(run, clip, **arguments)
-    before = {
-        path.name: path.read_bytes()
-        for path in (tmp_path / "phase8" / "inv-01" / "run-01").iterdir()
-    }
-    second = repository.create_or_reuse(run, clip, **arguments)
-    assert first.identity == second.identity
-    assert repository.status("inv-01", "run-01") == ("READY", None)
-    assert before == {
-        path.name: path.read_bytes()
-        for path in (tmp_path / "phase8" / "inv-01" / "run-01").iterdir()
-    }
-    for name in ("source-clip.json", "phase8-request.json", "manifest.json"):
-        document = json.loads((tmp_path / "phase8" / "inv-01" / "run-01" / name).read_text())
-        assert set(document) == {"family", "identity", "payload"}
-
-
-def test_phase8_status_is_read_only_for_missing_run(tmp_path: Path) -> None:
-    repository = Phase8HandoffRepository(tmp_path / "phase8")
-    assert repository.status("inv-01", "run-01") == (None, None)
-    assert not (tmp_path / "phase8").exists()
-
-
-def test_phase8_handoff_rejects_media_outside_configured_root(tmp_path: Path) -> None:
-    foreign = tmp_path / "foreign.mp4"
-    foreign.write_bytes(b"session")
-    repository = Phase8HandoffRepository(tmp_path / "phase8", media_root=tmp_path / "media")
-    run = SimpleNamespace(
-        schema_version=7,
-        result_kind="FOUND",
-        investigation_id="inv-01",
-        run_id="run-01",
-    )
-    with pytest.raises(Phase7EPublicError) as error:
-        repository.create_or_reuse(
-            run,
-            foreign,
-            terminal_result_id="rr-terminal-result-v1-" + "1" * 64,
-            common_session_id="rr-common-session-v1-" + "0" * 64,
-            selected_observation_ids=[],
-            selected_support_group_ids=[],
-            stream_index=0,
-            width=32,
-            height=32,
-            duration_ticks=1,
-            time_base_num=1,
-            time_base_den=1,
-            frame_rate_num=1,
-            frame_rate_den=1,
-            level=41,
-            codec="h264",
-            profile="High",
-            pixel_format="yuv420p",
-            audio_stream_count=0,
-            interval_start="2026-07-20T03:00:00Z",
-            interval_end="2026-07-20T03:00:01Z",
-        )
-    assert getattr(error.value, "code", None) == "phase8_media_unavailable"
 
 
 def test_phase7e_post_is_cli_only_and_validation_is_safe() -> None:

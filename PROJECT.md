@@ -218,8 +218,11 @@ envelope for FOUND, and publishes only after strict readback; a post-commit
 readback failure never downgrades schema 4. Phase 7E-2 public CLI/projection
 integration is implemented locally: the documented synchronous search/status/
 handoff/deletion commands, CLI-only HTTP execution boundary, strict status
-projection, and separate no-media Phase 8 handoff repository are available.
-Phase 7E-3 real-NVR acceptance, Phase 8 review-media processing, and Phase 9
+projection, atomic closed-membership Phase 8 source-clip package, and durable
+two-media `READY`/`DELETING`/`DELETED` lifecycle are available. The source clip
+is generated locally only from the strictly verified retained common-session
+MP4; no second replay or re-analysis is performed. Phase 7E-3 real-NVR
+acceptance, later Phase 8 review processing, and Phase 9
 result UI remain unimplemented. The Phase 7E feasibility work proves that VIGI
 segment metadata supplies coverage only and that current replay exposes
 request-relative timestamps without authoritative frame UTC. The rewritten

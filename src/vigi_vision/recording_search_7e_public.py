@@ -4,24 +4,18 @@
 # contract (including its many typed media fields) and maps every failure to a
 # fixed category.  Keep the implementation readable while exempting only
 # complexity/style rules that describe those contract mechanics.
-# ruff: noqa: C901, D102, D107, EM101, PERF203, PLR0912, PLR0913, PLR0915, PLR2004, PLC0415, TRY300, TRY301
+# ruff: noqa: D102, D107, EM101, PLR0913, PLR2004, PLC0415
 # pyright: reportAny=false, reportArgumentType=false, reportAttributeAccessIssue=false, reportUnannotatedClassAttribute=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnnecessaryIsInstance=false, reportUnusedCallResult=false
 
 from __future__ import annotations
 
-import hashlib
-import json
-import os
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from secrets import token_hex
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, StrictStr
 
-from vigi_vision.durable_io import is_safe_contained_path, is_safe_path, load_durable_json_object
 from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
 from vigi_vision.recording_search_7e_1c import (
     CommonSessionAcquirer,
@@ -37,6 +31,11 @@ from vigi_vision.recording_search_7e_1d import (
     read_phase7_status,
 )
 from vigi_vision.recording_search_7e_models import StrictIdentityEnvelope
+from vigi_vision.recording_search_7e_phase8 import (
+    FfmpegSourceClipGenerator,
+    Phase8HandoffRepository,
+    Phase8LifecycleError,
+)
 from vigi_vision.recording_search_7e_repository import (
     Phase7ECorruptError,
     Phase7EInProgressError,
@@ -48,6 +47,7 @@ from vigi_vision.reference_frame_models import parse_reference_frame_request
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
 
 class Phase7EPublicError(RuntimeError):
@@ -58,22 +58,7 @@ class Phase7EPublicError(RuntimeError):
         self.code = code
 
 
-_PHASE7_SCHEMA7 = 7
 _MAX_SEARCH_SECONDS = 600
-_PHASE8_REQUEST_FILE = "phase8-request.json"
-_PHASE8_SOURCE_CLIP_FILE = "source-clip.json"
-_PHASE8_MANIFEST_FILE = "manifest.json"
-
-
-def _safe_component(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and bool(value)
-        and value not in {".", ".."}
-        and "/" not in value
-        and "\\" not in value
-        and "\0" not in value
-    )
 
 
 class StrictRequestModel(BaseModel):
@@ -109,281 +94,6 @@ class Phase7EPublicStatus:
             "phase8_status": self.phase8_status,
             "phase8_reason": self.phase8_reason,
         }
-
-
-class Phase8HandoffRepository:
-    """Minimal separate request repository; it never generates review media."""
-
-    def __init__(self, root: Path, media_root: Path | None = None) -> None:
-        self.root = root
-        self.media_root = media_root
-
-    def _directory(self, investigation_id: str, run_id: str, *, create: bool = True) -> Path:
-        if not _safe_component(investigation_id) or not _safe_component(run_id):
-            raise Phase7EPublicError("invalid_request")
-        if not is_safe_path(self.root):
-            raise Phase7EPublicError("phase8_corrupt")
-        try:
-            if self.root.exists() and (self.root.is_symlink() or not self.root.is_dir()):
-                raise Phase7EPublicError("phase8_corrupt")
-            if create:
-                self.root.mkdir(parents=True, exist_ok=True)
-            elif not self.root.exists():
-                return self.root / investigation_id / run_id
-        except OSError as error:
-            raise Phase7EPublicError("phase8_corrupt") from error
-        directory = self.root / investigation_id / run_id
-        if not is_safe_contained_path(self.root, directory):
-            raise Phase7EPublicError("phase8_corrupt")
-        return directory
-
-    @staticmethod
-    def _read_envelope(path: Path) -> StrictIdentityEnvelope:
-        try:
-            raw = path.read_text(encoding="utf-8")
-            document = load_durable_json_object(raw)
-            return StrictIdentityEnvelope.model_validate(document, strict=True)
-        except Exception as error:
-            raise Phase7EPublicError("phase8_corrupt") from error
-
-    @staticmethod
-    def _document(envelope: StrictIdentityEnvelope) -> str:
-        return json.dumps(
-            {
-                "family": envelope.family,
-                "identity": envelope.identity,
-                "payload": envelope.payload,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-
-    def _write_pair(
-        self,
-        directory: Path,
-        source_clip: StrictIdentityEnvelope,
-        request: StrictIdentityEnvelope,
-        manifest: StrictIdentityEnvelope,
-    ) -> None:
-        directory_was_present = directory.exists()
-        try:
-            if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
-                raise Phase7EPublicError("phase8_corrupt")
-            directory.mkdir(parents=True, exist_ok=True)
-            if not is_safe_contained_path(self.root, directory, require_target=True):
-                raise Phase7EPublicError("phase8_corrupt")
-            targets = (
-                (directory / _PHASE8_SOURCE_CLIP_FILE, source_clip),
-                (directory / _PHASE8_REQUEST_FILE, request),
-                (directory / _PHASE8_MANIFEST_FILE, manifest),
-            )
-            if any(path.exists() or path.is_symlink() for path, _ in targets):
-                existing = tuple(self._read_envelope(path) for path, _ in targets)
-                if all(
-                    left == right
-                    for (left, right) in zip(
-                        existing, (source_clip, request, manifest), strict=True
-                    )
-                ):
-                    return
-                raise Phase7EPublicError("phase8_conflict")
-            created: list[Path] = []
-            try:
-                for target, envelope in targets:
-                    temporary_path: Path | None = None
-                    try:
-                        descriptor, name = tempfile.mkstemp(
-                            prefix=f".{target.name}.", suffix=".tmp", dir=directory
-                        )
-                        temporary_path = Path(name)
-                        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
-                            stream.write(self._document(envelope))
-                            stream.flush()
-                            os.fsync(stream.fileno())
-                        temporary_path.rename(target)
-                        created.append(target)
-                    finally:
-                        if temporary_path is not None and temporary_path.exists():
-                            temporary_path.unlink(missing_ok=True)
-                _ = self._read_envelope(directory / _PHASE8_SOURCE_CLIP_FILE)
-                _ = self._read_envelope(directory / _PHASE8_REQUEST_FILE)
-                _ = self._read_envelope(directory / _PHASE8_MANIFEST_FILE)
-            except Phase7EPublicError:
-                for path in reversed(created):
-                    try:
-                        if path.is_file() and not path.is_symlink():
-                            path.unlink()
-                    except OSError:
-                        pass
-                raise
-            except (OSError, ValueError, TypeError) as error:
-                for path in reversed(created):
-                    try:
-                        if path.is_file() and not path.is_symlink():
-                            path.unlink()
-                    except OSError:
-                        pass
-                raise Phase7EPublicError("phase8_corrupt") from error
-        except Phase7EPublicError:
-            if not directory_was_present and directory.exists():
-                try:
-                    if not any(directory.iterdir()):
-                        directory.rmdir()
-                except OSError:
-                    pass
-            raise
-
-    def create_or_reuse(
-        self,
-        run: object,
-        source_media: Path,
-        *,
-        terminal_result_id: str,
-        common_session_id: str,
-        selected_observation_ids: list[str],
-        selected_support_group_ids: list[str],
-        stream_index: int,
-        width: int,
-        height: int,
-        duration_ticks: int,
-        time_base_num: int,
-        time_base_den: int,
-        frame_rate_num: int,
-        frame_rate_den: int,
-        level: int,
-        codec: str,
-        profile: str,
-        pixel_format: str,
-        audio_stream_count: int,
-        interval_start: str,
-        interval_end: str,
-    ) -> StrictIdentityEnvelope:
-        """Persist one immutable Phase 8 request from approved terminal media."""
-        if (
-            getattr(run, "schema_version", None) != _PHASE7_SCHEMA7
-            or getattr(run, "result_kind", None) != "FOUND"
-            or not _safe_component(str(getattr(run, "investigation_id", "")))
-            or not _safe_component(str(getattr(run, "run_id", "")))
-        ):
-            raise Phase7EPublicError("phase8_not_eligible")
-        if not source_media.is_file() or source_media.is_symlink():
-            raise Phase7EPublicError("phase8_media_unavailable")
-        media_root = self.media_root or source_media.parent.parent.parent
-        if not is_safe_path(media_root) or not is_safe_contained_path(
-            media_root, source_media, require_target=True
-        ):
-            raise Phase7EPublicError("phase8_media_unavailable")
-        raw = source_media.read_bytes()
-        if not raw:
-            raise Phase7EPublicError("phase8_media_corrupt")
-        media_policy = _media_policy()
-        clip_integrity = {
-            "sha256": hashlib.sha256(raw).hexdigest(),
-            "size_bytes": len(raw),
-            "observed_duration_ticks": duration_ticks,
-            "observed_time_base_num": time_base_num,
-            "observed_time_base_den": time_base_den,
-            "video_stream_index": stream_index,
-            "codec": codec,
-            "profile": profile,
-            "level": level,
-            "pixel_format": pixel_format,
-            "width": width,
-            "height": height,
-            "average_frame_rate_num": frame_rate_num,
-            "average_frame_rate_den": frame_rate_den,
-            "audio_stream_count": audio_stream_count,
-            "generation_outcome": "SOURCE_SESSION",
-        }
-        investigation_id = str(run.investigation_id)
-        run_id = str(run.run_id)
-        source_clip = StrictIdentityEnvelope.from_payload(
-            "source-clip",
-            {
-                "schema_version": 1,
-                "investigation_id": investigation_id,
-                "run_id": run_id,
-                "terminal_result_id": terminal_result_id,
-                "common_session_id": common_session_id,
-                "input_stream_index": stream_index,
-                "media_generation_policy_id": media_policy.identity,
-                "requested_interval_start_requested_time_utc": interval_start,
-                "requested_interval_end_requested_time_utc": interval_end,
-                "clipped_interval_start_requested_time_utc": interval_start,
-                "clipped_interval_end_requested_time_utc": interval_end,
-            },
-        )
-        request = StrictIdentityEnvelope.from_payload(
-            "phase8-request",
-            {
-                "schema_version": 1,
-                "investigation_id": investigation_id,
-                "run_id": run_id,
-                "terminal_result_id": terminal_result_id,
-                "source_clip_id": source_clip.identity,
-                "selected_observation_ids": selected_observation_ids,
-                "selected_support_group_ids": selected_support_group_ids,
-                "clip_integrity": clip_integrity,
-            },
-        )
-        manifest = StrictIdentityEnvelope.from_payload(
-            "phase8-manifest",
-            {
-                "schema_version": 1,
-                "state": "READY",
-                "investigation_id": investigation_id,
-                "run_id": run_id,
-                "terminal_result_id": terminal_result_id,
-                "common_session_id": common_session_id,
-                "previous_phase8_manifest_id": None,
-                "source_clip_id": source_clip.identity,
-                "clip_integrity": clip_integrity,
-                "phase8_request_id": request.identity,
-            },
-        )
-        directory = self._directory(investigation_id, run_id)
-        self._write_pair(directory, source_clip, request, manifest)
-        return request
-
-    def status(self, investigation_id: str, run_id: str) -> tuple[str | None, str | None]:
-        directory = self._directory(investigation_id, run_id, create=False)
-        target = directory / _PHASE8_REQUEST_FILE
-        source = directory / _PHASE8_SOURCE_CLIP_FILE
-        manifest = directory / _PHASE8_MANIFEST_FILE
-        if not target.exists() and not source.exists() and not manifest.exists():
-            return None, None
-        if (
-            target.is_symlink()
-            or source.is_symlink()
-            or manifest.is_symlink()
-            or not target.is_file()
-            or not source.is_file()
-            or not manifest.is_file()
-        ):
-            return "CORRUPT", "phase8_corrupt"
-        try:
-            request = self._read_envelope(target)
-            source_clip = self._read_envelope(source)
-            phase8_manifest = self._read_envelope(manifest)
-            if (
-                request.family != "phase8-request"
-                or source_clip.family != "source-clip"
-                or phase8_manifest.family != "phase8-manifest"
-                or request.payload.get("investigation_id") != investigation_id
-                or request.payload.get("run_id") != run_id
-                or source_clip.payload.get("investigation_id") != investigation_id
-                or source_clip.payload.get("run_id") != run_id
-                or phase8_manifest.payload.get("investigation_id") != investigation_id
-                or phase8_manifest.payload.get("run_id") != run_id
-                or request.payload.get("source_clip_id") != source_clip.identity
-                or phase8_manifest.payload.get("source_clip_id") != source_clip.identity
-                or phase8_manifest.payload.get("phase8_request_id") != request.identity
-            ):
-                return "CORRUPT", "phase8_corrupt"
-            return "READY", None
-        except Phase7EPublicError:
-            return "CORRUPT", "phase8_corrupt"
 
 
 @dataclass(frozen=True, slots=True)
@@ -468,11 +178,11 @@ class Phase7EPublicService:
             ).execute(invocation, admitted.acquisition)
         phase8_status: tuple[str | None, str | None] = (None, None)
         if create_phase8_handoff:
-            phase8 = self.create_phase8_handoff(
+            self.create_phase8_handoff(
                 request_domain.investigation_id,
                 request_domain.run_id,
             )
-            phase8_status = ("READY", phase8.identity)
+            phase8_status = ("READY", None)
         return Phase7EPublicStatus(
             read_phase7_status(self.repository, request_domain.investigation_id, run_id),
             phase8_status[0],
@@ -481,7 +191,13 @@ class Phase7EPublicService:
 
     def status(self, investigation_id: str, run_id: str) -> Phase7EPublicStatus:
         phase7 = read_phase7_status(self.repository, investigation_id, run_id)
-        phase8, reason = self.phase8_repository.status(investigation_id, run_id)
+        run: object | None = None
+        if phase7.schema_version == 7:
+            try:
+                run = self.repository.inspect_current_read_only(investigation_id, run_id)
+            except (Phase7EInProgressError, Phase7ENotFoundError, Phase7ECorruptError):
+                run = None
+        phase8, reason = self.phase8_repository.status(run, investigation_id, run_id)
         return Phase7EPublicStatus(phase7, phase8, reason)
 
     def create_phase8_handoff(self, investigation_id: str, run_id: str) -> StrictIdentityEnvelope:
@@ -494,6 +210,8 @@ class Phase7EPublicService:
                     ownership=ownership,
                 )
                 return self._create_handoff(run)
+        except Phase8LifecycleError as error:
+            raise Phase7EPublicError(error.code) from error
         except Phase7EInProgressError as error:
             raise Phase7EPublicError("already_running") from error
         except Phase7ENotFoundError as error:
@@ -510,29 +228,11 @@ class Phase7EPublicService:
                     run_id,
                     ownership=ownership,
                 )
-                if not run.is_schema7 or run.result_kind != "FOUND":
-                    raise Phase7EPublicError("phase8_not_eligible")
-                phase8_status, _ = self.phase8_repository.status(investigation_id, run_id)
-                if phase8_status != "READY":
-                    raise Phase7EPublicError("phase8_not_eligible")
-                media_root = self.repository.media_root
-                if media_root is None:
-                    raise Phase7EPublicError("phase8_media_unavailable")
-                common_session_id = run.manifest.payload.get("common_session_id")
-                if not isinstance(common_session_id, str):
-                    raise Phase7EPublicError("phase8_media_corrupt")
-                path = media_root / investigation_id / run_id / f"{common_session_id}.mp4"
-                if (
-                    path.is_symlink()
-                    or not is_safe_contained_path(media_root, path, require_target=False)
-                    or (path.exists() and not path.is_file())
-                ):
-                    raise Phase7EPublicError("phase8_media_corrupt")
-                if path.exists():
-                    path.unlink()
-                return "DELETED"
+                return self.phase8_repository.delete(run)
         except Phase7EPublicError:
             raise
+        except Phase8LifecycleError as error:
+            raise Phase7EPublicError(error.code) from error
         except Phase7EInProgressError as error:
             raise Phase7EPublicError("already_running") from error
         except Phase7ENotFoundError as error:
@@ -550,47 +250,10 @@ class Phase7EPublicService:
         )
 
     def _create_handoff(self, run: object) -> StrictIdentityEnvelope:
-        terminal = next(item for item in run.records if item.family == "terminal-result")
-        session = next(item for item in run.records if item.family == "common-session")
-        snapshot = next(item for item in run.records if item.family == "evidence-snapshot")
-        payload = session.payload
-        media_root = self.repository.media_root
-        if media_root is None:
-            raise Phase7EPublicError("phase8_media_unavailable")
-        if self.media_probe is None:
-            raise Phase7EPublicError("phase8_media_unavailable")
-        try:
-            media = self.media_probe.probe(
-                media_root
-                / run.investigation_id
-                / run.run_id
-                / f"{payload['common_session_id']}.mp4",
-                float(self.policy.payload["source_clip_timeout_seconds"]),
-            )
-        except Exception as error:
-            raise Phase7EPublicError("phase8_media_corrupt") from error
         return self.phase8_repository.create_or_reuse(
             run,
-            media_root / run.investigation_id / run.run_id / f"{payload['common_session_id']}.mp4",
-            terminal_result_id=terminal.identity,
-            common_session_id=str(payload["common_session_id"]),
-            selected_observation_ids=list(snapshot.payload["selected_observation_ids"]),
-            selected_support_group_ids=list(snapshot.payload["selected_support_group_ids"]),
-            stream_index=media.selected_video_stream_index,
-            width=media.width,
-            height=media.height,
-            duration_ticks=media.duration_ticks,
-            time_base_num=media.time_base_num,
-            time_base_den=media.time_base_den,
-            frame_rate_num=media.average_frame_rate_num,
-            frame_rate_den=media.average_frame_rate_den,
-            codec=media.codec,
-            profile=media.profile,
-            pixel_format=media.pixel_format,
-            audio_stream_count=media.audio_stream_count,
-            level=media.level,
-            interval_start=str(payload["replay_start_requested_time_utc"]),
-            interval_end=str(payload["replay_end_requested_time_utc"]),
+            approved_phase8_media_policy(),
+            timeout_seconds=float(self.policy.payload["source_clip_timeout_seconds"]),
         )
 
 
@@ -644,13 +307,19 @@ def build_phase7e_service(
         policy,
         classifier_policy,
         object_policy,
-        Phase8HandoffRepository(root.parent / "phase8-handoffs", media_root=root / ".media"),
+        Phase8HandoffRepository(
+            root / ".phase8",
+            root / ".media",
+            FfprobeMediaProbe(ffprobe),
+            FfmpegSourceClipGenerator(ffmpeg),
+        ),
         now_utc or (lambda: datetime.now(timezone.utc)),
         FfprobeMediaProbe(ffprobe),
     )
 
 
-def _media_policy() -> StrictIdentityEnvelope:
+def approved_phase8_media_policy() -> StrictIdentityEnvelope:
+    """Return the approved immutable Phase 8 media-generation policy."""
     return StrictIdentityEnvelope.from_payload(
         "media-generation-policy",
         {
@@ -800,5 +469,6 @@ __all__ = [
     "Phase7EPublicStatus",
     "Phase8HandoffRepository",
     "approved_phase7e_policy",
+    "approved_phase8_media_policy",
     "build_phase7e_service",
 ]
