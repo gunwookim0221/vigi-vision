@@ -44,6 +44,7 @@ from vigi_vision.recording_search_b4_support import map_preparation_reason
 
 if TYPE_CHECKING:
     from vigi_vision.investigation_confirmation_models import ConfirmationRoi
+    from vigi_vision.object_presence_evidence import ClassificationResult
     from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
     from vigi_vision.recording_search_b3_contracts import MediaDecoder
     from vigi_vision.recording_search_b3_masks import MaskPredictor
@@ -257,7 +258,7 @@ def _bounded_classification(  # noqa: PLR0913
     roi: ConfirmationRoi,
     policy: ObjectPresenceDecisionPolicy,
     predictor: MaskPredictor | None,
-) -> object:
+) -> ClassificationResult:
     """Run the shared computation under the Phase 7 bounded classifier budget."""
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vigi-phase7e-b4")
     future = executor.submit(
