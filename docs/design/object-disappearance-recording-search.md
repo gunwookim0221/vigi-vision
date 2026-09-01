@@ -133,6 +133,28 @@ re-reads the manifest before changing a still-running schema 5 or 6 to
 `INTERRUPTED/interrupted`; a held lock leaves `RUNNING` untouched.
 It removes only safe staging whose recorded final target is that exact run.
 
+Every newly published retained MP4 also has exactly one repository-owned
+operational filesystem authority record at
+`R/.media/<investigation_id>/<run_id>/<common_session_id>.authority.json`.
+This canonical version-1 record is not a Phase 7 identity family and does not
+enter schemas 5–7, semantic identities, or golden vectors. It binds the exact
+repository-relative media path, investigation, run, common session, replay
+operation, existing SHA-256/length/probe facts, and the final object's
+handle-derived volume/file identity plus required file stamp. The record is
+captured only after final-path MP4 validation, atomically admitted without
+overwrite, and strictly read back with the same final open object before
+downstream eligibility. Digest equality alone does not prove that a copied or
+recreated file is the originally published filesystem object.
+
+The authority is deliberately platform-bound and nonportable. Windows uses
+the volume serial and stable file ID obtained from the open file handle; POSIX
+uses the strongest available device/inode equivalent for verification. An
+absent, malformed, replaced, unsupported, or mismatched authority fails closed.
+Strict reopen never creates, repairs, migrates, or normalizes it. Older runs
+without the record remain readable as Phase 7 evidence, but Phase 8 handoff and
+destructive deletion are unavailable and no digest-only fallback or automatic
+migration is permitted.
+
 ### Schemas 5 → 6 → 7
 
 Every record is strict JSON: duplicate/missing/unknown keys, coercion, invalid
@@ -1073,6 +1095,16 @@ reopen that state and resumes only its indexed files/tombstones. Repeating a
 completed deletion returns success without mutation. Missing unindexed media,
 corruption, missing `--yes`, active execution, or an initial state other than
 strict `READY`/`CLIP_READY` refuses deletion.
+
+Immediately before each destructive tombstone step, deletion reopens the exact
+recorded regular file with read-and-delete access, denies replacement, compares
+the current handle-derived filesystem identity, complete recorded stamp,
+SHA-256, and length with the deletion journal, and marks that same open Windows
+object for deletion through `SetFileInformationByHandle`. It confirms removal
+and flushes the parent before advancing the journal. There is no close-then-
+unlink or path-based fallback. A replacement or locked/unsupported object is
+preserved, leaves durable `DELETING`, and projects the safe media-corrupt state.
+Platforms without an equivalent exact-object deletion primitive fail closed.
 
 The Phase 7E-2 production composition uses a persistence-neutral B4 adapter.
 It validates the strictly reopened Phase 7E run, frame bytes, RGB/JPEG

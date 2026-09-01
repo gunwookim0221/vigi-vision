@@ -1,5 +1,5 @@
 # pyright: reportAny=false, reportExplicitAny=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportUnknownMemberType=false, reportUnannotatedClassAttribute=false, reportUnusedCallResult=false, reportUnnecessaryIsInstance=false, reportUnreachable=false, reportInvalidTypeForm=false, reportAttributeAccessIssue=false, reportDeprecated=false, reportUnusedParameter=false, reportArgumentType=false, reportUnusedFunction=false
-# ruff: noqa: ARG002, C901, EM101, FURB171, PLR0912, PLR0913, PLR0915, PLR2004, PLW0108, PTH105, RET504, RUF022, SIM102, SIM108, TRY003, TRY300
+# ruff: noqa: ARG002, C901, EM101, FURB171, I001, PLR0912, PLR0913, PLR0915, PLR2004, PLW0108, PTH105, RET504, RUF022, SIM102, SIM108, TRY003, TRY300
 """Strict local persistence for the Phase 7E schema-5/6/7 boundary.
 
 This module does not acquire recordings, decode media, invoke B4, or create
@@ -44,6 +44,13 @@ from vigi_vision.recording_search_7e_models import (
     Schema6TargetState,
     Schema7Manifest,
     StrictIdentityEnvelope,
+)
+from vigi_vision.recording_search_7e_media_authority import (
+    MediaFilesystemAuthorityError,
+    authority_path,
+    read_retained_media_authority,
+    stable_source_path,
+    verified_retained_media,
 )
 from vigi_vision.recording_search_7e_validation import (
     Phase7EValidationError,
@@ -1185,8 +1192,35 @@ class RecordingSearch7ERepository:
                 or _sha256_path(media) != session.payload["mp4_sha256"]
             ):
                 raise Phase7ECorruptError
-            facts = self.media_probe.probe(media, self.media_probe_timeout_seconds)
-        except (OSError, RuntimeError, ValueError, TypeError):
+            authority_target = authority_path(media)
+            if authority_target.exists() or authority_target.is_symlink():
+                authority_session = {
+                    **session.payload,
+                    "common_session_id": session.identity,
+                }
+                _ = read_retained_media_authority(
+                    self.media_root,
+                    media,
+                    authority_session,
+                )
+                with verified_retained_media(
+                    self.media_root,
+                    media,
+                    authority_session,
+                ) as (descriptor, _authority):
+                    facts = self.media_probe.probe(
+                        stable_source_path(descriptor, media),
+                        self.media_probe_timeout_seconds,
+                    )
+            else:
+                facts = self.media_probe.probe(media, self.media_probe_timeout_seconds)
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            TypeError,
+            MediaFilesystemAuthorityError,
+        ):
             raise Phase7ECorruptError from None
         expected = {
             "selected_video_stream_index": session.payload["selected_video_stream_index"],

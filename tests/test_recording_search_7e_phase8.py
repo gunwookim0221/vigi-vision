@@ -1,11 +1,13 @@
 """Focused strict Phase 8 handoff and two-media lifecycle coverage."""
 
 # pyright: reportAny=false, reportArgumentType=false, reportAttributeAccessIssue=false, reportImplicitOverride=false, reportUnannotatedClassAttribute=false, reportUnknownArgumentType=false, reportUnknownLambdaType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnusedCallResult=false, reportUnusedParameter=false
-# ruff: noqa: PLR0913
+# ruff: noqa: I001, PLR0913, PTH105
 
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -15,6 +17,11 @@ import pytest
 
 from vigi_vision.recording_search_7e_1c import MediaProbeFacts
 from vigi_vision.recording_search_7e_models import StrictIdentityEnvelope
+from vigi_vision.recording_search_7e_media_authority import (
+    authority_path,
+    publish_retained_media_authority,
+    read_retained_media_authority,
+)
 from vigi_vision.recording_search_7e_phase8 import (
     Phase8HandoffRepository,
     Phase8LifecycleError,
@@ -176,6 +183,11 @@ def _authority(tmp_path: Path) -> tuple[object, Path, Path]:
     common = media_root / "inv-01" / "run-01" / f"{session.identity}.mp4"
     common.parent.mkdir(parents=True)
     common.write_bytes(_COMMON_BYTES)
+    publish_retained_media_authority(
+        media_root,
+        common,
+        {**session.payload, "common_session_id": session.identity},
+    )
     return run, repository_root, common
 
 
@@ -255,7 +267,12 @@ def test_unadmitted_common_media_never_creates_handoff(tmp_path: Path, mutation:
         _create(repository, run)
     expected = "phase8_media_unavailable" if mutation == "missing" else "phase8_media_corrupt"
     assert error.value.code == expected
-    assert repository.status(run, "inv-01", "run-01") == ("NOT_REQUESTED", None)
+    expected_status = (
+        ("MEDIA_MISSING", "phase8_media_unavailable")
+        if mutation == "missing"
+        else ("MEDIA_CORRUPT", "phase8_media_corrupt")
+    )
+    assert repository.status(run, "inv-01", "run-01") == expected_status
 
 
 def test_persisted_probe_mismatch_is_rejected(tmp_path: Path) -> None:
@@ -478,3 +495,180 @@ def test_recovery_after_first_rename_never_deletes_clip_replacement(tmp_path: Pa
     assert not common.exists()
     assert (common.parent / f".delete-{common.stem}.mp4").read_bytes() == _COMMON_BYTES
     assert repository.status(run, "inv-01", "run-01")[0] == "DELETING"
+
+
+def test_byte_identical_preopen_replacement_is_rejected_by_filesystem_identity(
+    tmp_path: Path,
+) -> None:
+    run, root, common = _authority(tmp_path)
+    repository = _repository(root)
+    original = common.stat()
+    replacement = common.with_suffix(".replacement")
+    replacement.write_bytes(common.read_bytes())
+    os.replace(replacement, common)
+    current = common.stat()
+    assert (current.st_dev, current.st_ino) != (original.st_dev, original.st_ino)
+
+    with pytest.raises(Phase8LifecycleError) as error:
+        _create(repository, run)
+
+    assert error.value.code == "phase8_media_corrupt"
+    assert common.read_bytes() == _COMMON_BYTES
+    assert repository.status(run, "inv-01", "run-01") == (
+        "MEDIA_CORRUPT",
+        "phase8_media_corrupt",
+    )
+
+
+def test_publication_time_authority_is_canonical_strict_and_idempotent(tmp_path: Path) -> None:
+    run, root, common = _authority(tmp_path)
+    session = next(item for item in run.records if item.family == "common-session")
+    record_path = authority_path(common)
+    before = (record_path.read_bytes(), record_path.stat().st_mtime_ns)
+    first = read_retained_media_authority(
+        root / ".media",
+        common,
+        {**session.payload, "common_session_id": session.identity},
+    )
+    second = publish_retained_media_authority(
+        root / ".media",
+        common,
+        {**session.payload, "common_session_id": session.identity},
+    )
+
+    assert first == second
+    assert (record_path.read_bytes(), record_path.stat().st_mtime_ns) == before
+    assert first.payload["relative_media_path"] == (f".media/inv-01/run-01/{session.identity}.mp4")
+    expected_platform = "windows" if os.name == "nt" else "posix"
+    assert first.payload["filesystem_identity"]["platform"] == expected_platform
+
+
+def test_missing_pre_a2_authority_is_not_migrated_or_used(tmp_path: Path) -> None:
+    run, root, common = _authority(tmp_path)
+    repository = _repository(root)
+    record = authority_path(common)
+    record.unlink()
+    before = _snapshot_tree(root)
+
+    with pytest.raises(Phase8LifecycleError) as error:
+        _create(repository, run)
+
+    assert error.value.code == "phase8_media_corrupt"
+    assert not record.exists()
+    assert _snapshot_tree(root) == before
+    assert repository.status(run, "inv-01", "run-01") == (
+        "MEDIA_CORRUPT",
+        "phase8_media_corrupt",
+    )
+
+
+@pytest.mark.parametrize("mutation", ["unknown_key", "replacement"])
+def test_authority_record_corruption_fails_closed(tmp_path: Path, mutation: str) -> None:
+    run, root, common = _authority(tmp_path)
+    repository = _repository(root)
+    record = authority_path(common)
+    if mutation == "unknown_key":
+        document = json.loads(record.read_text(encoding="utf-8"))
+        document["unknown"] = True
+        record.write_text(
+            json.dumps(document, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+    else:
+        replacement = record.with_suffix(".replacement")
+        replacement.write_bytes(record.read_bytes() + b" ")
+        os.replace(replacement, record)
+
+    with pytest.raises(Phase8LifecycleError) as error:
+        _create(repository, run)
+    assert error.value.code == "phase8_media_corrupt"
+    assert repository.status(run, "inv-01", "run-01")[0] == "MEDIA_CORRUPT"
+
+
+@pytest.mark.parametrize("target", ["common", "clip"])
+def test_replaced_validated_tombstone_survives_and_blocks_deleted(
+    tmp_path: Path, target: str
+) -> None:
+    run, root, common = _authority(tmp_path)
+    repository = _repository(root)
+    _create(repository, run)
+    evidence: dict[str, Path] = {}
+
+    def replace_tombstone(name: str) -> None:
+        if name != "after_clip_tombstone":
+            return
+        package_root = root / ".phase8" / "inv-01" / "run-01"
+        tomb = (
+            common.parent / f".delete-{common.stem}.mp4"
+            if target == "common"
+            else next((package_root / "clips").glob(".delete-*.mp4"))
+        )
+        replacement = tomb.with_suffix(".foreign")
+        replacement.write_bytes(b"foreign-tombstone-must-survive")
+        os.replace(replacement, tomb)
+        evidence["tomb"] = tomb
+
+    repository.checkpoint = replace_tombstone
+    with pytest.raises(Phase8LifecycleError) as error:
+        repository.delete(run)
+
+    assert error.value.code == "phase8_media_corrupt"
+    assert evidence["tomb"].read_bytes() == b"foreign-tombstone-must-survive"
+    assert repository.status(run, "inv-01", "run-01")[0] == "MEDIA_CORRUPT"
+
+
+def test_clip_replacement_after_common_unlink_survives_restart_recovery(tmp_path: Path) -> None:
+    run, root, common = _authority(tmp_path)
+    repository = _repository(root)
+    _create(repository, run)
+    package_root = root / ".phase8" / "inv-01" / "run-01"
+    evidence: dict[str, Path] = {}
+
+    def replace_clip(name: str) -> None:
+        if name != "after_common_unlink":
+            return
+        tomb = next((package_root / "clips").glob(".delete-*.mp4"))
+        replacement = tomb.with_suffix(".foreign")
+        replacement.write_bytes(b"foreign-after-common-unlink")
+        os.replace(replacement, tomb)
+        evidence["tomb"] = tomb
+        raise KeyboardInterrupt
+
+    repository.checkpoint = replace_clip
+    with pytest.raises(KeyboardInterrupt):
+        repository.delete(run)
+    assert not common.exists()
+
+    restarted = _repository(root)
+    with pytest.raises(Phase8LifecycleError) as error:
+        restarted.delete(run)
+    assert error.value.code == "phase8_media_corrupt"
+    assert evidence["tomb"].read_bytes() == b"foreign-after-common-unlink"
+    assert restarted.status(run, "inv-01", "run-01")[0] == "MEDIA_CORRUPT"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound disposition contract")
+def test_windows_verified_handle_denies_last_moment_tombstone_replacement(
+    tmp_path: Path,
+) -> None:
+    run, root, common = _authority(tmp_path)
+    repository = _repository(root)
+    _create(repository, run)
+    blocked: list[bool] = []
+
+    def attempt_replacement(name: str) -> None:
+        if name != "before_common_delete_disposition":
+            return
+        tomb = common.parent / f".delete-{common.stem}.mp4"
+        replacement = tomb.with_suffix(".foreign")
+        replacement.write_bytes(b"foreign")
+        try:
+            os.replace(replacement, tomb)
+        except PermissionError:
+            blocked.append(True)
+            replacement.unlink()
+
+    repository.checkpoint = attempt_replacement
+    assert repository.delete(run) == "DELETED"
+    assert blocked == [True]
+    assert repository.status(run, "inv-01", "run-01") == ("DELETED", None)

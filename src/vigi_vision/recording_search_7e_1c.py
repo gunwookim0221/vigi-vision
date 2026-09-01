@@ -1,5 +1,5 @@
 # pyright: reportAny=false, reportExplicitAny=false, reportUnknownParameterType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnannotatedClassAttribute=false, reportImplicitOverride=false, reportUnusedCallResult=false, reportArgumentType=false, reportInvalidTypeForm=false, reportOptionalMemberAccess=false, reportUnnecessaryIsInstance=false, reportCallInDefaultInitializer=false, reportUnusedImport=false, reportUnusedFunction=false
-# ruff: noqa: B009, B904, C901, D105, FBT001, I001, PLR0912, PLR0913, PLR0915, PTH105, RUF022, TC006, TRY300, UP037
+# ruff: noqa: B009, B904, C901, D105, FBT001, I001, PLR0912, PLR0913, PLR0915, PTH105, RUF022, TC006, TRY300, TRY301, UP037
 """Phase 7E-1C common-session acquisition and local evidence admission.
 
 The 1C boundary owns one bounded replay/remux and all subsequent local reads of
@@ -46,6 +46,20 @@ from vigi_vision.recording_search_7e_models import (
     Schema5PhaseState,
     Schema6TargetState,
     StrictIdentityEnvelope,
+)
+from vigi_vision.recording_search_7e_media_authority import (
+    MediaFilesystemAuthorityError,
+    RetainedMediaFilesystemAuthority,
+    authority_path,
+    descriptor_stamp,
+    hash_descriptor,
+    mark_open_file_for_deletion,
+    open_stable_file,
+    publish_retained_media_authority,
+    read_retained_media_authority,
+    stable_source_path,
+    verified_retained_media,
+    verify_open_file,
 )
 from vigi_vision.recording_search_7e_repository import (
     Phase7EConflictError,
@@ -810,6 +824,9 @@ class CommonSessionAcquisition:
     media: MediaProbeFacts
     session: StrictIdentityEnvelope
     retained_mp4_path: Path | None = field(default=None, repr=False)
+    retained_media_authority: RetainedMediaFilesystemAuthority | None = field(
+        default=None, repr=False
+    )
 
     @property
     def common_session_id(self) -> str:
@@ -854,6 +871,7 @@ class DurableCommonSessionMedia:
         final = final_directory / f"{acquisition.common_session_id}.mp4"
         staging: Path | None = None
         published_by_invocation = False
+        authority_published = False
         source_size = -1
         source_digest = ""
         try:
@@ -916,6 +934,33 @@ class DurableCommonSessionMedia:
                 or _sha256_file(final) != source_digest
             ):
                 raise CommonSessionMediaError
+            descriptor = open_stable_file(final)
+            try:
+                if hash_descriptor(descriptor) != (source_digest, source_size):
+                    raise CommonSessionMediaError
+                if self.repository.media_probe is None:
+                    raise CommonSessionMediaError
+                media_probe = cast("MediaProbe", self.repository.media_probe)
+                final_facts = media_probe.probe(
+                    stable_source_path(descriptor, final),
+                    invocation.budget.operation_timeout(20.0),
+                )
+                final_facts.validate()
+                if final_facts != acquisition.media:
+                    raise CommonSessionMediaError
+                authority_session = {
+                    **acquisition.session.payload,
+                    "common_session_id": acquisition.session.identity,
+                }
+                authority = publish_retained_media_authority(
+                    self.root,
+                    final,
+                    authority_session,
+                    descriptor=descriptor,
+                )
+            finally:
+                os.close(descriptor)
+            authority_published = True
             return CommonSessionAcquisition(
                 acquisition.request,
                 acquisition.segment,
@@ -924,16 +969,35 @@ class DurableCommonSessionMedia:
                 acquisition.media,
                 acquisition.session,
                 final,
+                authority,
             )
-        except CommonSessionError:
+        except (CommonSessionError, MediaFilesystemAuthorityError) as exc:
             if published_by_invocation:
                 with suppress(CommonSessionCleanupError):
-                    _remove_exact_media_file(final, source_size, source_digest)
-            raise
+                    if authority_published:
+                        _remove_bound_retained_media(
+                            self.root,
+                            final,
+                            {
+                                **acquisition.session.payload,
+                                "common_session_id": acquisition.session.identity,
+                            },
+                        )
+            if isinstance(exc, CommonSessionError):
+                raise
+            raise CommonSessionMediaError from exc
         except (OSError, RuntimeError) as exc:
             if published_by_invocation:
                 with suppress(CommonSessionCleanupError):
-                    _remove_exact_media_file(final, source_size, source_digest)
+                    if authority_published:
+                        _remove_bound_retained_media(
+                            self.root,
+                            final,
+                            {
+                                **acquisition.session.payload,
+                                "common_session_id": acquisition.session.identity,
+                            },
+                        )
             raise CommonSessionMediaError from exc
         finally:
             if staging is not None:
@@ -1060,6 +1124,44 @@ class FfmpegLocalDecoder:
         """Probe once, select exact candidates, and decode each target locally."""
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise CommonSessionDecoderTimeoutError
+        if session.retained_mp4_path is None:
+            return self._decode_verified(
+                session,
+                targets,
+                timeout_seconds,
+                session.replay_clip.temporary_mp4_path,
+            )
+        if session.retained_media_authority is None:
+            raise CommonSessionDecoderError
+        media_root = session.retained_mp4_path.parents[2]
+        authority_session = {
+            **session.session.payload,
+            "common_session_id": session.session.identity,
+        }
+        try:
+            with verified_retained_media(
+                media_root,
+                session.retained_mp4_path,
+                authority_session,
+            ) as (descriptor, authority):
+                if authority != session.retained_media_authority:
+                    raise CommonSessionDecoderError
+                return self._decode_verified(
+                    session,
+                    targets,
+                    timeout_seconds,
+                    stable_source_path(descriptor, session.retained_mp4_path),
+                )
+        except MediaFilesystemAuthorityError as exc:
+            raise CommonSessionDecoderError from exc
+
+    def _decode_verified(
+        self,
+        session: CommonSessionAcquisition,
+        targets: tuple[datetime, ...],
+        timeout_seconds: float,
+        source: Path,
+    ) -> tuple[DecodedLocalFrame, ...]:
         deadline = self.monotonic_clock() + timeout_seconds
         try:
             probe = self.probe_runner(
@@ -1072,7 +1174,7 @@ class FfmpegLocalDecoder:
                     "-show_frames",
                     "-of",
                     "json",
-                    str(session.media_path),
+                    str(source),
                 ),
                 max(0.001, deadline - self.monotonic_clock()),
             )
@@ -1127,7 +1229,7 @@ class FfmpegLocalDecoder:
             remaining = deadline - self.monotonic_clock()
             if remaining <= 0:
                 raise CommonSessionDecoderTimeoutError
-            rgb = self._decode_rgb(session, index, remaining)
+            rgb = self._decode_rgb(session, index, remaining, source)
             results.append(
                 DecodedLocalFrame(
                     requested_time_utc=target,
@@ -1144,7 +1246,9 @@ class FfmpegLocalDecoder:
             )
         return tuple(results)
 
-    def _decode_rgb(self, session: CommonSessionAcquisition, index: int, timeout: float) -> bytes:
+    def _decode_rgb(
+        self, session: CommonSessionAcquisition, index: int, timeout: float, source: Path
+    ) -> bytes:
         """Decode one selected frame to row-major RGB24 bytes."""
         try:
             completed = subprocess.run(  # noqa: S603
@@ -1155,7 +1259,7 @@ class FfmpegLocalDecoder:
                     "-loglevel",
                     "error",
                     "-i",
-                    str(session.media_path),
+                    str(source),
                     "-map",
                     f"0:{session.media.selected_video_stream_index}",
                     "-vf",
@@ -1371,6 +1475,7 @@ def bind_session(
         acquisition.media,
         StrictIdentityEnvelope.from_payload("common-session", payload),
         acquisition.retained_mp4_path,
+        acquisition.retained_media_authority,
     )
 
 
@@ -2265,22 +2370,6 @@ def _remove_owned_media_directory(repository_root: Path, path: Path) -> None:
         raise CommonSessionCleanupError from exc
 
 
-def _remove_exact_media_file(path: Path, size_bytes: int, sha256: str) -> None:
-    """Remove only the just-published regular file whose bytes remain unchanged."""
-    try:
-        if (
-            path.is_symlink()
-            or not path.is_file()
-            or path.stat().st_nlink != 1
-            or path.stat().st_size != size_bytes
-            or _sha256_file(path) != sha256
-        ):
-            raise CommonSessionCleanupError
-        path.unlink()
-    except OSError as exc:
-        raise CommonSessionCleanupError from exc
-
-
 def _remove_owned_retained_media(
     repository_root: Path,
     acquisition: CommonSessionAcquisition,
@@ -2299,19 +2388,57 @@ def _remove_owned_retained_media(
     try:
         if path != expected or not _is_safe_child(expected_root, path):
             raise CommonSessionCleanupError
-        payload = acquisition.session.payload
-        if (
-            path.stat().st_nlink != 1
-            or path.stat().st_size != payload.get("mp4_size_bytes")
-            or _sha256_file(path) != payload.get("mp4_sha256")
-        ):
-            raise CommonSessionCleanupError
-        path.unlink()
+        _remove_bound_retained_media(
+            expected_root,
+            path,
+            {**acquisition.session.payload, "common_session_id": acquisition.session.identity},
+        )
         for parent in (path.parent, path.parent.parent):
             if _is_safe_child(expected_root, parent) and not any(parent.iterdir()):
                 parent.rmdir()
     except OSError as exc:
         raise CommonSessionCleanupError from exc
+
+
+def _remove_bound_retained_media(
+    media_root: Path,
+    path: Path,
+    session: Mapping[str, object],
+) -> None:
+    """Remove only the exact final object bound by its operational authority."""
+    descriptor: int | None = None
+    record_descriptor: int | None = None
+    record_path = authority_path(path)
+    try:
+        authority = read_retained_media_authority(media_root, path, session)
+        canonical = authority.canonical_bytes()
+        record_descriptor = open_stable_file(record_path, delete_access=True)
+        if descriptor_stamp(record_descriptor)["link_count"] != 1 or hash_descriptor(
+            record_descriptor
+        ) != (hashlib.sha256(canonical).hexdigest(), len(canonical)):
+            raise CommonSessionCleanupError
+        descriptor = open_stable_file(path, delete_access=True)
+        verify_open_file(descriptor, path, authority)
+        mark_open_file_for_deletion(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        if path.exists() or path.is_symlink():
+            raise CommonSessionCleanupError
+        mark_open_file_for_deletion(record_descriptor)
+        os.close(record_descriptor)
+        record_descriptor = None
+    except CommonSessionCleanupError:
+        raise
+    except (OSError, MediaFilesystemAuthorityError) as exc:
+        raise CommonSessionCleanupError from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if record_descriptor is not None:
+            os.close(record_descriptor)
+    if record_path.exists() or record_path.is_symlink():
+        raise CommonSessionCleanupError
+    _fsync_directory(path.parent)
 
 
 def _fsync_directory(directory: Path) -> None:

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 from dataclasses import replace
@@ -46,6 +47,13 @@ from vigi_vision.recording_search_7e_1c import (
     select_target_index,
     validate_decoded_order,
     validate_repeated_decode,
+)
+from vigi_vision.recording_search_7e_media_authority import (
+    MediaFilesystemAuthorityError,
+    authority_path,
+    filesystem_identity,
+    open_stable_file,
+    read_retained_media_authority,
 )
 from vigi_vision.object_presence_evidence import RawComparison
 from vigi_vision.object_presence_values import ClassificationOutcome, VisualStatus
@@ -359,13 +367,81 @@ def test_durable_media_is_reused_and_read_back(tmp_path: Path) -> None:
     acquisition = acquirer.acquire(request)
     bound = acquisition
     repository = RecordingSearch7ERepository(tmp_path / "runs")
+    repository.media_probe = acquirer.media_probe
     executor = Phase7E1CExecutor(repository, acquirer)
     with executor.invocation(request) as invocation:
         durable = DurableCommonSessionMedia(repository).publish(bound, invocation)
     assert durable.media_path.is_file()
     assert durable.media_path.read_bytes() == b"one-retained-session"
+    assert durable.retained_media_authority is not None
+    record = read_retained_media_authority(
+        repository.root / ".media",
+        durable.media_path,
+        {**durable.session.payload, "common_session_id": durable.session.identity},
+    )
+    assert record == durable.retained_media_authority
+    assert authority_path(durable.media_path).is_file()
+    descriptor = open_stable_file(durable.media_path)
+    try:
+        assert record.filesystem_identity == filesystem_identity(descriptor)
+    finally:
+        os.close(descriptor)
     acquisition.remove()
     assert durable.media_path.is_file()
+
+
+def test_interruption_before_authority_admission_cannot_leave_eligible_media(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    acquirer, _, _ = _acquirer(tmp_path)
+    request = _request()
+    acquisition = acquirer.acquire(request)
+    repository = RecordingSearch7ERepository(tmp_path / "runs")
+    repository.media_probe = acquirer.media_probe
+
+    def fail_authority(*_args: object, **_kwargs: object) -> object:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        "vigi_vision.recording_search_7e_1c.publish_retained_media_authority",
+        fail_authority,
+    )
+    with (
+        pytest.raises(KeyboardInterrupt),
+        Phase7E1CExecutor(repository, acquirer).invocation(request) as invocation,
+    ):
+        DurableCommonSessionMedia(repository).publish(acquisition, invocation)
+
+    media_root = repository.root / ".media"
+    assert len(tuple(media_root.rglob("*.mp4"))) == 1
+    assert not tuple(media_root.rglob("*.authority.json"))
+
+
+def test_authority_admission_failure_never_path_deletes_unbound_final_media(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    acquirer, _, _ = _acquirer(tmp_path)
+    request = _request()
+    acquisition = acquirer.acquire(request)
+    repository = RecordingSearch7ERepository(tmp_path / "runs")
+    repository.media_probe = acquirer.media_probe
+
+    def fail_authority(*_args: object, **_kwargs: object) -> object:
+        raise MediaFilesystemAuthorityError
+
+    monkeypatch.setattr(
+        "vigi_vision.recording_search_7e_1c.publish_retained_media_authority",
+        fail_authority,
+    )
+    with (
+        pytest.raises(CommonSessionMediaError),
+        Phase7E1CExecutor(repository, acquirer).invocation(request) as invocation,
+    ):
+        DurableCommonSessionMedia(repository).publish(acquisition, invocation)
+
+    media_root = repository.root / ".media"
+    assert len(tuple(media_root.rglob("*.mp4"))) == 1
+    assert not tuple(media_root.rglob("*.authority.json"))
 
 
 def test_logical_end_is_strictly_before_and_ties_are_deterministic() -> None:

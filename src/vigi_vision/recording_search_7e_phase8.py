@@ -9,7 +9,7 @@ deletion state machine.  It never opens the NVR or performs analysis.
 # The state machine deliberately keeps every publication and recovery branch
 # explicit.  Complexity exemptions describe the closed persistence contract,
 # not an open-ended implementation surface.
-# ruff: noqa: B009, C901, D102, D107, EM101, PLC0415, PLR0912, PLR0913, PLR0915, PLR2004, PTH105, SIM117, TC001, TRY300, TRY301
+# ruff: noqa: B009, C901, D102, D107, EM101, PLR0911, PLR0912, PLR0913, PLR0915, PLR2004, PTH105, SIM117, TC001, TRY300, TRY301
 # pyright: reportAny=false, reportArgumentType=false, reportAttributeAccessIssue=false, reportReturnType=false, reportUnannotatedClassAttribute=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnnecessaryIsInstance=false, reportUnusedCallResult=false
 
 from __future__ import annotations
@@ -35,6 +35,19 @@ from vigi_vision.durable_io import (
     load_durable_json_object,
 )
 from vigi_vision.recording_search_7e_1c import MediaProbe, MediaProbeFacts
+from vigi_vision.recording_search_7e_media_authority import (
+    MediaFilesystemAuthorityError,
+    RetainedMediaFilesystemAuthority,
+    authority_path,
+    descriptor_stamp,
+    filesystem_identity,
+    mark_open_file_for_deletion,
+    open_stable_file,
+    read_retained_media_authority,
+)
+from vigi_vision.recording_search_7e_media_authority import (
+    stable_source_path as stable_descriptor_path,
+)
 from vigi_vision.recording_search_7e_models import StrictIdentityEnvelope
 
 if TYPE_CHECKING:
@@ -171,6 +184,8 @@ class _VerifiedFile:
     sha256: str
     size_bytes: int
     facts: MediaProbeFacts
+    filesystem_identity: dict[str, object]
+    authority: RetainedMediaFilesystemAuthority | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,12 +264,14 @@ class Phase8HandoffRepository:
                 raise Phase8LifecycleError("phase8_corrupt")
             return package.request
 
+        source_path = self._common_media_path(investigation_id, run_id, session.identity)
+        with self._verified_common_media(source_path, session.payload, timeout_seconds):
+            pass
         wrapper = self._new_staging(investigation_id, run_id, final, "handoff")
         package_root = wrapper / _PACKAGE
         try:
             (package_root / "manifests").mkdir(parents=True, exist_ok=False)
             (package_root / "clips").mkdir(exist_ok=False)
-            source_path = self._common_media_path(investigation_id, run_id, session.identity)
             with self._verified_common_media(
                 source_path, session.payload, timeout_seconds
             ) as source:
@@ -383,6 +400,16 @@ class Phase8HandoffRepository:
         """Return a read-only safe projection of exact package/media state."""
         root = self._directory(investigation_id, run_id, create_parent=False)
         if not root.exists() and not root.is_symlink():
+            if run is not None:
+                try:
+                    _terminal, session, _snapshot = _terminal_authority(run)
+                    common = self._common_media_path(investigation_id, run_id, session.identity)
+                    with self._verified_common_media(common, session.payload, 20.0):
+                        pass
+                except Phase8LifecycleError as error:
+                    if error.code == "phase8_media_unavailable":
+                        return "MEDIA_MISSING", error.code
+                    return "MEDIA_CORRUPT", "phase8_media_corrupt"
             return "NOT_REQUESTED", None
         if run is None:
             return "CORRUPT", "phase8_corrupt"
@@ -483,6 +510,7 @@ class Phase8HandoffRepository:
             common_tomb,
             str(session.payload["mp4_sha256"]),
             int(session.payload["mp4_size_bytes"]),
+            journal["common_filesystem_identity"],
         )
         self.checkpoint("after_common_tombstone")
         journal = self._move_or_reopen(
@@ -493,11 +521,32 @@ class Phase8HandoffRepository:
             clip_tomb,
             str(integrity["sha256"]),
             int(integrity["size_bytes"]),
+            journal["clip_filesystem_identity"],
         )
         self.checkpoint("after_clip_tombstone")
-        journal = self._unlink_recorded(journal, wrapper, "common", common_live, common_tomb)
+        journal = self._unlink_recorded(
+            journal,
+            wrapper,
+            "common",
+            common_live,
+            common_tomb,
+            str(session.payload["mp4_sha256"]),
+            int(session.payload["mp4_size_bytes"]),
+            journal["common_stamp"],
+            journal["common_filesystem_identity"],
+        )
         self.checkpoint("after_common_unlink")
-        journal = self._unlink_recorded(journal, wrapper, "clip", clip_live, clip_tomb)
+        journal = self._unlink_recorded(
+            journal,
+            wrapper,
+            "clip",
+            clip_live,
+            clip_tomb,
+            str(integrity["sha256"]),
+            int(integrity["size_bytes"]),
+            journal["clip_stamp"],
+            journal["clip_filesystem_identity"],
+        )
         self.checkpoint("after_clip_unlink")
         deleted = StrictIdentityEnvelope.from_payload(
             "phase8-manifest",
@@ -525,6 +574,7 @@ class Phase8HandoffRepository:
         tomb: Path,
         expected_sha: str,
         expected_size: int,
+        expected_identity: object,
     ) -> dict[str, object]:
         progress = journal.get("progress")
         completed = {
@@ -539,17 +589,41 @@ class Phase8HandoffRepository:
         if progress in completed:
             if live.exists() or live.is_symlink():
                 raise Phase8LifecycleError("phase8_media_corrupt")
-            _verify_path_bytes(tomb, expected_sha, expected_size, journal[f"{name}_stamp"])
+            _verify_path_bytes(
+                tomb,
+                expected_sha,
+                expected_size,
+                journal[f"{name}_stamp"],
+                expected_identity,
+            )
             return journal
         if tomb.exists() or tomb.is_symlink():
             if live.exists() or live.is_symlink():
                 raise Phase8LifecycleError("phase8_media_corrupt")
-            _verify_path_bytes(tomb, expected_sha, expected_size, journal[f"{name}_stamp"])
+            _verify_path_bytes(
+                tomb,
+                expected_sha,
+                expected_size,
+                journal[f"{name}_stamp"],
+                expected_identity,
+            )
         else:
-            _verify_path_bytes(live, expected_sha, expected_size, journal[f"{name}_stamp"])
+            _verify_path_bytes(
+                live,
+                expected_sha,
+                expected_size,
+                journal[f"{name}_stamp"],
+                expected_identity,
+            )
             os.replace(live, tomb)
             _fsync_directory(tomb.parent)
-            _verify_path_bytes(tomb, expected_sha, expected_size, journal[f"{name}_stamp"])
+            _verify_path_bytes(
+                tomb,
+                expected_sha,
+                expected_size,
+                journal[f"{name}_stamp"],
+                expected_identity,
+            )
         journal["progress"] = "common_moved" if name == "common" else "clip_moved"
         self._write_journal(wrapper, journal)
         return journal
@@ -561,6 +635,10 @@ class Phase8HandoffRepository:
         name: str,
         live: Path,
         tomb: Path,
+        expected_sha: str,
+        expected_size: int,
+        expected_stamp: object,
+        expected_identity: object,
     ) -> dict[str, object]:
         target_progress = "common_unlinked" if name == "common" else "clip_unlinked"
         if journal.get("progress") in {target_progress, "clip_unlinked"}:
@@ -570,9 +648,16 @@ class Phase8HandoffRepository:
         if live.exists() or live.is_symlink():
             raise Phase8LifecycleError("phase8_media_corrupt")
         if tomb.exists():
-            if tomb.is_symlink() or not tomb.is_file():
+            _delete_verified_tombstone(
+                tomb,
+                expected_sha,
+                expected_size,
+                expected_stamp,
+                expected_identity,
+                before_disposition=lambda: self.checkpoint(f"before_{name}_delete_disposition"),
+            )
+            if tomb.exists() or tomb.is_symlink():
                 raise Phase8LifecycleError("phase8_media_corrupt")
-            tomb.unlink()
             _fsync_directory(tomb.parent)
         elif tomb.is_symlink():
             raise Phase8LifecycleError("phase8_media_corrupt")
@@ -627,6 +712,29 @@ class Phase8HandoffRepository:
         common_tomb = common_live.parent / str(
             manifest.payload.get("common_media_tombstone_name", "")
         )
+        authority_session = {**session.payload, "common_session_id": session.identity}
+        try:
+            _ = read_retained_media_authority(
+                self.media_root,
+                common_live,
+                authority_session,
+            )
+        except MediaFilesystemAuthorityError as error:
+            raise Phase8LifecycleError("phase8_media_corrupt") from error
+        media_names = _entry_names(common_live.parent)
+        authority_name = authority_path(common_live).name
+        if state in {"READY", "CLIP_READY"}:
+            if media_names != {authority_name, common_live.name}:
+                raise Phase8LifecycleError("phase8_media_corrupt")
+        elif state == "DELETING":
+            if (
+                authority_name not in media_names
+                or not media_names <= {authority_name, common_live.name, common_tomb.name}
+                or len(media_names - {authority_name}) > 1
+            ):
+                raise Phase8LifecycleError("phase8_media_corrupt")
+        elif media_names != {authority_name}:
+            raise Phase8LifecycleError("phase8_media_corrupt")
         clip_path: Path | None = None
         if state in {"READY", "CLIP_READY"}:
             if _entry_names(root / "clips") != {live_clip.name}:
@@ -638,6 +746,10 @@ class Phase8HandoffRepository:
                 with self._verified_common_media(common_live, session.payload, 20.0):
                     pass
         elif state == "DELETING":
+            deletion_wrapper = self._find_deletion_wrapper(
+                Phase8Package(root, manifest, source_clip, request, None)
+            )
+            deletion_journal = self._read_journal(deletion_wrapper)
             names = _entry_names(root / "clips")
             allowed = {live_clip.name, clip_tomb.name}
             if not names <= allowed or len(names) > 1:
@@ -648,7 +760,11 @@ class Phase8HandoffRepository:
                 clip_path = live_clip
             elif clip_tomb.name in names:
                 _verify_path_bytes(
-                    clip_tomb, str(integrity["sha256"]), int(integrity["size_bytes"]), None
+                    clip_tomb,
+                    str(integrity["sha256"]),
+                    int(integrity["size_bytes"]),
+                    deletion_journal["clip_stamp"],
+                    deletion_journal["clip_filesystem_identity"],
                 )
                 clip_path = clip_tomb
             common_present = common_live.exists() or common_live.is_symlink()
@@ -663,7 +779,8 @@ class Phase8HandoffRepository:
                     common_tomb,
                     str(session.payload["mp4_sha256"]),
                     int(session.payload["mp4_size_bytes"]),
-                    None,
+                    deletion_journal["common_stamp"],
+                    deletion_journal["common_filesystem_identity"],
                 )
         else:
             if _entry_names(root / "clips"):
@@ -708,12 +825,20 @@ class Phase8HandoffRepository:
     def _verified_common_media(
         self, path: Path, payload: Mapping[str, object], timeout: float
     ) -> Generator[_VerifiedFile, None, None]:
+        session = {**payload, "common_session_id": path.stem}
+        try:
+            authority = read_retained_media_authority(self.media_root, path, session)
+        except MediaFilesystemAuthorityError as error:
+            raise Phase8LifecycleError("phase8_media_corrupt") from error
         with self._verified_file(
             path,
             str(payload["mp4_sha256"]),
             int(payload["mp4_size_bytes"]),
             timeout,
+            authority=authority,
         ) as verified:
+            if _entry_names(path.parent) != {path.name, authority_path(path).name}:
+                raise Phase8LifecycleError("phase8_media_corrupt")
             facts = verified.facts
             if (
                 facts.selected_video_stream_index != payload["selected_video_stream_index"]
@@ -743,7 +868,13 @@ class Phase8HandoffRepository:
 
     @contextmanager
     def _verified_file(
-        self, path: Path, expected_sha: str, expected_size: int, timeout: float
+        self,
+        path: Path,
+        expected_sha: str,
+        expected_size: int,
+        timeout: float,
+        *,
+        authority: RetainedMediaFilesystemAuthority | None = None,
     ) -> Generator[_VerifiedFile, None, None]:
         if not path.exists() and not path.is_symlink():
             raise Phase8LifecycleError("phase8_media_unavailable")
@@ -751,9 +882,8 @@ class Phase8HandoffRepository:
             path.parent.parent.parent if path.parent.name != "clips" else path.parent.parent,
             path,
         )
-        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
-            descriptor = _open_read_authority(path, flags)
+            descriptor = open_stable_file(path)
         except FileNotFoundError as error:
             raise Phase8LifecycleError("phase8_media_unavailable") from error
         except OSError as error:
@@ -766,9 +896,27 @@ class Phase8HandoffRepository:
             digest, size = _hash_descriptor(descriptor)
             if digest != expected_sha or size != expected_size:
                 raise Phase8LifecycleError("phase8_media_corrupt")
-            facts = self.media_probe.probe(path, timeout)
+            facts = self.media_probe.probe(
+                stable_descriptor_path(descriptor, path),
+                timeout,
+            )
             facts.validate()
-            value = _VerifiedFile(path, descriptor, stamp, digest, size, facts)
+            stable_identity = filesystem_identity(descriptor)
+            if authority is not None and (
+                stable_identity != authority.filesystem_identity
+                or descriptor_stamp(descriptor) != authority.file_stamp
+            ):
+                raise Phase8LifecycleError("phase8_media_corrupt")
+            value = _VerifiedFile(
+                path,
+                descriptor,
+                stamp,
+                digest,
+                size,
+                facts,
+                stable_identity,
+                authority,
+            )
             self._revalidate_open_file(
                 value, {"mp4_sha256": expected_sha, "mp4_size_bytes": expected_size}
             )
@@ -792,6 +940,11 @@ class Phase8HandoffRepository:
         if (
             _FileStamp.from_stat(opened) != value.stamp
             or _FileStamp.from_stat(path_stat) != value.stamp
+        ):
+            raise Phase8LifecycleError("phase8_media_corrupt")
+        if value.authority is not None and (
+            filesystem_identity(value.descriptor) != value.authority.filesystem_identity
+            or descriptor_stamp(value.descriptor) != value.authority.file_stamp
         ):
             raise Phase8LifecycleError("phase8_media_corrupt")
         digest, size = _hash_descriptor(value.descriptor)
@@ -910,6 +1063,8 @@ class Phase8HandoffRepository:
                 "deleting_manifest_id": deleting.identity,
                 "common_stamp": asdict(common.stamp),
                 "clip_stamp": asdict(clip.stamp),
+                "common_filesystem_identity": common.filesystem_identity,
+                "clip_filesystem_identity": clip.filesystem_identity,
             }
         )
         self._write_journal(wrapper, journal)
@@ -1180,16 +1335,64 @@ def _verify_path_bytes(
     expected_sha: str,
     expected_size: int,
     expected_stamp: object | None,
+    expected_identity: object | None = None,
 ) -> None:
     _require_regular_confined(path.parent, path)
+    descriptor: int | None = None
     try:
-        current = _FileStamp.from_stat(path.stat(follow_symlinks=False))
+        descriptor = open_stable_file(path)
+        current = _FileStamp.from_stat(os.fstat(descriptor))
     except OSError as error:
         raise Phase8LifecycleError("phase8_media_corrupt") from error
-    if expected_stamp is not None and current != _stamp_from_value(expected_stamp):
-        raise Phase8LifecycleError("phase8_media_corrupt")
-    if current.size != expected_size or _hash_path(path) != expected_sha:
-        raise Phase8LifecycleError("phase8_media_corrupt")
+    try:
+        if expected_stamp is not None and current != _stamp_from_value(expected_stamp):
+            raise Phase8LifecycleError("phase8_media_corrupt")
+        if expected_identity is not None and filesystem_identity(descriptor) != expected_identity:
+            raise Phase8LifecycleError("phase8_media_corrupt")
+        digest, size = _hash_descriptor(descriptor)
+        if current.size != expected_size or size != expected_size or digest != expected_sha:
+            raise Phase8LifecycleError("phase8_media_corrupt")
+    finally:
+        os.close(descriptor)
+
+
+def _delete_verified_tombstone(
+    path: Path,
+    expected_sha: str,
+    expected_size: int,
+    expected_stamp: object,
+    expected_identity: object,
+    *,
+    before_disposition: Callable[[], None],
+) -> None:
+    _require_regular_confined(path.parent, path)
+    descriptor: int | None = None
+    try:
+        descriptor = open_stable_file(path, delete_access=True)
+        current = _FileStamp.from_stat(os.fstat(descriptor))
+        digest, size = _hash_descriptor(descriptor)
+        if (
+            current != _stamp_from_value(expected_stamp)
+            or filesystem_identity(descriptor) != expected_identity
+            or digest != expected_sha
+            or size != expected_size
+        ):
+            raise Phase8LifecycleError("phase8_media_corrupt")
+        before_disposition()
+        if (
+            _FileStamp.from_stat(os.fstat(descriptor)) != current
+            or filesystem_identity(descriptor) != expected_identity
+            or _hash_descriptor(descriptor) != (expected_sha, expected_size)
+        ):
+            raise Phase8LifecycleError("phase8_media_corrupt")
+        mark_open_file_for_deletion(descriptor)
+    except Phase8LifecycleError:
+        raise
+    except (OSError, MediaFilesystemAuthorityError) as error:
+        raise Phase8LifecycleError("phase8_media_corrupt") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _stamp_from_value(value: object) -> _FileStamp:
@@ -1213,34 +1416,6 @@ def _hash_descriptor(descriptor: int) -> tuple[str, int]:
         size += len(block)
     os.lseek(descriptor, 0, os.SEEK_SET)
     return digest.hexdigest(), size
-
-
-def _open_read_authority(path: Path, flags: int) -> int:
-    """Open a stable authority handle, denying replacement on Windows."""
-    if os.name != "nt":
-        return os.open(path, flags)
-    import ctypes
-    import msvcrt
-
-    create_file = ctypes.windll.kernel32.CreateFileW
-    create_file.restype = ctypes.c_void_p
-    handle = create_file(
-        str(path),
-        0x80000000,
-        0x00000001,
-        None,
-        3,
-        0x00200000,
-        None,
-    )
-    invalid = ctypes.c_void_p(-1).value
-    if handle in {None, invalid}:
-        raise OSError(ctypes.get_last_error(), "CreateFileW failed")
-    try:
-        return msvcrt.open_osfhandle(int(handle), flags)
-    except BaseException:
-        ctypes.windll.kernel32.CloseHandle(handle)
-        raise
 
 
 def _stable_source_path(source: _VerifiedFile) -> Path:

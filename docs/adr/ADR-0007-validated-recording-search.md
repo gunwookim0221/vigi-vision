@@ -83,6 +83,15 @@ lock order, repair/reuse/deletion rules, closed failure mapping, 26 acyclic
 identity families, 59 vectors, a byte-complete JPEG/MP4 fixture, and the exact
 2,520-second invocation budget.
 
+The retained MP4 also has a repository-owned, versioned operational filesystem
+authority record captured from the final open object after byte/probe readback.
+It binds platform handle identity to the existing media authority without
+changing any Phase 7 semantic identity, schema, or golden vector. Phase 8 and
+destructive retention operations fail closed when that record is missing or
+mismatched; old runs are never migrated by digest equivalence. Tombstone
+deletion is handle-bound on supported platforms so a later path replacement
+cannot be deleted as if it were the admitted object.
+
 Production execution remains synchronous and CLI-only. The existing execution
 POST validates its request and returns HTTP 503
 `recording_search_execution_requires_cli` with zero side effects. No worker,
