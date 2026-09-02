@@ -9,6 +9,10 @@ prove that production VIGI replay cannot supply authoritative frame UTC but can
 sustain one common replay/decode session for the bounded MVP. The 7E-1C
 common-session acquisition/local frame-admission, 7E-1D terminal schema-7
 orchestration, and 7E-2 CLI/projection/retention boundaries are implemented.
+Phase 7E-2 Correction B now runs production B4 computation behind a bounded
+Windows-spawn child-process boundary: the parent retains authority, timeout,
+cancellation, reaping, and evidence admission, while late child output is
+discarded. The child has no persistence, SDK, or credential capability.
 Terminal real-NVR validation and Phase 8 review-media processing remain
 unimplemented.
 
@@ -103,7 +107,8 @@ Production execution remains synchronous and CLI-only. The existing execution
 POST validates its request and returns HTTP 503
 `recording_search_execution_requires_cli` with zero side effects. No worker,
 lease, takeover, resume, frontend, Phase 8 executor, or Phase 9 behavior is
-authorized. Implementation order is 7E-1A identities/models/matrices/validation,
+authorized. The internal Phase 7E B4 child is bounded, single-use, and
+persistence-neutral. Implementation order is 7E-1A identities/models/matrices/validation,
 1B schema-5/6 persistence, 1C one-session media plus exact logical-target frame
 selection and A2/B4 adapters, 1D the Phase 7E-specific C1 planner adaptation
 plus terminal composition/schema 7, 2 CLI and separate Phase 8
@@ -313,10 +318,11 @@ Phase 7B loader.
 All A2 child-record, index, and manifest mutations use that same per-run mutex
 beneath the continuously held A1 OS lock. Phase 7B uses the mutex to validate
 and snapshot the handle-owned baseline/probe bytes without admitting a durable
-operation, releases the mutex while the existing bounded classifier worker
-runs, and reacquires it for complete prepublication revalidation. A cancelled
-worker may continue briefly, but its revoked attempt token can never publish or
-mutate authoritative state. Only a timely result that passes handle/state/
+operation. The Phase 7E production adapter releases no authority to the child:
+it sends only a bounded, versioned primitive request to one Windows-spawn B4
+process and waits interruptibly. Timeout, cancellation, interruption, worker
+failure, or ownership loss terminates and reaps that process before returning;
+any queued or late output is discarded. Only a timely result that passes handle/state/
 operation-input/OS-lock ownership checks may prepare the operation and any
 schema-3 successor, stage owned children, publish without overwrite, and commit
 the atomic manifest replacement. Owner B therefore reloads A's

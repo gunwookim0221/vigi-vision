@@ -260,6 +260,21 @@ uses `CLASSIFICATION_FAILED` and never creates an observation. An indexed frame
 without `OBSERVED` cannot count as PRESENT, ABSENT, support, C2/D1 evidence, or
 a terminal input.
 
+For the production Phase 7E adapter, B4 computation runs in one bounded,
+single-use child process created with the platform's `spawn` start method
+(Windows is the required production target). The parent sends only a closed,
+versioned JSON request containing validated RGB values, ROI, policy, and an
+explicit EfficientSAM runtime descriptor; it never serializes a callable,
+repository, credential, lock, or open media handle. The child performs only the
+persistence-neutral mask/comparison computation and returns a closed result or
+safe failure envelope correlated to the classification attempt. The parent
+owns the deadline, cancellation, child termination/reaping, result validation,
+and evidence admission. Timeout, cancellation, interruption, ownership loss,
+worker failure, protocol corruption, and cleanup failure admit no visual
+evidence; cleanup failure is secondary and cannot replace the primary reason.
+After timeout or cancellation, the child is terminated and reaped before the
+next attempt can begin, and queued or late output is never accepted.
+
 Every atomic crash has one interpretation: before `manifest.json` replacement,
 strict reopen sees the prior matrix row and removes only invocation-owned
 staging; after replacement, it sees and validates the new row. A lock-free

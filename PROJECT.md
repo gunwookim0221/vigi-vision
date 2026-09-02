@@ -256,6 +256,9 @@ evidence admission, C2/D1/D2 composition, complete source reconstruction,
 immutable schema 7, and strict terminal readback/status. CLI execution is
 implemented in the 7E-2 boundary; real-NVR acceptance remains unimplemented in
 the later 7E slice and no terminal real-NVR search has been completed.
+Correction B adds a bounded Windows-spawn process boundary around production
+Phase 7E B4 classification; timeout/cancellation terminate and reap the child,
+and late output cannot become evidence.
 Absolute source-time calibration remains unavailable; Phase 4C-2
 provides transient frontend-only selection of one
 successful candidate, and Phase 5-1/5-2 provide the transient source-space

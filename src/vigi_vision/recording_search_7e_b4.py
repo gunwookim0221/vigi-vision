@@ -3,7 +3,9 @@
 The legacy B3/B4 services remain responsible for schema 2/3 admission and
 publication.  This module only validates the already reopened Phase 7E input,
 loads the immutable Phase 6 baseline through its trusted service boundary, and
-invokes the same pure mask/comparison computation used by the legacy path.
+invokes the same pure mask/comparison computation used by the legacy path. The
+production computation is process-isolated so timeout/cancellation can
+terminate and reap the worker before any output is admitted.
 """
 
 # Adapter validation intentionally receives protocol-shaped reopened records;
@@ -14,13 +16,12 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from vigi_vision.assisted_roi_predictor import LazyEfficientSamPredictor
 from vigi_vision.investigation_confirmation_integrity import (
     compute_jpeg_integrity_from_bytes,
 )
@@ -30,15 +31,25 @@ from vigi_vision.investigation_confirmation_models import (
 from vigi_vision.object_presence_values import DecodedRgbImage
 from vigi_vision.recording_search_7e_1c import (
     B4Bridge,
+    CommonSessionCancelledError,
     CommonSessionValidationError,
     Phase7EB4Input,
 )
+from vigi_vision.recording_search_7e_b4_process import (
+    B4ProcessCancelled,
+    B4ProcessError,
+    B4ProcessInterrupted,
+    B4ProcessTimeout,
+    EfficientSamWorkerSpec,
+    StaticMaskWorkerSpec,
+    run_b4_in_process,
+)
 from vigi_vision.recording_search_7e_models import StrictIdentityEnvelope
+from vigi_vision.recording_search_b3_masks import LimitedRgbMaskPredictor
 from vigi_vision.recording_search_b3_media import DecodedMedia
 from vigi_vision.recording_search_b3_models import (
     ClassificationPreparationError,
 )
-from vigi_vision.recording_search_b3_service import classify_decoded_images
 from vigi_vision.recording_search_b4_models import ClassificationOperationalReason
 from vigi_vision.recording_search_b4_support import map_preparation_reason
 
@@ -75,6 +86,14 @@ class Phase7EProductionB4Adapter(B4Bridge):
         baseline = self._decode_baseline(confirmed)
         probe = self._probe_image(authoritative)
         try:
+            worker_spec = _worker_spec(self.mask_predictor)
+        except (TypeError, ValueError):
+            return _operational_completion(
+                authoritative,
+                confirmed.reference_frame_resource_id,
+                ClassificationOperationalReason.CLASSIFIER_EXECUTION_FAILED,
+            )
+        try:
             result = _bounded_classification(
                 timeout,
                 baseline.image,
@@ -83,13 +102,28 @@ class Phase7EProductionB4Adapter(B4Bridge):
                 confirmed.source_height,
                 confirmed.roi,
                 self.policy,
-                self.mask_predictor,
+                worker_spec,
+                correlation_id=authoritative.classification_attempt_id,
+                cancellation=getattr(authoritative.budget, "cancellation", None),
             )
-        except FutureTimeoutError:
+        except B4ProcessTimeout:
             return _operational_completion(
                 authoritative,
                 confirmed.reference_frame_resource_id,
                 ClassificationOperationalReason.CLASSIFIER_TIMEOUT,
+            )
+        except (B4ProcessCancelled, B4ProcessInterrupted):
+            raise CommonSessionCancelledError from None
+        except B4ProcessError as error:
+            reason = (
+                ClassificationOperationalReason.INVALID_CLASSIFIER_OUTPUT
+                if error.code == "invalid_classifier_output"
+                else ClassificationOperationalReason.CLASSIFIER_EXECUTION_FAILED
+            )
+            return _operational_completion(
+                authoritative,
+                confirmed.reference_frame_resource_id,
+                reason,
             )
         except ClassificationPreparationError as error:
             return _operational_completion(
@@ -257,26 +291,45 @@ def _bounded_classification(  # noqa: PLR0913
     height: int,
     roi: ConfirmationRoi,
     policy: ObjectPresenceDecisionPolicy,
-    predictor: MaskPredictor | None,
+    predictor: object,
+    *,
+    correlation_id: str = "phase7e-b4",
+    cancellation: object | None = None,
 ) -> ClassificationResult:
     """Run the shared computation under the Phase 7 bounded classifier budget."""
-    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vigi-phase7e-b4")
-    future = executor.submit(
-        classify_decoded_images,
+    return run_b4_in_process(
         baseline_image=baseline,
         probe_image=probe,
         source_width=width,
         source_height=height,
         roi=roi,
         policy=policy,
-        mask_predictor=predictor,
+        worker_spec=predictor,
+        correlation_id=correlation_id,
+        timeout_seconds=timeout,
+        cancellation=cancellation,
     )
-    try:
-        result = future.result(timeout=timeout)
-    finally:
-        _ = future.cancel()
-        executor.shutdown(wait=False, cancel_futures=True)
-    return result
+
+
+def _worker_spec(predictor: object) -> EfficientSamWorkerSpec | StaticMaskWorkerSpec:
+    """Convert only explicitly supported predictors to primitive child config."""
+    if isinstance(predictor, StaticMaskWorkerSpec):
+        return predictor
+    if isinstance(predictor, LazyEfficientSamPredictor):
+        return EfficientSamWorkerSpec(
+            predictor.checkpoint_path,
+            predictor.expected_sha256,
+            predictor.device_mode,
+        )
+    if isinstance(predictor, LimitedRgbMaskPredictor):
+        source = predictor.service.predictor
+        if isinstance(source, LazyEfficientSamPredictor):
+            return EfficientSamWorkerSpec(
+                source.checkpoint_path,
+                source.expected_sha256,
+                source.device_mode,
+            )
+    raise ValueError
 
 
 def _classifier_policy_id(authoritative: Phase7EB4Input) -> str:
@@ -301,13 +354,9 @@ def _operational_reason(error: ClassificationPreparationError) -> Classification
     mapped = map_preparation_reason(error.reason)
     if mapped is ClassificationOperationalReason.CLASSIFIER_TIMEOUT:
         return mapped
-    if mapped in {
-        ClassificationOperationalReason.CLASSIFIER_EXECUTION_FAILED,
-        ClassificationOperationalReason.INVALID_CLASSIFIER_OUTPUT,
-        ClassificationOperationalReason.CLASSIFIER_UNAVAILABLE,
-    }:
+    if mapped is ClassificationOperationalReason.INVALID_CLASSIFIER_OUTPUT:
         return mapped
-    return ClassificationOperationalReason.INVALID_CLASSIFIER_OUTPUT
+    return ClassificationOperationalReason.CLASSIFIER_EXECUTION_FAILED
 
 
 def _operational_completion(
