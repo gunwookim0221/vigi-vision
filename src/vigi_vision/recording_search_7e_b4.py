@@ -378,9 +378,18 @@ def _operational_completion(
             "outcome": None,
             "reason_code": None,
             "classifier_evidence": None,
-            "operational_reason": reason.value,
+            "operational_reason": _canonical_operational_reason(reason),
         },
     )
+
+
+def _canonical_operational_reason(reason: ClassificationOperationalReason) -> str:
+    """Map internal B4 categories to the closed Phase 7E vocabulary."""
+    if reason is ClassificationOperationalReason.CLASSIFIER_TIMEOUT:
+        return "classifier_timeout"
+    if reason is ClassificationOperationalReason.INVALID_CLASSIFIER_OUTPUT:
+        return "invalid_classifier_result"
+    return "classification_failed"
 
 
 def _evidence_payload(raw: dict[str, object]) -> dict[str, object]:

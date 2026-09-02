@@ -189,6 +189,7 @@ def _phase7e_adapter_fixture(
     *,
     timeout: float,
     delay_seconds: float = 0.0,
+    worker_spec: StaticMaskWorkerSpec | None = None,
 ) -> tuple[Phase7EProductionB4Adapter, Phase7EB4Input]:
     width = 32
     height = 32
@@ -327,7 +328,7 @@ def _phase7e_adapter_fixture(
         Phase7EProductionB4Adapter(
             lambda _investigation_id: confirmed,
             Decoder(),
-            StaticMaskWorkerSpec(mask, mask, delay_seconds=delay_seconds),
+            worker_spec or StaticMaskWorkerSpec(mask, mask, delay_seconds=delay_seconds),
             object_policy,
         ),
         authoritative,
@@ -353,6 +354,21 @@ def test_phase7e_production_adapter_timeout_is_operational_only(tmp_path: Path) 
     result = adapter.classify(authoritative)
     assert result.payload["result_kind"] == "OPERATIONAL"
     assert result.payload["operational_reason"] == "classifier_timeout"
+    assert result.payload["classifier_evidence"] is None
+
+
+def test_phase7e_production_adapter_invalid_output_is_canonical_operational(
+    tmp_path: Path,
+) -> None:
+    empty = BinaryMask.from_rows(tuple(tuple(False for _ in range(32)) for _ in range(32)))
+    adapter, authoritative = _phase7e_adapter_fixture(
+        tmp_path,
+        timeout=3.0,
+        worker_spec=StaticMaskWorkerSpec(empty, empty),
+    )
+    result = adapter.classify(authoritative)
+    assert result.payload["result_kind"] == "OPERATIONAL"
+    assert result.payload["operational_reason"] == "invalid_classifier_result"
     assert result.payload["classifier_evidence"] is None
 
 
