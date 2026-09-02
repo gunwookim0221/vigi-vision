@@ -158,6 +158,30 @@ VIGI Vision explicitly loads `.env` from the current working directory. OS envir
 
 `ffmpeg` must be available on `PATH` unless `FFMPEG_PATH` names its executable. The selected NVR or IPC credentials are supplied separately to ffmpeg for its RTSP Digest challenge; they are not embedded in the SDK-built URL. Standard IPC RTSP uses the SDK-generated default-port URL; Vision does not support `VIGI_IPC_PORT`. `VIGI_IPC_VERIFY_TLS` is an SDK/OpenAPI control-plane setting and is not read by this RTSP-only Vision path.
 
+### Development environment preflight
+
+Development and test commands should use the shared project-managed environment
+in the parent project directory. From this repository, run the credential-free
+SDK preflight before broad tests:
+
+```powershell
+& "..\.venv\Scripts\python.exe" tools\sdk_environment_preflight.py
+```
+
+The preflight reports the interpreter, SDK distribution and source resolution,
+and the required public IPC URL-builder capability. It exits nonzero when a
+global interpreter, stale editable SDK, or incompatible SDK source is selected.
+Run tests through that same interpreter rather than a global `pytest` command:
+
+```powershell
+& "..\.venv\Scripts\python.exe" -m pytest
+```
+
+The adjacent `tp-link-vigi-sdk` checkout is an editable development dependency
+for this local two-repository setup. SDK implementation or release changes must
+be made and validated separately in the SDK repository; this application does
+not modify the SDK.
+
 ### Detailed CLI Notes
 
 For NVR, list safe channel metadata first to choose `VIGI_CHANNEL_ID` when needed. This command is deliberately NVR-only:
