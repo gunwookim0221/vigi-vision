@@ -28,10 +28,11 @@ reopen. Phase 7E feasibility work proves that current VIGI replay timestamps
  The single normative Phase 7E contract uses one replay/decode session, one SDK
 segment, a five-minute default, a hard 600-second search maximum, an exact
 2,520-second invocation ceiling, schemas 5→6→7, and a separate FOUND-only Phase
-8 projection repository. The 7E-1C common-session and 7E-1D terminal
-orchestration boundaries are implemented; CLI integration, Phase 8
-review-media processing, and Phase 9 remain unimplemented; schemas 1–4 retain
-their original strict meaning.**
+8 projection repository. The 7E-1C common-session, 7E-1D terminal, and 7E-2
+CLI/projection/retention boundaries are implemented, including continuous
+publication-object authority and crash-safe two-media deletion. Phase 7E-3
+real-NVR acceptance, Phase 8 review-media processing, and Phase 9 remain
+unimplemented; schemas 1–4 retain their original strict meaning.**
 
 This document defines the first bounded use case for VIGI Vision's longer-term
 Event Discovery direction: a user investigates one selected object on one NVR
@@ -396,10 +397,11 @@ version after Phase 7E evidence.
   validated lossless D1 reconstruction envelope and never downgrades schema 4
   after its commit point. The Phase 7E contract preserves one common session,
   one segment, a 600-second search ceiling, and a 2,520-second invocation
-  ceiling. Ordered 7E-1A/1B/1C/1D, 7E-2, and 7E-3 implementation/validation
-  are in progress: 1A and 1B are implemented, and 1C now implements one
-  bounded replay/remux, durable `.media`, exact local target selection, RGB24,
-  and persisted-frame A2/B4 admission. Slice ownership is: 1A
+  ceiling. Ordered 7E-1A/1B/1C/1D and 7E-2 are implemented; 7E-3 bounded
+  real-NVR acceptance remains. The common-session publisher retains one exact
+  staged object through authority admission, and the Phase 8 retention boundary
+  uses per-object durable move/disposition substates plus terminal
+  closed-membership validation. Slice ownership is: 1A
   identities/models/validation; 1B pre-acquisition schema 5 and incremental
   schema 6; 1C retained MP4,
   exact logical-target frame selection, RGB24, and A2/B4; 1D the Phase

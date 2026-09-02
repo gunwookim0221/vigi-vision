@@ -9,7 +9,7 @@ deletion state machine.  It never opens the NVR or performs analysis.
 # The state machine deliberately keeps every publication and recovery branch
 # explicit.  Complexity exemptions describe the closed persistence contract,
 # not an open-ended implementation surface.
-# ruff: noqa: B009, C901, D102, D107, EM101, PLR0911, PLR0912, PLR0913, PLR0915, PLR2004, PTH105, SIM117, TC001, TRY300, TRY301
+# ruff: noqa: B009, C901, D102, D107, EM101, PLC0415, PLR0911, PLR0912, PLR0913, PLR0915, PLR2004, PTH105, SIM117, TC001, TRY300, TRY301
 # pyright: reportAny=false, reportArgumentType=false, reportAttributeAccessIssue=false, reportReturnType=false, reportUnannotatedClassAttribute=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnnecessaryIsInstance=false, reportUnusedCallResult=false
 
 from __future__ import annotations
@@ -44,6 +44,7 @@ from vigi_vision.recording_search_7e_media_authority import (
     mark_open_file_for_deletion,
     open_stable_file,
     read_retained_media_authority,
+    rename_open_file_no_replace,
 )
 from vigi_vision.recording_search_7e_media_authority import (
     stable_source_path as stable_descriptor_path,
@@ -62,6 +63,40 @@ _PACKAGE = "package"
 _MAX_CLIP_BYTES = 536_870_912
 _MAX_CLIP_SECONDS = 41
 _MAX_FRAME_RATE = Fraction(60, 1)
+_DELETION_OBJECT_STATES = {
+    "not_moved",
+    "move_intent",
+    "moved",
+    "disposition_intent",
+    "disposition_observed",
+    "disposition_completed",
+    "deleted",
+}
+_DELETION_OBJECT_KEYS = {
+    "role",
+    "state",
+    "live_path",
+    "tombstone_path",
+    "sha256",
+    "size_bytes",
+    "stamp",
+    "filesystem_identity",
+    "authority_binding",
+}
+_DELETION_JOURNAL_KEYS = {
+    "schema_version",
+    "kind",
+    "investigation_id",
+    "run_id",
+    "final_root",
+    "transition",
+    "owner_id",
+    "lifecycle_state",
+    "lifecycle_generation",
+    "ready_manifest_id",
+    "deleting_manifest_id",
+    "objects",
+}
 
 
 class Phase8LifecycleError(RuntimeError):
@@ -170,10 +205,11 @@ class _FileStamp:
     inode: int
     size: int
     modified_ns: int
+    link_count: int
 
     @classmethod
     def from_stat(cls, value: os.stat_result) -> _FileStamp:
-        return cls(value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
+        return cls(value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_nlink)
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,7 +399,7 @@ class Phase8HandoffRepository:
                 raise Phase8LifecycleError("phase8_corrupt")
             self.checkpoint("after_staged_readback")
             try:
-                package_root.rename(final)
+                _durable_move(package_root, final, replace=False)
                 _fsync_directory(final.parent)
             except OSError:
                 if not final.exists():
@@ -490,6 +526,7 @@ class Phase8HandoffRepository:
         if wrapper is None:
             wrapper = self._find_deletion_wrapper(package)
         journal = self._read_journal(wrapper)
+        self._validate_deletion_journal(journal, wrapper, package)
         final = package.root
         common_live = self._common_media_path(
             str(getattr(run, "investigation_id")), str(getattr(run, "run_id")), session.identity
@@ -502,52 +539,52 @@ class Phase8HandoffRepository:
             raise Phase8LifecycleError("phase8_corrupt")
         clip_live = final / "clips" / f"{integrity['sha256']}.mp4"
         clip_tomb = clip_live.parent / str(package.manifest.payload["source_clip_tombstone_name"])
-        journal = self._move_or_reopen(
+        journal = self._delete_object(
             journal,
             wrapper,
+            package,
             "common",
             common_live,
             common_tomb,
             str(session.payload["mp4_sha256"]),
             int(session.payload["mp4_size_bytes"]),
-            journal["common_filesystem_identity"],
+            stop_after_move=True,
         )
-        self.checkpoint("after_common_tombstone")
-        journal = self._move_or_reopen(
+        journal = self._delete_object(
             journal,
             wrapper,
+            package,
             "clip",
             clip_live,
             clip_tomb,
             str(integrity["sha256"]),
             int(integrity["size_bytes"]),
-            journal["clip_filesystem_identity"],
+            stop_after_move=True,
         )
-        self.checkpoint("after_clip_tombstone")
-        journal = self._unlink_recorded(
+        journal = self._delete_object(
             journal,
             wrapper,
+            package,
             "common",
             common_live,
             common_tomb,
             str(session.payload["mp4_sha256"]),
             int(session.payload["mp4_size_bytes"]),
-            journal["common_stamp"],
-            journal["common_filesystem_identity"],
         )
         self.checkpoint("after_common_unlink")
-        journal = self._unlink_recorded(
+        journal = self._delete_object(
             journal,
             wrapper,
+            package,
             "clip",
             clip_live,
             clip_tomb,
             str(integrity["sha256"]),
             int(integrity["size_bytes"]),
-            journal["clip_stamp"],
-            journal["clip_filesystem_identity"],
         )
         self.checkpoint("after_clip_unlink")
+        self.checkpoint("before_terminal_closed_membership")
+        self._validate_terminal_deletion(run, package, wrapper)
         deleted = StrictIdentityEnvelope.from_payload(
             "phase8-manifest",
             {
@@ -557,113 +594,339 @@ class Phase8HandoffRepository:
                 "deletion_result": "DELETED",
             },
         )
-        self._publish_transition(package, deleted, wrapper)
-        self.checkpoint("after_deleted_publication")
-        reopened = self._reopen_at(final, run, validate_common=True)
-        if reopened.state != "DELETED":
-            raise Phase8LifecycleError("phase8_corrupt")
+
+        def before_commit() -> None:
+            self.checkpoint("before_deleted_commit")
+            self._validate_terminal_deletion(
+                run,
+                package,
+                wrapper,
+                expected_successor=deleted,
+            )
+
+        def after_commit() -> None:
+            self.checkpoint("after_deleted_publication")
+            reopened = self._reopen_at(final, run, validate_common=True)
+            if reopened.state != "DELETED" or reopened.manifest != deleted:
+                raise Phase8LifecycleError("phase8_corrupt")
+
+        self._publish_transition(
+            package,
+            deleted,
+            wrapper,
+            before_commit=before_commit,
+            after_commit=after_commit,
+            rollback_on_after_failure=True,
+        )
         _remove_tree(wrapper, self.staging_root)
         return "DELETED"
 
-    def _move_or_reopen(
+    def _delete_object(
         self,
         journal: dict[str, object],
         wrapper: Path,
-        name: str,
+        package: Phase8Package,
+        role: str,
         live: Path,
         tomb: Path,
         expected_sha: str,
         expected_size: int,
-        expected_identity: object,
+        *,
+        stop_after_move: bool = False,
     ) -> dict[str, object]:
-        progress = journal.get("progress")
-        completed = {
-            "common": {"common_moved", "clip_moved", "common_unlinked", "clip_unlinked"},
-            "clip": {"clip_moved", "common_unlinked", "clip_unlinked"},
-        }[name]
-        unlinked = {"common": {"common_unlinked", "clip_unlinked"}, "clip": {"clip_unlinked"}}[name]
-        if progress in unlinked:
-            if live.exists() or live.is_symlink() or tomb.exists() or tomb.is_symlink():
-                raise Phase8LifecycleError("phase8_media_corrupt")
-            return journal
-        if progress in completed:
-            if live.exists() or live.is_symlink():
-                raise Phase8LifecycleError("phase8_media_corrupt")
-            _verify_path_bytes(
-                tomb,
-                expected_sha,
-                expected_size,
-                journal[f"{name}_stamp"],
-                expected_identity,
-            )
-            return journal
-        if tomb.exists() or tomb.is_symlink():
-            if live.exists() or live.is_symlink():
-                raise Phase8LifecycleError("phase8_media_corrupt")
-            _verify_path_bytes(
-                tomb,
-                expected_sha,
-                expected_size,
-                journal[f"{name}_stamp"],
-                expected_identity,
-            )
-        else:
-            _verify_path_bytes(
-                live,
-                expected_sha,
-                expected_size,
-                journal[f"{name}_stamp"],
-                expected_identity,
-            )
-            os.replace(live, tomb)
-            _fsync_directory(tomb.parent)
-            _verify_path_bytes(
-                tomb,
-                expected_sha,
-                expected_size,
-                journal[f"{name}_stamp"],
-                expected_identity,
-            )
-        journal["progress"] = "common_moved" if name == "common" else "clip_moved"
-        self._write_journal(wrapper, journal)
-        return journal
+        while True:
+            value = self._deletion_object(journal, role, live, tomb, expected_sha, expected_size)
+            state = str(value["state"])
+            stamp_value = value["stamp"]
+            identity = value["filesystem_identity"]
+            if state == "not_moved":
+                if tomb.exists() or tomb.is_symlink():
+                    raise Phase8LifecycleError("phase8_media_corrupt")
+                _verify_path_bytes(live, expected_sha, expected_size, stamp_value, identity)
+                journal = self._advance_deletion_object(journal, wrapper, role, "move_intent")
+                continue
+            if state == "move_intent":
+                live_present = live.exists() or live.is_symlink()
+                tomb_present = tomb.exists() or tomb.is_symlink()
+                if live_present and tomb_present:
+                    raise Phase8LifecycleError("phase8_media_corrupt")
+                if live_present:
+                    descriptor = open_stable_file(live, delete_access=True)
+                    try:
+                        _verify_open_descriptor(
+                            descriptor,
+                            expected_sha,
+                            expected_size,
+                            stamp_value,
+                            identity,
+                        )
+                        rename_open_file_no_replace(descriptor, live, tomb)
+                        _verify_open_descriptor(
+                            descriptor,
+                            expected_sha,
+                            expected_size,
+                            stamp_value,
+                            identity,
+                        )
+                    except (OSError, MediaFilesystemAuthorityError) as error:
+                        raise Phase8LifecycleError("phase8_media_corrupt") from error
+                    finally:
+                        os.close(descriptor)
+                elif not tomb_present:
+                    raise Phase8LifecycleError("phase8_media_corrupt")
+                _verify_path_bytes(tomb, expected_sha, expected_size, stamp_value, identity)
+                _fsync_directory(tomb.parent)
+                self.checkpoint(f"after_{role}_tombstone")
+                journal = self._advance_deletion_object(journal, wrapper, role, "moved")
+                continue
+            if state == "moved":
+                if stop_after_move:
+                    return journal
+                if live.exists() or live.is_symlink():
+                    raise Phase8LifecycleError("phase8_media_corrupt")
+                _verify_path_bytes(tomb, expected_sha, expected_size, stamp_value, identity)
+                journal = self._advance_deletion_object(
+                    journal, wrapper, role, "disposition_intent"
+                )
+                continue
+            if state == "disposition_intent":
+                if live.exists() or live.is_symlink():
+                    raise Phase8LifecycleError("phase8_media_corrupt")
+                if tomb.exists():
+                    _delete_verified_tombstone(
+                        tomb,
+                        expected_sha,
+                        expected_size,
+                        stamp_value,
+                        identity,
+                        before_disposition=lambda: self.checkpoint(
+                            f"before_{role}_delete_disposition"
+                        ),
+                    )
+                elif tomb.is_symlink():
+                    raise Phase8LifecycleError("phase8_media_corrupt")
+                self.checkpoint(f"after_{role}_disposition_requested")
+                self._validate_disposed_name(package, journal, role)
+                self.checkpoint(f"after_{role}_disappearance_observed")
+                journal = self._advance_deletion_object(
+                    journal, wrapper, role, "disposition_observed"
+                )
+                continue
+            if state == "disposition_observed":
+                self._validate_disposed_name(package, journal, role)
+                _fsync_directory(tomb.parent)
+                self.checkpoint(f"after_{role}_directory_durability")
+                journal = self._advance_deletion_object(
+                    journal, wrapper, role, "disposition_completed"
+                )
+                continue
+            if state == "disposition_completed":
+                self._validate_disposed_name(package, journal, role)
+                journal = self._advance_deletion_object(journal, wrapper, role, "deleted")
+                continue
+            if state == "deleted":
+                self._validate_disposed_name(package, journal, role)
+                return journal
+            raise Phase8LifecycleError("phase8_corrupt")
 
-    def _unlink_recorded(
+    def _deletion_object(
         self,
-        journal: dict[str, object],
-        wrapper: Path,
-        name: str,
+        journal: Mapping[str, object],
+        role: str,
         live: Path,
         tomb: Path,
         expected_sha: str,
         expected_size: int,
-        expected_stamp: object,
-        expected_identity: object,
     ) -> dict[str, object]:
-        target_progress = "common_unlinked" if name == "common" else "clip_unlinked"
-        if journal.get("progress") in {target_progress, "clip_unlinked"}:
-            if live.exists() or live.is_symlink() or tomb.exists() or tomb.is_symlink():
-                raise Phase8LifecycleError("phase8_media_corrupt")
-            return journal
-        if live.exists() or live.is_symlink():
-            raise Phase8LifecycleError("phase8_media_corrupt")
-        if tomb.exists():
-            _delete_verified_tombstone(
-                tomb,
-                expected_sha,
-                expected_size,
-                expected_stamp,
-                expected_identity,
-                before_disposition=lambda: self.checkpoint(f"before_{name}_delete_disposition"),
-            )
-            if tomb.exists() or tomb.is_symlink():
-                raise Phase8LifecycleError("phase8_media_corrupt")
-            _fsync_directory(tomb.parent)
-        elif tomb.is_symlink():
-            raise Phase8LifecycleError("phase8_media_corrupt")
-        journal["progress"] = target_progress
+        objects = journal.get("objects")
+        if not isinstance(objects, dict) or set(objects) != {"common", "clip"}:
+            raise Phase8LifecycleError("phase8_corrupt")
+        value = objects.get(role)
+        if not isinstance(value, dict) or set(value) != _DELETION_OBJECT_KEYS:
+            raise Phase8LifecycleError("phase8_corrupt")
+        if (
+            value.get("role") != role
+            or value.get("state") not in _DELETION_OBJECT_STATES
+            or value.get("live_path") != str(live.absolute())
+            or value.get("tombstone_path") != str(tomb.absolute())
+            or value.get("sha256") != expected_sha
+            or value.get("size_bytes") != expected_size
+        ):
+            raise Phase8LifecycleError("phase8_corrupt")
+        stamp_value = _stamp_from_value(value.get("stamp"))
+        identity = value.get("filesystem_identity")
+        if (
+            stamp_value.link_count != 1
+            or not isinstance(identity, dict)
+            or set(identity) != {"platform", "volume_id", "file_id"}
+            or identity.get("platform") not in {"windows", "posix"}
+            or any(type(identity.get(key)) is not int for key in ("volume_id", "file_id"))
+            or (role == "common") != isinstance(value.get("authority_binding"), dict)
+        ):
+            raise Phase8LifecycleError("phase8_corrupt")
+        return value
+
+    def _advance_deletion_object(
+        self,
+        journal: dict[str, object],
+        wrapper: Path,
+        role: str,
+        state: str,
+    ) -> dict[str, object]:
+        objects = journal.get("objects")
+        if not isinstance(objects, dict) or not isinstance(objects.get(role), dict):
+            raise Phase8LifecycleError("phase8_corrupt")
+        objects[role]["state"] = state
         self._write_journal(wrapper, journal)
-        return journal
+        reopened = self._read_journal(wrapper)
+        reopened_objects = reopened.get("objects")
+        if (
+            not isinstance(reopened_objects, dict)
+            or not isinstance(reopened_objects.get(role), dict)
+            or reopened_objects[role].get("state") != state
+        ):
+            raise Phase8LifecycleError("phase8_corrupt")
+        self.checkpoint(f"after_{role}_{state}")
+        return reopened
+
+    def _validate_disposed_name(
+        self,
+        package: Phase8Package,
+        journal: Mapping[str, object],
+        role: str,
+    ) -> None:
+        objects = journal.get("objects")
+        if not isinstance(objects, dict) or not isinstance(objects.get(role), dict):
+            raise Phase8LifecycleError("phase8_corrupt")
+        value = objects[role]
+        live = Path(str(value.get("live_path")))
+        tomb = Path(str(value.get("tombstone_path")))
+        if any(path.exists() or path.is_symlink() for path in (live, tomb)):
+            raise Phase8LifecycleError("phase8_media_corrupt")
+        if role == "common":
+            expected = {authority_path(live).name}
+            if _entry_names(live.parent) != expected:
+                raise Phase8LifecycleError("phase8_media_corrupt")
+        elif _entry_names(package.root / "clips"):
+            raise Phase8LifecycleError("phase8_media_corrupt")
+
+    def _validate_deletion_journal(
+        self,
+        journal: Mapping[str, object],
+        wrapper: Path,
+        package: Phase8Package,
+    ) -> None:
+        if (
+            set(journal) != _DELETION_JOURNAL_KEYS
+            or journal.get("schema_version") != 2
+            or journal.get("kind") != "deletion"
+            or journal.get("owner_id") != wrapper.name
+            or journal.get("lifecycle_state") != "DELETING"
+            or journal.get("lifecycle_generation") != package.manifest.identity
+            or journal.get("deleting_manifest_id") != package.manifest.identity
+            or journal.get("ready_manifest_id")
+            != package.manifest.payload.get("previous_phase8_manifest_id")
+            or journal.get("investigation_id") != package.manifest.payload.get("investigation_id")
+            or journal.get("run_id") != package.manifest.payload.get("run_id")
+            or journal.get("final_root") != str(package.root.absolute())
+        ):
+            raise Phase8LifecycleError("phase8_corrupt")
+        transition = journal.get("transition")
+        if transition is not None and (
+            not isinstance(transition, dict)
+            or set(transition) != {"previous_manifest_id", "successor_manifest_id"}
+            or transition.get("previous_manifest_id") != package.manifest.identity
+        ):
+            raise Phase8LifecycleError("phase8_corrupt")
+
+    def _validate_terminal_deletion(
+        self,
+        run: object,
+        package: Phase8Package,
+        wrapper: Path,
+        *,
+        expected_successor: StrictIdentityEnvelope | None = None,
+    ) -> None:
+        current = self._reopen_at(package.root, run, validate_common=False)
+        if current.state != "DELETING" or current.manifest != package.manifest:
+            raise Phase8LifecycleError("phase8_corrupt")
+        journal = self._read_journal(wrapper)
+        self._validate_deletion_journal(journal, wrapper, current)
+        transition = journal.get("transition")
+        if expected_successor is None:
+            if transition is not None:
+                raise Phase8LifecycleError("phase8_corrupt")
+        elif (
+            not isinstance(transition, dict)
+            or transition.get("successor_manifest_id") != expected_successor.identity
+        ):
+            raise Phase8LifecycleError("phase8_corrupt")
+        objects = journal.get("objects")
+        if not isinstance(objects, dict):
+            raise Phase8LifecycleError("phase8_corrupt")
+        for role in ("common", "clip"):
+            value = objects.get(role)
+            if not isinstance(value, dict) or value.get("state") != "deleted":
+                raise Phase8LifecycleError("phase8_corrupt")
+            self._validate_disposed_name(current, journal, role)
+        common = objects["common"]
+        common_live = Path(str(common["live_path"]))
+        binding = common.get("authority_binding")
+        if not isinstance(binding, dict) or set(binding) != {
+            "record_path",
+            "record_sha256",
+            "filesystem_identity",
+            "file_stamp",
+        }:
+            raise Phase8LifecycleError("phase8_corrupt")
+        terminal, session, _snapshot = _terminal_authority(run)
+        del terminal
+        try:
+            authority = read_retained_media_authority(
+                self.media_root,
+                common_live,
+                {**session.payload, "common_session_id": session.identity},
+            )
+        except MediaFilesystemAuthorityError as error:
+            raise Phase8LifecycleError("phase8_media_corrupt") from error
+        if (
+            binding.get("record_path") != str(authority_path(common_live).absolute())
+            or binding.get("record_sha256")
+            != hashlib.sha256(authority.canonical_bytes()).hexdigest()
+            or binding.get("filesystem_identity") != authority.filesystem_identity
+            or binding.get("file_stamp") != authority.file_stamp
+        ):
+            raise Phase8LifecycleError("phase8_media_corrupt")
+        staging_parent = wrapper.parent
+        if _entry_names(staging_parent) != {wrapper.name}:
+            raise Phase8LifecycleError("phase8_corrupt")
+        wrapper_names = _entry_names(wrapper)
+        if not wrapper_names <= {_JOURNAL, "transition"} or _JOURNAL not in wrapper_names:
+            raise Phase8LifecycleError("phase8_corrupt")
+        transition_root = wrapper / "transition"
+        if transition_root.exists():
+            if not _safe_directory(self.staging_root, transition_root):
+                raise Phase8LifecycleError("phase8_corrupt")
+            transition_names = _entry_names(transition_root)
+            expected_names = set() if expected_successor is None else {_MANIFEST}
+            if transition_names != expected_names:
+                raise Phase8LifecycleError("phase8_corrupt")
+            if (
+                expected_successor is not None
+                and self._read_envelope(transition_root / _MANIFEST) != expected_successor
+            ):
+                raise Phase8LifecycleError("phase8_corrupt")
+        elif expected_successor is not None:
+            raise Phase8LifecycleError("phase8_corrupt")
+        for directory in (
+            common_live.parent,
+            current.root / "clips",
+            current.root / "manifests",
+            current.root,
+            wrapper,
+            staging_parent,
+        ):
+            _fsync_directory(directory)
 
     def _reopen_at(self, root: Path, run: object, *, validate_common: bool) -> Phase8Package:
         if not _safe_directory(self.root.parent, root):
@@ -746,45 +1009,100 @@ class Phase8HandoffRepository:
                 with self._verified_common_media(common_live, session.payload, 20.0):
                     pass
         elif state == "DELETING":
-            deletion_wrapper = self._find_deletion_wrapper(
-                Phase8Package(root, manifest, source_clip, request, None)
-            )
+            provisional = Phase8Package(root, manifest, source_clip, request, None)
+            deletion_wrapper = self._find_deletion_wrapper(provisional)
             deletion_journal = self._read_journal(deletion_wrapper)
+            self._validate_deletion_journal(deletion_journal, deletion_wrapper, provisional)
             names = _entry_names(root / "clips")
             allowed = {live_clip.name, clip_tomb.name}
             if not names <= allowed or len(names) > 1:
                 raise Phase8LifecycleError("phase8_media_corrupt")
+            clip_object = self._deletion_object(
+                deletion_journal,
+                "clip",
+                live_clip,
+                clip_tomb,
+                str(integrity["sha256"]),
+                int(integrity["size_bytes"]),
+            )
+            clip_state = str(clip_object["state"])
             if live_clip.name in names:
+                if clip_state not in {"not_moved", "move_intent"}:
+                    raise Phase8LifecycleError("phase8_media_corrupt")
+                _verify_path_bytes(
+                    live_clip,
+                    str(integrity["sha256"]),
+                    int(integrity["size_bytes"]),
+                    clip_object["stamp"],
+                    clip_object["filesystem_identity"],
+                )
                 with self._verified_clip(live_clip, integrity, 20.0):
                     pass
                 clip_path = live_clip
             elif clip_tomb.name in names:
+                if clip_state not in {"move_intent", "moved", "disposition_intent"}:
+                    raise Phase8LifecycleError("phase8_media_corrupt")
                 _verify_path_bytes(
                     clip_tomb,
                     str(integrity["sha256"]),
                     int(integrity["size_bytes"]),
-                    deletion_journal["clip_stamp"],
-                    deletion_journal["clip_filesystem_identity"],
+                    clip_object["stamp"],
+                    clip_object["filesystem_identity"],
                 )
                 clip_path = clip_tomb
+            elif clip_state not in {
+                "disposition_intent",
+                "disposition_observed",
+                "disposition_completed",
+                "deleted",
+            }:
+                raise Phase8LifecycleError("phase8_media_corrupt")
+            common_object = self._deletion_object(
+                deletion_journal,
+                "common",
+                common_live,
+                common_tomb,
+                str(session.payload["mp4_sha256"]),
+                int(session.payload["mp4_size_bytes"]),
+            )
+            common_state = str(common_object["state"])
             common_present = common_live.exists() or common_live.is_symlink()
             tomb_present = common_tomb.exists() or common_tomb.is_symlink()
             if common_present and tomb_present:
                 raise Phase8LifecycleError("phase8_media_corrupt")
-            if common_present and validate_common:
-                with self._verified_common_media(common_live, session.payload, 20.0):
-                    pass
+            if common_present:
+                if common_state not in {"not_moved", "move_intent"}:
+                    raise Phase8LifecycleError("phase8_media_corrupt")
+                _verify_path_bytes(
+                    common_live,
+                    str(session.payload["mp4_sha256"]),
+                    int(session.payload["mp4_size_bytes"]),
+                    common_object["stamp"],
+                    common_object["filesystem_identity"],
+                )
+                if validate_common:
+                    with self._verified_common_media(common_live, session.payload, 20.0):
+                        pass
             elif tomb_present:
+                if common_state not in {"move_intent", "moved", "disposition_intent"}:
+                    raise Phase8LifecycleError("phase8_media_corrupt")
                 _verify_path_bytes(
                     common_tomb,
                     str(session.payload["mp4_sha256"]),
                     int(session.payload["mp4_size_bytes"]),
-                    deletion_journal["common_stamp"],
-                    deletion_journal["common_filesystem_identity"],
+                    common_object["stamp"],
+                    common_object["filesystem_identity"],
                 )
+            elif common_state not in {
+                "disposition_intent",
+                "disposition_observed",
+                "disposition_completed",
+                "deleted",
+            }:
+                raise Phase8LifecycleError("phase8_media_corrupt")
         else:
             if _entry_names(root / "clips"):
-                raise Phase8LifecycleError("phase8_corrupt")
+                raise Phase8LifecycleError("phase8_media_corrupt")
             if any(
                 path.exists() or path.is_symlink()
                 for path in (common_live, common_tomb, live_clip, clip_tomb)
@@ -998,6 +1316,10 @@ class Phase8HandoffRepository:
         current: Phase8Package,
         successor: StrictIdentityEnvelope,
         wrapper: Path,
+        *,
+        before_commit: Callable[[], None] | None = None,
+        after_commit: Callable[[], None] | None = None,
+        rollback_on_after_failure: bool = False,
     ) -> None:
         transition = wrapper / "transition"
         transition.mkdir(exist_ok=True)
@@ -1016,11 +1338,28 @@ class Phase8HandoffRepository:
             if self._read_envelope(final_archive) != current.manifest:
                 raise Phase8LifecycleError("phase8_conflict")
         else:
-            archive.replace(final_archive)
+            _durable_move(archive, final_archive, replace=False)
             _fsync_directory(final_archive.parent)
         self.checkpoint("after_transition_archive")
-        os.replace(proposed, current.root / _MANIFEST)
+        if before_commit is not None:
+            before_commit()
+        _durable_move(proposed, current.root / _MANIFEST, replace=True)
         _fsync_directory(current.root)
+        try:
+            if after_commit is not None:
+                after_commit()
+        except BaseException as primary:
+            if rollback_on_after_failure:
+                try:
+                    self._write_envelope(current.root / _MANIFEST, current.manifest, replace=True)
+                    if final_archive.exists():
+                        final_archive.unlink()
+                        _fsync_directory(final_archive.parent)
+                    journal["transition"] = None
+                    self._write_journal(wrapper, journal)
+                except (OSError, Phase8LifecycleError) as cleanup_error:
+                    primary.add_note(f"Phase 8 transition rollback failed: {cleanup_error!r}")
+            raise
         journal["transition"] = None
         self._write_journal(wrapper, journal)
 
@@ -1055,18 +1394,54 @@ class Phase8HandoffRepository:
         clip: _VerifiedFile,
     ) -> Path:
         wrapper = self._new_staging(investigation_id, run_id, final, "deletion")
-        journal = self._read_journal(wrapper)
-        journal.update(
-            {
-                "progress": "ready",
-                "ready_manifest_id": package.manifest.identity,
-                "deleting_manifest_id": deleting.identity,
-                "common_stamp": asdict(common.stamp),
-                "clip_stamp": asdict(clip.stamp),
-                "common_filesystem_identity": common.filesystem_identity,
-                "clip_filesystem_identity": clip.filesystem_identity,
-            }
-        )
+        if common.authority is None:
+            raise Phase8LifecycleError("phase8_media_corrupt")
+        common_tomb = common.path.parent / str(deleting.payload["common_media_tombstone_name"])
+        clip_tomb = clip.path.parent / str(deleting.payload["source_clip_tombstone_name"])
+        journal: dict[str, object] = {
+            "schema_version": 2,
+            "kind": "deletion",
+            "investigation_id": investigation_id,
+            "run_id": run_id,
+            "final_root": str(final.absolute()),
+            "transition": None,
+            "owner_id": wrapper.name,
+            "lifecycle_state": "DELETING",
+            "lifecycle_generation": deleting.identity,
+            "ready_manifest_id": package.manifest.identity,
+            "deleting_manifest_id": deleting.identity,
+            "objects": {
+                "common": {
+                    "role": "common",
+                    "state": "not_moved",
+                    "live_path": str(common.path.absolute()),
+                    "tombstone_path": str(common_tomb.absolute()),
+                    "sha256": common.sha256,
+                    "size_bytes": common.size_bytes,
+                    "stamp": asdict(common.stamp),
+                    "filesystem_identity": common.filesystem_identity,
+                    "authority_binding": {
+                        "record_path": str(authority_path(common.path).absolute()),
+                        "record_sha256": hashlib.sha256(
+                            common.authority.canonical_bytes()
+                        ).hexdigest(),
+                        "filesystem_identity": common.authority.filesystem_identity,
+                        "file_stamp": common.authority.file_stamp,
+                    },
+                },
+                "clip": {
+                    "role": "clip",
+                    "state": "not_moved",
+                    "live_path": str(clip.path.absolute()),
+                    "tombstone_path": str(clip_tomb.absolute()),
+                    "sha256": clip.sha256,
+                    "size_bytes": clip.size_bytes,
+                    "stamp": asdict(clip.stamp),
+                    "filesystem_identity": clip.filesystem_identity,
+                    "authority_binding": None,
+                },
+            },
+        }
         self._write_journal(wrapper, journal)
         return wrapper
 
@@ -1130,13 +1505,30 @@ class Phase8HandoffRepository:
         previous = transition.get("previous_manifest_id")
         successor = transition.get("successor_manifest_id")
         archive = final / "manifests" / f"{previous}.json"
+        transition_root = wrapper / "transition"
+        if not _safe_directory(self.staging_root, transition_root):
+            raise Phase8LifecycleError("phase8_corrupt")
+        staged_archive = transition_root / f"{previous}.json"
+        staged_manifest = transition_root / _MANIFEST
+        allowed = {staged_archive.name, staged_manifest.name}
+        if not _entry_names(transition_root) <= allowed:
+            raise Phase8LifecycleError("phase8_corrupt")
         if current.identity == previous:
             if archive.exists():
                 if archive.is_symlink() or self._read_envelope(archive).identity != previous:
                     raise Phase8LifecycleError("phase8_corrupt")
                 archive.unlink()
                 _fsync_directory(archive.parent)
-        elif current.identity != successor:
+            if staged_archive.exists():
+                if self._read_envelope(staged_archive).identity != previous:
+                    raise Phase8LifecycleError("phase8_corrupt")
+                staged_archive.unlink()
+            if staged_manifest.exists():
+                if self._read_envelope(staged_manifest).identity != successor:
+                    raise Phase8LifecycleError("phase8_corrupt")
+                staged_manifest.unlink()
+            _fsync_directory(transition_root)
+        elif current.identity != successor or _entry_names(transition_root):
             raise Phase8LifecycleError("phase8_corrupt")
         journal["transition"] = None
         self._write_journal(wrapper, journal)
@@ -1172,10 +1564,12 @@ class Phase8HandoffRepository:
         if self.root.exists() and not _safe_directory(self.root.parent, self.root):
             raise Phase8LifecycleError("phase8_corrupt")
         target = self.root / investigation_id / run_id
-        if not is_safe_contained_path(self.root, target):
-            raise Phase8LifecycleError("phase8_corrupt")
         if create_parent:
             target.parent.mkdir(parents=True, exist_ok=True)
+            if not _safe_directory(self.root, target.parent):
+                raise Phase8LifecycleError("phase8_corrupt")
+        if not is_safe_contained_path(self.root, target):
+            raise Phase8LifecycleError("phase8_corrupt")
         return target
 
     def _common_media_path(self, investigation_id: str, run_id: str, session_id: str) -> Path:
@@ -1396,10 +1790,13 @@ def _delete_verified_tombstone(
 
 
 def _stamp_from_value(value: object) -> _FileStamp:
-    if not isinstance(value, Mapping) or set(value) != {"device", "inode", "size", "modified_ns"}:
+    keys = {"device", "inode", "size", "modified_ns", "link_count"}
+    if not isinstance(value, Mapping) or set(value) != keys:
         raise Phase8LifecycleError("phase8_corrupt")
     try:
-        return _FileStamp(*(int(value[key]) for key in ("device", "inode", "size", "modified_ns")))
+        return _FileStamp(
+            *(int(value[key]) for key in ("device", "inode", "size", "modified_ns", "link_count"))
+        )
     except (TypeError, ValueError) as error:
         raise Phase8LifecycleError("phase8_corrupt") from error
 
@@ -1416,6 +1813,21 @@ def _hash_descriptor(descriptor: int) -> tuple[str, int]:
         size += len(block)
     os.lseek(descriptor, 0, os.SEEK_SET)
     return digest.hexdigest(), size
+
+
+def _verify_open_descriptor(
+    descriptor: int,
+    expected_sha: str,
+    expected_size: int,
+    expected_stamp: object,
+    expected_identity: object,
+) -> None:
+    if (
+        _FileStamp.from_stat(os.fstat(descriptor)) != _stamp_from_value(expected_stamp)
+        or filesystem_identity(descriptor) != expected_identity
+        or _hash_descriptor(descriptor) != (expected_sha, expected_size)
+    ):
+        raise Phase8LifecycleError("phase8_media_corrupt")
 
 
 def _stable_source_path(source: _VerifiedFile) -> Path:
@@ -1476,7 +1888,7 @@ def _write_text(path: Path, value: str, *, replace: bool = False) -> None:
             os.fsync(stream.fileno())
         if not replace and path.exists():
             raise Phase8LifecycleError("phase8_conflict")
-        os.replace(temporary, path)
+        _durable_move(temporary, path, replace=replace)
         _fsync_directory(path.parent)
     finally:
         if temporary.exists():
@@ -1487,6 +1899,19 @@ def _document(value: StrictIdentityEnvelope) -> str:
     return _canonical(
         {"family": value.family, "identity": value.identity, "payload": value.payload}
     )
+
+
+def _durable_move(source: Path, destination: Path, *, replace: bool) -> None:
+    if os.name != "nt":
+        if not replace and (destination.exists() or destination.is_symlink()):
+            raise FileExistsError(destination)
+        os.replace(source, destination)
+        return
+    import ctypes
+
+    flags = 0x00000008 | (0x00000001 if replace else 0)  # WRITE_THROUGH | REPLACE_EXISTING
+    if not ctypes.windll.kernel32.MoveFileExW(str(source), str(destination), flags):
+        raise OSError(ctypes.get_last_error(), "MoveFileExW failed")
 
 
 def _canonical(value: Mapping[str, object]) -> str:

@@ -33,9 +33,10 @@ reconstruction envelope for `FOUND` and independently rebuilds it from the
  current VIGI RTSP/SDK/FFmpeg path exposes request-relative, per-replay
  timestamps but no authoritative physical frame UTC. The normative section
  below defines the versioned request-relative schema 5–7 contract while keeping
- schemas 1–4 readable under their original strict physical-UTC semantics. The
- ordered Phase 7E-2 and 7E-3 implementation/validation and
- Phase 8 review-media generation remain unimplemented. The required Phase 6C
+ schemas 1–4 readable under their original strict physical-UTC semantics. Phase
+ 7E-2 synchronous CLI/projection/retention is implemented with exact-object
+ publication authority and crash-safe deletion. Phase 7E-3 validation and Phase
+ 8 review-media generation remain unimplemented. The required Phase 6C
 schema 3 compatibility increment is complete.**
 
 This document is the current implementation and review contract for Phase 7.
@@ -140,11 +141,15 @@ This canonical version-1 record is not a Phase 7 identity family and does not
 enter schemas 5–7, semantic identities, or golden vectors. It binds the exact
 repository-relative media path, investigation, run, common session, replay
 operation, existing SHA-256/length/probe facts, and the final object's
-handle-derived volume/file identity plus required file stamp. The record is
-captured only after final-path MP4 validation, atomically admitted without
-overwrite, and strictly read back with the same final open object before
-downstream eligibility. Digest equality alone does not prove that a copied or
-recreated file is the originally published filesystem object.
+handle-derived volume/file identity plus required file stamp. Publication
+creates and retains one replacement-denying handle for the staged MP4 before
+its bytes are written. Flush, hash, probe, filesystem identity, handle-bound
+no-replace rename, final-name proof, authority construction, authority
+admission, and strict authority readback all use that same open object. The
+handle remains held until downstream eligibility has been constructed; a
+secondary pathname read is admitted only after its filesystem identity is
+rebound to the retained handle. Digest equality alone does not prove that a
+copied or recreated file is the originally published filesystem object.
 
 The authority is deliberately platform-bound and nonportable. Windows uses
 the volume serial and stable file ID obtained from the open file handle; POSIX
@@ -1088,23 +1093,43 @@ deletes schema 7, request JSON, manifest JSON, unrelated files, directories with
 unknown entries, or foreign/corrupt paths. It atomically renames each media file
 to the exact same-directory tombstone bound by DELETING only after it has
 published and strictly reopened that successor with the prior manifest and two
-media identities. It
-then renames, fsyncs, unlinks without following indirection, and publishes
-`DELETED`. A crash therefore leaves `DELETING`; an identical invocation may
-reopen that state and resumes only its indexed files/tombstones. Repeating a
-completed deletion returns success without mutation. Missing unindexed media,
-corruption, missing `--yes`, active execution, or an initial state other than
-strict `READY`/`CLIP_READY` refuses deletion.
+media identities. It then moves both exact objects, durably records disposition
+intent, performs handle-bound disposition, and publishes `DELETED`. The
+version-2 operational deletion journal binds the current owner,
+DELETING generation, both live/tombstone paths, media role, filesystem identity,
+complete stamp and link count, SHA-256, length, and retained-media authority
+facts. Journal and manifest replacements use the Windows write-through move
+boundary after their file bytes are flushed. Each object advances only through
+`not_moved`, `move_intent`, `moved`,
+`disposition_intent`, `disposition_observed`, `disposition_completed`, and
+`deleted`. A crash therefore leaves one unambiguous `DELETING` substate; an
+identical lock-owning invocation may reopen that state and resume only its
+indexed files/tombstones. Repeating a completed deletion returns success without
+mutation. Missing unindexed media, corruption, missing `--yes`, active
+execution, or an initial state other than strict `READY`/`CLIP_READY` refuses
+deletion.
 
 Immediately before each destructive tombstone step, deletion reopens the exact
 recorded regular file with read-and-delete access, denies replacement, compares
 the current handle-derived filesystem identity, complete recorded stamp,
 SHA-256, and length with the deletion journal, and marks that same open Windows
-object for deletion through `SetFileInformationByHandle`. It confirms removal
-and flushes the parent before advancing the journal. There is no close-then-
-unlink or path-based fallback. A replacement or locked/unsupported object is
-preserved, leaves durable `DELETING`, and projects the safe media-corrupt state.
-Platforms without an equivalent exact-object deletion primitive fail closed.
+object for deletion through `SetFileInformationByHandle`. Durable
+`disposition_intent` always precedes that request. An absent tombstone is
+accepted after restart only from that exact intent and only while the recorded
+live name is absent and closed membership remains valid. The implementation
+then records disappearance, flushes the parent, and durably records completion;
+there is no close-then-unlink or path-based fallback.
+
+Immediately before terminal publication, both object substates, both absent
+live/tombstone names, the retained authority record, complete Phase 8
+membership, the single current owner/generation, and the absence of foreign
+staging are strictly revalidated and flushed. The same validation runs at the
+last pre-commit point and strict terminal readback. Name reuse at either point
+preserves the foreign object and leaves or atomically restores truthful
+`DELETING`; it never leaves a knowingly false `DELETED`. A replacement or
+locked/unsupported object is preserved, leaves durable `DELETING`, and projects
+the safe media-corrupt state. Platforms without an equivalent exact-object
+deletion primitive fail closed.
 
 The Phase 7E-2 production composition uses a persistence-neutral B4 adapter.
 It validates the strictly reopened Phase 7E run, frame bytes, RGB/JPEG

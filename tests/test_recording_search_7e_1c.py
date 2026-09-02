@@ -52,8 +52,11 @@ from vigi_vision.recording_search_7e_media_authority import (
     MediaFilesystemAuthorityError,
     authority_path,
     filesystem_identity,
+    hash_descriptor,
     open_stable_file,
+    publish_retained_media_authority,
     read_retained_media_authority,
+    rename_open_file_no_replace,
 )
 from vigi_vision.object_presence_evidence import RawComparison
 from vigi_vision.object_presence_values import ClassificationOutcome, VisualStatus
@@ -390,6 +393,66 @@ def test_durable_media_is_reused_and_read_back(tmp_path: Path) -> None:
     assert durable.media_path.is_file()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows publication-object continuity contract")
+def test_publication_hash_probe_authority_and_eligibility_keep_one_exact_object(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    acquirer, _, _ = _acquirer(tmp_path)
+    request = _request()
+    acquisition = acquirer.acquire(request)
+    repository = RecordingSearch7ERepository(tmp_path / "runs")
+    identities: list[dict[str, object]] = []
+    replacement_blocked: list[bool] = []
+    original_probe = acquirer.media_probe
+
+    class ReplacementProbe:
+        def probe(self, path: Path, timeout_seconds: float) -> MediaProbeFacts:
+            facts = original_probe.probe(path, timeout_seconds)
+            replacement = path.with_suffix(".replacement")
+            replacement.write_bytes(b"one-retained-session")
+            try:
+                replacement.replace(path)
+            except PermissionError:
+                replacement_blocked.append(True)
+                replacement.unlink()
+            return facts
+
+    def tracked_hash(descriptor: int) -> tuple[str, int]:
+        identities.append(filesystem_identity(descriptor))
+        return hash_descriptor(descriptor)
+
+    def tracked_authority(
+        media_root: Path,
+        media_path: Path,
+        session: dict[str, object],
+        *,
+        descriptor: int | None = None,
+    ) -> object:
+        assert descriptor is not None
+        identities.append(filesystem_identity(descriptor))
+        return publish_retained_media_authority(
+            media_root,
+            media_path,
+            session,
+            descriptor=descriptor,
+        )
+
+    repository.media_probe = ReplacementProbe()
+    monkeypatch.setattr("vigi_vision.recording_search_7e_1c.hash_descriptor", tracked_hash)
+    monkeypatch.setattr(
+        "vigi_vision.recording_search_7e_1c.publish_retained_media_authority",
+        tracked_authority,
+    )
+    with Phase7E1CExecutor(repository, acquirer).invocation(request) as invocation:
+        durable = DurableCommonSessionMedia(repository).publish(acquisition, invocation)
+
+    assert replacement_blocked == [True]
+    assert len(identities) >= 3
+    assert all(value == identities[0] for value in identities)
+    assert durable.retained_media_authority is not None
+    assert durable.retained_media_authority.filesystem_identity == identities[0]
+
+
 def test_interruption_before_authority_admission_cannot_leave_eligible_media(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -441,6 +504,49 @@ def test_authority_admission_failure_never_path_deletes_unbound_final_media(
 
     media_root = repository.root / ".media"
     assert len(tuple(media_root.rglob("*.mp4"))) == 1
+    assert not tuple(media_root.rglob("*.authority.json"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows publication-object continuity contract")
+def test_byte_identical_replacement_at_publication_boundary_never_becomes_authority(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    acquirer, _, _ = _acquirer(tmp_path)
+    request = _request()
+    acquisition = acquirer.acquire(request)
+    repository = RecordingSearch7ERepository(tmp_path / "runs")
+    repository.media_probe = acquirer.media_probe
+    original_replace = os.replace
+    original_rename = rename_open_file_no_replace
+    identities: list[dict[str, object]] = []
+    blocked: list[bool] = []
+
+    def rename_then_swap(descriptor: int, source: Path, destination: Path) -> None:
+        original_rename(descriptor, source, destination)
+        final = Path(destination)
+        identities.append(filesystem_identity(descriptor))
+        replacement = final.with_suffix(".replacement")
+        replacement.write_bytes(b"one-retained-session")
+        try:
+            original_replace(replacement, final)
+        except PermissionError as error:
+            blocked.append(True)
+            replacement.unlink()
+            raise MediaFilesystemAuthorityError from error
+
+    monkeypatch.setattr(
+        "vigi_vision.recording_search_7e_1c.rename_open_file_no_replace",
+        rename_then_swap,
+    )
+    with (
+        pytest.raises(CommonSessionMediaError),
+        Phase7E1CExecutor(repository, acquirer).invocation(request) as invocation,
+    ):
+        DurableCommonSessionMedia(repository).publish(acquisition, invocation)
+
+    assert len(identities) == 1
+    assert blocked == [True]
+    media_root = repository.root / ".media"
     assert not tuple(media_root.rglob("*.authority.json"))
 
 

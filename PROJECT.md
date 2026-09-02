@@ -222,8 +222,13 @@ projection, atomic closed-membership Phase 8 source-clip package, and durable
 two-media `READY`/`DELETING`/`DELETED` lifecycle are available. The source clip
 is generated locally only from the strictly verified retained common-session
 MP4; its repository-owned operational record binds the final publication-time
-filesystem object, and deletion uses identity-safe handle-bound tombstone
-disposition rather than an unguarded path unlink. Older runs without that
+filesystem object. Correction A3 retains the same staged-object handle through
+write, flush, hash, probe, handle-bound final-name publication, authority
+admission, strict readback, and eligibility. Deletion uses a version-2
+per-object move/disposition journal, identity-safe handle-bound tombstone
+disposition, restart-safe intended-absence recovery, and a final
+closed-membership proof that prevents reused names from becoming false
+`DELETED`. Older runs without that
 authority remain readable but cannot create or delete Phase 8 media. No second
 replay or re-analysis is performed. Phase 7E-3 real-NVR
 acceptance, later Phase 8 review processing, and Phase 9

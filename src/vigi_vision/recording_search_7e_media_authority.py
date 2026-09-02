@@ -9,7 +9,7 @@ exact filesystem object that carried them after final publication.
 
 # The platform capability wrapper intentionally keeps Windows imports local and
 # every validation branch explicit.
-# ruff: noqa: D102, D103, EM101, PLC0415, PLR2004, PTH104, TRY003, TRY300, TRY301
+# ruff: noqa: D102, D103, EM101, PLC0415, PLR2004, TRY003, TRY300, TRY301
 
 from __future__ import annotations
 
@@ -163,6 +163,89 @@ def open_stable_file(path: Path, *, delete_access: bool = False) -> int:
         raise
 
 
+def create_publication_file(path: Path) -> int:
+    """Create one replacement-denying file whose handle can publish itself."""
+    flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    if os.name != "nt":
+        return os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+    import ctypes
+    import msvcrt
+
+    create_file = ctypes.windll.kernel32.CreateFileW
+    create_file.restype = ctypes.c_void_p
+    handle = create_file(
+        str(path),
+        0x80000000 | 0x40000000 | 0x00010000,  # GENERIC_READ | WRITE | DELETE
+        0x00000001,  # FILE_SHARE_READ: deny write/delete/rename by every other open.
+        None,
+        1,  # CREATE_NEW
+        0x00200000 | 0x00000080,  # OPEN_REPARSE_POINT | FILE_ATTRIBUTE_NORMAL
+        None,
+    )
+    invalid = ctypes.c_void_p(-1).value
+    if handle in {None, invalid}:
+        raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+    try:
+        return msvcrt.open_osfhandle(int(handle), flags)
+    except BaseException:
+        ctypes.windll.kernel32.CloseHandle(handle)
+        raise
+
+
+def rename_open_file_no_replace(descriptor: int, source: Path, destination: Path) -> None:
+    """Bind the exact open object to ``destination`` without replacing an occupant."""
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError(destination)
+    _verify_path_names_descriptor(descriptor, source)
+    if os.name != "nt":
+        os.link(source, destination, follow_symlinks=False)
+        try:
+            _verify_path_names_descriptor(descriptor, destination)
+            source.unlink()
+        except BaseException:
+            destination.unlink(missing_ok=True)
+            raise
+        return
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class FileRenameInformation(ctypes.Structure):
+        _fields_ = [
+            ("replace_if_exists", wintypes.BOOL),
+            ("root_directory", wintypes.HANDLE),
+            ("file_name_length", wintypes.DWORD),
+            ("file_name", wintypes.WCHAR * 1),
+        ]
+
+    target = str(destination.absolute())
+    target_bytes = target.encode("utf-16-le")
+    buffer_size = (
+        FileRenameInformation.file_name.offset + len(target_bytes) + ctypes.sizeof(wintypes.WCHAR)
+    )
+    buffer = ctypes.create_string_buffer(buffer_size)
+    information = FileRenameInformation.from_buffer(buffer)
+    information.replace_if_exists = 0
+    information.root_directory = None
+    information.file_name_length = len(target_bytes)
+    ctypes.memmove(
+        ctypes.addressof(buffer) + FileRenameInformation.file_name.offset,
+        target_bytes,
+        len(target_bytes),
+    )
+    handle = msvcrt.get_osfhandle(descriptor)
+    if not ctypes.windll.kernel32.SetFileInformationByHandle(
+        handle,
+        3,  # FileRenameInfo
+        ctypes.byref(buffer),
+        buffer_size,
+    ):
+        raise OSError(ctypes.get_last_error(), "SetFileInformationByHandle(FileRenameInfo) failed")
+    if source.exists() or source.is_symlink():
+        raise MediaFilesystemAuthorityError
+
+
 def filesystem_identity(descriptor: int) -> dict[str, object]:
     """Capture the strongest supported stable identity from an open handle."""
     if os.name != "nt":
@@ -243,10 +326,8 @@ def verify_open_file(
         raise MediaFilesystemAuthorityError from error
     if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
         raise MediaFilesystemAuthorityError
-    if os.name != "nt" and (current.st_dev, current.st_ino) != (
-        authority.payload["filesystem_identity"]["volume_id"],
-        authority.payload["filesystem_identity"]["file_id"],
-    ):
+    _verify_path_names_descriptor(descriptor, path)
+    if filesystem_identity(descriptor) != authority.filesystem_identity:
         raise MediaFilesystemAuthorityError
 
 
@@ -410,7 +491,7 @@ def _atomic_write_no_replace(path: Path, value: bytes) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         if os.name == "nt":
-            os.rename(temporary, path)
+            _windows_move_write_through(temporary, path, replace=False)
         else:
             os.link(temporary, path)
             temporary.unlink()
@@ -451,8 +532,55 @@ def _read_bound_regular_file(path: Path) -> bytes:
         os.close(descriptor)
 
 
+def _verify_path_names_descriptor(descriptor: int, path: Path) -> None:
+    confirmation = _open_identity_confirmation(path)
+    try:
+        if filesystem_identity(confirmation) != filesystem_identity(descriptor):
+            raise MediaFilesystemAuthorityError
+    finally:
+        os.close(confirmation)
+
+
+def _open_identity_confirmation(path: Path) -> int:
+    """Open a read handle compatible with the already-held publication/delete handle."""
+    if os.name != "nt":
+        return open_stable_file(path)
+    import ctypes
+    import msvcrt
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    create_file = ctypes.windll.kernel32.CreateFileW
+    create_file.restype = ctypes.c_void_p
+    handle = create_file(
+        str(path),
+        0x80000000,  # GENERIC_READ
+        0x00000001 | 0x00000002 | 0x00000004,  # share read/write/delete with held handle
+        None,
+        3,
+        0x00200000,
+        None,
+    )
+    invalid = ctypes.c_void_p(-1).value
+    if handle in {None, invalid}:
+        raise OSError(ctypes.get_last_error(), "CreateFileW confirmation failed")
+    try:
+        return msvcrt.open_osfhandle(int(handle), flags)
+    except BaseException:
+        ctypes.windll.kernel32.CloseHandle(handle)
+        raise
+
+
 def _canonical(value: Mapping[str, object]) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _windows_move_write_through(source: Path, destination: Path, *, replace: bool) -> None:
+    import ctypes
+
+    move_file = ctypes.windll.kernel32.MoveFileExW
+    flags = 0x00000008 | (0x00000001 if replace else 0)  # WRITE_THROUGH | REPLACE_EXISTING
+    if not move_file(str(source), str(destination), flags):
+        raise OSError(ctypes.get_last_error(), "MoveFileExW failed")
 
 
 def _fsync_directory(directory: Path) -> None:
@@ -469,6 +597,7 @@ __all__ = [
     "MediaFilesystemAuthorityError",
     "RetainedMediaFilesystemAuthority",
     "authority_path",
+    "create_publication_file",
     "descriptor_stamp",
     "filesystem_identity",
     "hash_descriptor",
@@ -476,6 +605,7 @@ __all__ = [
     "open_stable_file",
     "publish_retained_media_authority",
     "read_retained_media_authority",
+    "rename_open_file_no_replace",
     "stable_source_path",
     "verified_retained_media",
     "verify_open_file",

@@ -58,8 +58,9 @@ documentation route is added, removed, or relocated.
   provenance/executor decision. The pure 7E-1A contract foundation, 7E-1B
   persistence, 7E-1C common-session acquisition/local decoding, 7E-1D
   planning/evidence/terminal schema-7 orchestration, and 7E-2 synchronous
-  CLI/status/projection, CLI-only POST boundary, and no-media Phase 8 handoff
-  repository are implemented locally. Terminal real-NVR acceptance and Phase 8
+  CLI/status/projection, CLI-only POST boundary, and Phase 8 source-clip,
+  handoff, retry, and crash-safe retention repository are implemented locally.
+  Terminal real-NVR acceptance and Phase 8
   review-media processing remain unimplemented.
   Read
   [design/object-presence-classification.md](design/object-presence-classification.md)

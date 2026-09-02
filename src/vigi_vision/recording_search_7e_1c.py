@@ -1,5 +1,5 @@
 # pyright: reportAny=false, reportExplicitAny=false, reportUnknownParameterType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnannotatedClassAttribute=false, reportImplicitOverride=false, reportUnusedCallResult=false, reportArgumentType=false, reportInvalidTypeForm=false, reportOptionalMemberAccess=false, reportUnnecessaryIsInstance=false, reportCallInDefaultInitializer=false, reportUnusedImport=false, reportUnusedFunction=false
-# ruff: noqa: B009, B904, C901, D105, FBT001, I001, PLR0912, PLR0913, PLR0915, PTH105, RUF022, TC006, TRY300, TRY301, UP037
+# ruff: noqa: B009, B904, C901, D105, FBT001, I001, PLR0912, PLR0913, PLR0915, RUF022, TC006, TRY300, TRY301, UP037
 """Phase 7E-1C common-session acquisition and local evidence admission.
 
 The 1C boundary owns one bounded replay/remux and all subsequent local reads of
@@ -51,12 +51,14 @@ from vigi_vision.recording_search_7e_media_authority import (
     MediaFilesystemAuthorityError,
     RetainedMediaFilesystemAuthority,
     authority_path,
+    create_publication_file,
     descriptor_stamp,
     hash_descriptor,
     mark_open_file_for_deletion,
     open_stable_file,
     publish_retained_media_authority,
     read_retained_media_authority,
+    rename_open_file_no_replace,
     stable_source_path,
     verified_retained_media,
     verify_open_file,
@@ -870,6 +872,7 @@ class DurableCommonSessionMedia:
         )
         final = final_directory / f"{acquisition.common_session_id}.mp4"
         staging: Path | None = None
+        publication_descriptor: int | None = None
         published_by_invocation = False
         authority_published = False
         source_size = -1
@@ -906,7 +909,11 @@ class DurableCommonSessionMedia:
             if not is_safe_contained_path(self.repository.root, staging, require_target=True):
                 raise CommonSessionMediaError
             temporary = staging / "session.mp4"
-            with source.open("rb") as source_stream, temporary.open("xb") as target_stream:
+            publication_descriptor = create_publication_file(temporary)
+            with (
+                source.open("rb") as source_stream,
+                os.fdopen(publication_descriptor, "w+b", closefd=False) as target_stream,
+            ):
                 while True:
                     invocation.budget.check()
                     chunk = source_stream.read(1024 * 1024)
@@ -915,51 +922,43 @@ class DurableCommonSessionMedia:
                     target_stream.write(chunk)
                 target_stream.flush()
                 os.fsync(target_stream.fileno())
-            if (
-                temporary.stat().st_nlink != 1
-                or temporary.stat().st_size != source_size
-                or _sha256_file(temporary) != source_digest
-            ):
+            if descriptor_stamp(publication_descriptor)["link_count"] != 1 or hash_descriptor(
+                publication_descriptor
+            ) != (source_digest, source_size):
                 raise CommonSessionMediaError
             invocation.validate(self.repository)
             if final.exists() or final.is_symlink():
                 raise CommonSessionMediaError
-            os.replace(temporary, final)
+            rename_open_file_no_replace(publication_descriptor, temporary, final)
             published_by_invocation = True
+            os.fsync(publication_descriptor)
             _fsync_directory(final_directory)
             if (
                 not _is_safe_child(self.root, final)
-                or final.stat().st_nlink != 1
-                or final.stat().st_size != source_size
-                or _sha256_file(final) != source_digest
+                or descriptor_stamp(publication_descriptor)["link_count"] != 1
+                or hash_descriptor(publication_descriptor) != (source_digest, source_size)
             ):
                 raise CommonSessionMediaError
-            descriptor = open_stable_file(final)
-            try:
-                if hash_descriptor(descriptor) != (source_digest, source_size):
-                    raise CommonSessionMediaError
-                if self.repository.media_probe is None:
-                    raise CommonSessionMediaError
-                media_probe = cast("MediaProbe", self.repository.media_probe)
-                final_facts = media_probe.probe(
-                    stable_source_path(descriptor, final),
-                    invocation.budget.operation_timeout(20.0),
-                )
-                final_facts.validate()
-                if final_facts != acquisition.media:
-                    raise CommonSessionMediaError
-                authority_session = {
-                    **acquisition.session.payload,
-                    "common_session_id": acquisition.session.identity,
-                }
-                authority = publish_retained_media_authority(
-                    self.root,
-                    final,
-                    authority_session,
-                    descriptor=descriptor,
-                )
-            finally:
-                os.close(descriptor)
+            if self.repository.media_probe is None:
+                raise CommonSessionMediaError
+            media_probe = cast("MediaProbe", self.repository.media_probe)
+            final_facts = media_probe.probe(
+                stable_source_path(publication_descriptor, final),
+                invocation.budget.operation_timeout(20.0),
+            )
+            final_facts.validate()
+            if final_facts != acquisition.media:
+                raise CommonSessionMediaError
+            authority_session = {
+                **acquisition.session.payload,
+                "common_session_id": acquisition.session.identity,
+            }
+            authority = publish_retained_media_authority(
+                self.root,
+                final,
+                authority_session,
+                descriptor=publication_descriptor,
+            )
             authority_published = True
             return CommonSessionAcquisition(
                 acquisition.request,
@@ -972,6 +971,9 @@ class DurableCommonSessionMedia:
                 authority,
             )
         except (CommonSessionError, MediaFilesystemAuthorityError) as exc:
+            if publication_descriptor is not None:
+                os.close(publication_descriptor)
+                publication_descriptor = None
             if published_by_invocation:
                 with suppress(CommonSessionCleanupError):
                     if authority_published:
@@ -987,6 +989,9 @@ class DurableCommonSessionMedia:
                 raise
             raise CommonSessionMediaError from exc
         except (OSError, RuntimeError) as exc:
+            if publication_descriptor is not None:
+                os.close(publication_descriptor)
+                publication_descriptor = None
             if published_by_invocation:
                 with suppress(CommonSessionCleanupError):
                     if authority_published:
@@ -1000,6 +1005,8 @@ class DurableCommonSessionMedia:
                         )
             raise CommonSessionMediaError from exc
         finally:
+            if publication_descriptor is not None:
+                os.close(publication_descriptor)
             if staging is not None:
                 _remove_owned_media_directory(self.repository.root, staging)
 

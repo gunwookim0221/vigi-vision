@@ -7,10 +7,10 @@ contract. Phase 7D-2's strict physical-origin schema 1–4 family remains
 implemented, immutable, and readable. The Phase 7E feasibility investigations
 prove that production VIGI replay cannot supply authoritative frame UTC but can
 sustain one common replay/decode session for the bounded MVP. The 7E-1C
-common-session acquisition/local frame-admission and 7E-1D terminal schema-7
-orchestration boundaries are implemented; CLI integration, terminal real-NVR
-validation, separate Phase 8
-projection repository, and Phase 8 review-media processing remain unimplemented.
+common-session acquisition/local frame-admission, 7E-1D terminal schema-7
+orchestration, and 7E-2 CLI/projection/retention boundaries are implemented.
+Terminal real-NVR validation and Phase 8 review-media processing remain
+unimplemented.
 
 ## Context
 
@@ -84,13 +84,20 @@ identity families, 59 vectors, a byte-complete JPEG/MP4 fixture, and the exact
 2,520-second invocation budget.
 
 The retained MP4 also has a repository-owned, versioned operational filesystem
-authority record captured from the final open object after byte/probe readback.
-It binds platform handle identity to the existing media authority without
-changing any Phase 7 semantic identity, schema, or golden vector. Phase 8 and
-destructive retention operations fail closed when that record is missing or
-mismatched; old runs are never migrated by digest equivalence. Tombstone
-deletion is handle-bound on supported platforms so a later path replacement
-cannot be deleted as if it were the admitted object.
+authority record. One replacement-denying handle is retained from staged-object
+creation through write/flush, hash, probe, handle-bound no-replace rename,
+final-name proof, authority admission, strict readback, and eligibility. It
+binds platform handle identity to the existing media authority without changing
+any Phase 7 semantic identity, schema, or golden vector. Phase 8 and destructive
+retention operations fail closed when that record is missing or mismatched; old
+runs are never migrated by digest equivalence.
+
+Tombstone deletion is handle-bound on supported platforms. Its version-2
+operational journal records per-object move and disposition intent before each
+irreversible action, so restart can distinguish intended exact-object absence
+from corruption. Terminal `DELETED` requires a final closed-membership proof;
+foreign name reuse is preserved and retains or restores `DELETING` instead of
+publishing a false success.
 
 Production execution remains synchronous and CLI-only. The existing execution
 POST validates its request and returns HTTP 503

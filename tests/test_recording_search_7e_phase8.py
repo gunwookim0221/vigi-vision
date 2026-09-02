@@ -19,6 +19,7 @@ from vigi_vision.recording_search_7e_1c import MediaProbeFacts
 from vigi_vision.recording_search_7e_models import StrictIdentityEnvelope
 from vigi_vision.recording_search_7e_media_authority import (
     authority_path,
+    mark_open_file_for_deletion,
     publish_retained_media_authority,
     read_retained_media_authority,
 )
@@ -438,6 +439,41 @@ def test_deletion_interruptions_resume_to_exact_deleted(
     assert repository.status(run, "inv-01", "run-01") == ("DELETED", None)
 
 
+@pytest.mark.parametrize("role", ["common", "clip"])
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "move_intent",
+        "tombstone",
+        "moved",
+        "disposition_intent",
+        "disposition_requested",
+        "disappearance_observed",
+        "directory_durability",
+        "disposition_completed",
+        "deleted",
+    ],
+)
+def test_each_per_object_deletion_substate_recovers_with_a_new_owner(
+    tmp_path: Path, role: str, boundary: str
+) -> None:
+    run, root, common = _authority(tmp_path)
+    first_owner = _repository(root)
+    _create(first_owner, run)
+    first_owner.checkpoint = _Interrupt(f"after_{role}_{boundary}")
+
+    with pytest.raises(KeyboardInterrupt):
+        first_owner.delete(run)
+
+    second_owner = _repository(root)
+    assert second_owner.delete(run) == "DELETED"
+    assert second_owner.delete(run) == "DELETED"
+    package_root = root / ".phase8" / "inv-01" / "run-01"
+    assert not common.exists()
+    assert not tuple((package_root / "clips").iterdir())
+    assert second_owner.status(run, "inv-01", "run-01") == ("DELETED", None)
+
+
 @pytest.mark.parametrize("target", ["common", "clip"])
 def test_deletion_rejects_recorded_live_path_replacement(tmp_path: Path, target: str) -> None:
     run, root, common = _authority(tmp_path)
@@ -494,7 +530,7 @@ def test_recovery_after_first_rename_never_deletes_clip_replacement(tmp_path: Pa
     assert clip.read_bytes() == _CLIP_BYTES
     assert not common.exists()
     assert (common.parent / f".delete-{common.stem}.mp4").read_bytes() == _COMMON_BYTES
-    assert repository.status(run, "inv-01", "run-01")[0] == "DELETING"
+    assert repository.status(run, "inv-01", "run-01")[0] == "MEDIA_CORRUPT"
 
 
 def test_byte_identical_preopen_replacement_is_rejected_by_filesystem_identity(
@@ -645,6 +681,109 @@ def test_clip_replacement_after_common_unlink_survives_restart_recovery(tmp_path
     assert error.value.code == "phase8_media_corrupt"
     assert evidence["tomb"].read_bytes() == b"foreign-after-common-unlink"
     assert restarted.status(run, "inv-01", "run-01")[0] == "MEDIA_CORRUPT"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound disposition contract")
+def test_restart_recovers_disposition_completed_before_journal_advance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, root, common = _authority(tmp_path)
+    repository = _repository(root)
+    _create(repository, run)
+    original_disposition = mark_open_file_for_deletion
+    interrupted = False
+
+    def dispose_then_interrupt(descriptor: int) -> None:
+        nonlocal interrupted
+        original_disposition(descriptor)
+        if not interrupted:
+            interrupted = True
+            reason = "after_exact_common_disposition"
+            raise KeyboardInterrupt(reason)
+
+    monkeypatch.setattr(
+        "vigi_vision.recording_search_7e_phase8.mark_open_file_for_deletion",
+        dispose_then_interrupt,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        repository.delete(run)
+    assert not common.exists()
+    monkeypatch.setattr(
+        "vigi_vision.recording_search_7e_phase8.mark_open_file_for_deletion",
+        original_disposition,
+    )
+
+    restarted = _repository(root)
+    assert restarted.delete(run) == "DELETED"
+    assert restarted.delete(run) == "DELETED"
+    assert restarted.status(run, "inv-01", "run-01") == ("DELETED", None)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound disposition contract")
+def test_tombstone_name_reuse_before_terminal_commit_blocks_false_deleted(tmp_path: Path) -> None:
+    run, root, common = _authority(tmp_path)
+    repository = _repository(root)
+    _create(repository, run)
+    foreign = b"foreign-name-reuse-must-survive"
+    reused: list[Path] = []
+
+    def reuse_disposed_name(name: str) -> None:
+        if name != "after_clip_unlink":
+            return
+        package_root = root / ".phase8" / "inv-01" / "run-01"
+        tomb = package_root / "clips" / f".delete-{_sha(_CLIP_BYTES)}.mp4"
+        tomb.write_bytes(foreign)
+        reused.append(tomb)
+
+    repository.checkpoint = reuse_disposed_name
+    with pytest.raises(Phase8LifecycleError) as error:
+        repository.delete(run)
+
+    assert error.value.code == "phase8_media_corrupt"
+    assert len(reused) == 1
+    assert reused[0].read_bytes() == foreign
+    assert repository.status(run, "inv-01", "run-01")[0] != "DELETED"
+    assert not common.exists()
+
+
+@pytest.mark.parametrize(
+    "checkpoint",
+    [
+        "after_clip_disposition_requested",
+        "after_clip_disappearance_observed",
+        "before_terminal_closed_membership",
+        "before_deleted_commit",
+        "after_deleted_publication",
+    ],
+)
+def test_immediate_name_reuse_at_terminal_boundaries_rolls_back_false_deleted(
+    tmp_path: Path, checkpoint: str
+) -> None:
+    run, root, _common = _authority(tmp_path)
+    repository = _repository(root)
+    _create(repository, run)
+    foreign = b"foreign-terminal-boundary-reuse"
+    reused: list[Path] = []
+
+    def reuse_name(name: str) -> None:
+        if name != checkpoint:
+            return
+        tomb = root / ".phase8" / "inv-01" / "run-01" / "clips" / f".delete-{_sha(_CLIP_BYTES)}.mp4"
+        tomb.write_bytes(foreign)
+        reused.append(tomb)
+
+    repository.checkpoint = reuse_name
+    with pytest.raises(Phase8LifecycleError) as error:
+        repository.delete(run)
+
+    assert error.value.code == "phase8_media_corrupt"
+    assert len(reused) == 1
+    assert reused[0].read_bytes() == foreign
+    manifest = json.loads(
+        (root / ".phase8" / "inv-01" / "run-01" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["payload"]["state"] == "DELETING"
+    assert repository.status(run, "inv-01", "run-01")[0] == "MEDIA_CORRUPT"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound disposition contract")
