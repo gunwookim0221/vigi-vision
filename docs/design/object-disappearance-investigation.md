@@ -25,14 +25,17 @@ reopen. Phase 7E feasibility work proves that current VIGI replay timestamps
  durable media retention, exact local frame selection, and persisted-frame
  admission. Phase 7E-1D now owns the Phase 7E C1 adapter, adaptive evidence
  composition, schema-7 terminal publication, strict readback, and safe status.
- The single normative Phase 7E contract uses one replay/decode session, one SDK
+The single normative Phase 7E contract uses one replay/decode session, one SDK
 segment, a five-minute default, a hard 600-second search maximum, an exact
 2,520-second invocation ceiling, schemas 5→6→7, and a separate FOUND-only Phase
 8 projection repository. The 7E-1C common-session, 7E-1D terminal, and 7E-2
 CLI/projection/retention boundaries are implemented, including continuous
 publication-object authority and crash-safe two-media deletion. Phase 7E-3
-real-NVR acceptance, Phase 8 review-media processing, and Phase 9 remain
-unimplemented; schemas 1–4 retain their original strict meaning.**
+Stage 1 passed a bounded real-NVR acquisition/smoke check with one validated
+recent replay, but no terminal search was run because a human-confirmed
+baseline, ROI, and labeled disappearance interval were unavailable. Stage 2,
+Phase 8 review-media processing, and Phase 9 remain pending; schemas 1–4 retain
+their original strict meaning.**
 
 This document defines the first bounded use case for VIGI Vision's longer-term
 Event Discovery direction: a user investigates one selected object on one NVR
@@ -123,7 +126,8 @@ object-presence or disappearance classification.
 
 The repository does **not** currently provide:
 
-- the schema 5-7 request-relative production path or synchronous search CLI;
+- a browser caller that creates and executes the exact `Phase7EPublicRequest`;
+- a browser status/result surface for the CLI-owned Phase 7E run;
 - Phase 8 boundary images, evidence timeline, or review clip; or
 - a Phase 9 operator review surface for recording-search results.
 
@@ -136,10 +140,13 @@ strict, non-persistent transition interpretation handoff. The provisional
 thresholds are policy inputs for deterministic
 processing, not accuracy claims.
 
-The existing Phase 5 browser and Phase 6 backend already provide transient ROI
-editing, strict confirmation, durable canonical source-pixel ROI storage, and
-the typed `load_confirmed()` boundary. Phase 7 must consume that boundary rather
-than recreate browser or confirmation state.
+The existing Phase 4C-2/Phase 5 browser path provides transient exactly-one
+candidate selection and source-pixel ROI editing; neither the selected
+candidate nor an unconfirmed draft survives reload/navigation. Phase 6-2/6C
+provides strict confirmation, durable canonical source-pixel ROI storage, JPEG
+integrity binding, explicit schema-2 reconfirmation, and the typed
+`load_confirmed()` boundary. Phase 7 must consume that boundary rather than
+recreate browser or confirmation state.
 
 ## Initial MVP scope
 
@@ -379,7 +386,7 @@ version after Phase 7E evidence.
 2. **Phase 6 (schema 2 and schema 3 compatibility implemented):** strict
    immutable confirmation publication, explicit legacy reconfirmation, and
    digest-bound typed Phase 7 loading.
-3. **Phase 7 (A-1 through 7D implemented; 7E design pending final approval):** single-host run lifecycle,
+3. **Phase 7 (A-1 through 7D and 7E-1A through 7E-2 implemented):** single-host run lifecycle,
    interruption/new-run isolation, truthful baseline provenance, and
    acquisition-only request/frame records with canonical frame identities,
    run-relative JPEG publication, strict acquisition indexes, bounded
@@ -397,8 +404,9 @@ version after Phase 7E evidence.
   validated lossless D1 reconstruction envelope and never downgrades schema 4
   after its commit point. The Phase 7E contract preserves one common session,
   one segment, a 600-second search ceiling, and a 2,520-second invocation
-  ceiling. Ordered 7E-1A/1B/1C/1D and 7E-2 are implemented; 7E-3 bounded
-  real-NVR acceptance remains. The common-session publisher retains one exact
+  ceiling. Ordered 7E-1A/1B/1C/1D and 7E-2 are implemented; 7E-3 Stage 1
+  bounded real-NVR acquisition/smoke validation passed with limitations, while
+  Stage 2 terminal search acceptance remains. The common-session publisher retains one exact
   staged object through authority admission, and the Phase 8 retention boundary
   uses per-object durable move/disposition substates plus terminal
   closed-membership validation. Slice ownership is: 1A
@@ -409,8 +417,12 @@ version after Phase 7E evidence.
   `BACKWARD_FROM_END` support mode with legacy default `FORWARD`), source
   reconstruction, and immutable schema 7; 2 synchronous CLI and separate
   Phase 8 projection/retention; 3
-  bounded real-NVR acceptance and fault injection.
-4. **Phase 8 (future):** boundary images, evidence timeline, and review video.
+  bounded real-NVR acceptance and fault injection (Stage 1 acquisition passed;
+  Stage 2 terminal/human acceptance pending).
+4. **Phase 8 (backend handoff only; review processing future):** the strict
+   FOUND-only source-clip request, retention lifecycle, and deletion boundary
+   exist; boundary images, evidence timeline, and review video are not yet
+   user-reachable.
 5. **Phase 9 (future):** user-facing review and final human decision.
 6. **Later work:** object relocation, automatic detection, broader event types,
    generic Event Discovery, and optional VLM interpretation under separate

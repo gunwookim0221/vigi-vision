@@ -53,15 +53,20 @@ documentation route is added, removed, or relocated.
   integrity. Slice ownership is fixed: 7E-1A identities/models/matrices/validation;
   1B schema-5/6 persistence; 1C one-session media and exact target-to-frame
   selection; 1D the Phase 7E C1 planner adapter and terminal composition
-  and schema 7; 2 CLI and Phase 8 projection; 3 bounded acceptance. Read
+  and schema 7; 2 CLI and Phase 8 projection; 3 bounded acceptance (Stage 1
+  acquisition passed, Stage 2 terminal/human acceptance pending). Read
   [ADR-0007](adr/ADR-0007-validated-recording-search.md) for the durable
   provenance/executor decision. The pure 7E-1A contract foundation, 7E-1B
   persistence, 7E-1C common-session acquisition/local decoding, 7E-1D
   planning/evidence/terminal schema-7 orchestration, and 7E-2 synchronous
   CLI/status/projection, CLI-only POST boundary, and Phase 8 source-clip,
   handoff, retry, and crash-safe retention repository are implemented locally.
-  Terminal real-NVR acceptance and Phase 8
-  review-media processing remain unimplemented.
+  Phase 7E-3 Stage 1 has also passed its bounded real-NVR acquisition/smoke
+  check with one validated recent replay, but no terminal search was run
+  because a human-confirmed baseline, ROI, and labeled event were not
+  available. Stage 2 remains dependent on the Phase 4C-2/5/6 user-workflow
+  slice. Phase 8 review-media processing and the Phase 9 result UI remain
+  unimplemented.
   Read
   [design/object-presence-classification.md](design/object-presence-classification.md)
   for the normative Phase 7B single-probe input, geometry, classifier, outcome,
@@ -82,8 +87,8 @@ documentation route is added, removed, or relocated.
   source-pixel ROI, idempotency, and typed handoff contract. Read
   [design/assisted-roi-selection.md](design/assisted-roi-selection.md) for the
   completed Phase 5-3A tap-assisted ROI feasibility decision, implemented
-  Phase 5-3B-2 optional backend API/model lifecycle, and remaining frontend
-  acceptance boundary.
+  Phase 5-3B-2 optional backend API/model lifecycle, connected Phase 5-3B-3/
+  5-3C browser behavior, and remaining physical-device acceptance boundary.
 - **Integrations — `integrations/`:** contracts and operating notes for external
   systems. Use `integrations/sdk-change-requests/` only for specific,
   evidence-backed changes requested of the separate VIGI SDK.

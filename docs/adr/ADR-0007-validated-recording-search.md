@@ -13,8 +13,11 @@ Phase 7E-2 Correction B now runs production B4 computation behind a bounded
 Windows-spawn child-process boundary: the parent retains authority, timeout,
 cancellation, reaping, and evidence admission, while late child output is
 discarded. The child has no persistence, SDK, or credential capability.
-Terminal real-NVR validation and Phase 8 review-media processing remain
-unimplemented.
+Phase 7E-3 Stage 1 has passed a bounded real-NVR acquisition/smoke check with
+one validated recent replay, but terminal search acceptance remains pending a
+human-confirmed baseline/ROI and labeled scenario. Phase 8 review-media
+processing remains unimplemented; its strict FOUND-only handoff and retention
+boundaries are implemented.
 
 ## Context
 

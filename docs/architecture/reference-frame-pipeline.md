@@ -319,8 +319,15 @@ installed by
 - `GET /` serves `index.html`.
 - `GET /static/*` serves CSS and JS assets from the `reference_frame_web`
   package directory.
-- The shell submits the default candidate-set API request for a KST local
-  time and channel, and renders ordered safe text results (status, offset,
-  failure information).
-- The shell does not display thumbnails, provide frame selection, or create
-  new persistence. It is a review surface for the candidate-set API.
+- The shell submits the candidate-set API request after the operator applies a
+  whole-second local time and timezone, and renders ordered safe result facts
+  with successful thumbnails.
+- A loaded successful candidate can be selected exactly once for a larger
+  transient preview, then edited with the source-pixel ROI workspace (manual
+  pointer/keyboard editing and optional assisted suggestion). Phase 6
+  confirmation/reconfirmation persists the reviewed candidate, ROI, and
+  investigation facts; pre-confirmation selection and draft state remain
+  browser-memory only.
+- The shell has no caller for the Phase 7E execution boundary. Search remains
+  CLI-owned, the Phase 7E HTTP POST is intentionally disabled, and no browser
+  status/result or Phase 8 review-media surface is present.

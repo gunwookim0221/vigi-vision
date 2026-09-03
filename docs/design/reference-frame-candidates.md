@@ -278,9 +278,11 @@ result replacement, and image failure clear draft and committed ROI state.
 Pointer interruption clears the draft and active pointer while preserving a
 prior committed ROI. Reset ROI preserves candidate selection and permits
 recreation. `getPhase6Snapshot()` is an immutable transient handoff only. Phase
-6-1 now defines a separate immutable investigation confirmation package; its
-backend and web implementation remain deferred, and it does not add
-candidate-set persistence. Editing an
+6-1 now defines a separate immutable investigation confirmation package;
+Phase 6-2/6C implements its backend, HTTP, and existing-page confirmation,
+reopen, and schema-2 reconfirmation flow. Confirmation is the durable handoff
+boundary; it does not add candidate-set persistence or persistence for an
+unconfirmed draft. Editing an
 applied input marks it dirty and prevents generation until the user applies it
 again; editing does not clear already rendered candidates.
 

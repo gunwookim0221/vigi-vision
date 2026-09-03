@@ -230,9 +230,13 @@ disposition, restart-safe intended-absence recovery, and a final
 closed-membership proof that prevents reused names from becoming false
 `DELETED`. Older runs without that
 authority remain readable but cannot create or delete Phase 8 media. No second
-replay or re-analysis is performed. Phase 7E-3 real-NVR
-acceptance, later Phase 8 review processing, and Phase 9
-result UI remain unimplemented. The Phase 7E feasibility work proves that VIGI
+replay or re-analysis is performed. Phase 7E-3 Stage 1 now has a bounded
+real-NVR acquisition/smoke result: one recent completed replay was acquired and
+validated as one HEVC stream at `2560x1440` with approximately twenty seconds
+of media and monotonic decoded timestamps. Stage 1 did not execute a terminal
+search because no human-confirmed baseline, ROI, and labeled disappearance
+interval were available; Stage 2 therefore remains the user-workflow gate.
+Later Phase 8 review processing and Phase 9 result UI remain unimplemented. The Phase 7E feasibility work proves that VIGI
 segment metadata supplies coverage only and that current replay exposes
 request-relative timestamps without authoritative frame UTC. The rewritten
 normative contract defines one common replay/decode session, one SDK segment, a
@@ -254,8 +258,9 @@ replay/remux with durable `.media` retention, exact local target selection,
 RGB24/JPEG integrity, persisted-frame B4 admission, adaptive same-session
 evidence admission, C2/D1/D2 composition, complete source reconstruction,
 immutable schema 7, and strict terminal readback/status. CLI execution is
-implemented in the 7E-2 boundary; real-NVR acceptance remains unimplemented in
-the later 7E slice and no terminal real-NVR search has been completed.
+implemented in the 7E-2 boundary; bounded Stage 1 real-NVR acquisition passed
+with the limitation above, while terminal real-NVR search acceptance remains
+pending the Phase 4C-2/5/6 user workflow and a human-labeled scenario.
 Correction B adds a bounded Windows-spawn process boundary around production
 Phase 7E B4 classification; timeout/cancellation terminate and reap the child,
 and late output cannot become evidence.
@@ -275,18 +280,22 @@ capability.
 4. Preserve the public investigation CLI and Investigation Service with their
    Plan, Collection, and Artifact boundaries while the next increment decides
    how completed investigation artifacts enter existing analysis.
-5. Preserve the implemented bounded Phase 4A candidate API and Phase 5 ROI
+5. Preserve the implemented bounded Phase 4A candidate API and Phase 4C-2/4C-3
    loopback review shell with explicit applied time, accessible generation
    feedback, ordered thumbnails, transient exactly-one selection, and one
    source-pixel ROI that can be moved, resized, reset, recreated, and edited
-   with keyboard input. Preserve the Phase 5-3B-2 backend, the Phase 5-3B-3
-   assisted-ROI request path, the Phase 5-3C silhouette preview, and the Phase
-   5-4A external status boundary, then run operator smoke and physical
-   desktop/mobile acceptance. Continue with Phase 6-4 real-NVR validation
-   without changing recording or reference-frame
-   ownership.
-6. Preserve the implemented Phase 7E-1A through 1D foundation, then implement
-   Phase 7E in order: 7E-1A owns the 26 request-relative identity families,
+   with keyboard input. Preserve the Phase 5 assisted-ROI boundaries and the
+   Phase 6-2/6C durable confirmation/reconfirmation boundary. The next product
+   priority is the smallest user-reachable vertical slice: make the selected
+   candidate/ROI handoff explicit, collect the Phase 7 search end, connect the
+   confirmed schema-3 input to an approved execution boundary, and show status
+   and terminal results. Resolve the browser-execution contract before adding
+   a caller because the current HTTP POST is intentionally CLI-only. Keep
+   physical desktop/mobile acceptance and real-NVR Stage 2 validation behind
+   that workflow slice.
+6. Preserve the implemented Phase 7E-1A through 1D and 7E-2 foundation, then
+   prepare 7E-3 Stage 2 only after the confirmed user-workflow slice is
+   reachable: 7E-1A owns the 26 request-relative identity families,
    search/classifier/media policies, exact
    schema-5/6 matrices, schema dispatch, vectors, and pure validation; 7E-1B owns pre-acquisition schema 5, the zero-evidence
    schema-6 transition, incremental admission, and strict reopen; 7E-1C owns one
@@ -300,7 +309,9 @@ capability.
    real-NVR acceptance and fault injection. Preserve the 600-second search
    ceiling, 2,520-second invocation ceiling, one session/segment, schemas 1–4,
    Phase 6 immutability, and the rule that operational failure cannot become
-   absence. Phase 8 processing and Phase 9 judgment remain future work.
+   absence. Stage 1 real-NVR acquisition passed with limitations; Stage 2
+   terminal search acceptance remains pending the human-labeled workflow.
+   Phase 8 processing and Phase 9 judgment remain future work.
 
 ## High-level roadmap
 

@@ -15,6 +15,11 @@ The contract reuses the implemented reference-frame resource and investigation
 artifact ownership boundaries. It does not add object comparison, temporal
 search, reports, OpenAI, YOLO, background work, or a database.
 
+Phase 6 is ready to hand a confirmed schema-3 input to Phase 7, but it does not
+start a search. The current Phase 7E public request is CLI-owned; connecting a
+browser action to execution and presenting status/results is a separate product
+slice because the existing HTTP execution POST is intentionally disabled.
+
 ## Terminology and non-goals
 
 - **Draft investigation conditions:** the current applied anchor, selected

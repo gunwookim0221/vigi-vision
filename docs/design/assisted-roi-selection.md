@@ -4,12 +4,14 @@
 
 **Status: Phase 5-3A design, Phase 5-3B-1 disposable validation harness,
 Phase 5-3B-2 production assisted-ROI backend, Phase 5-3B-3 frontend
-integration, and Phase 5-3C silhouette preview complete. ROI persistence and
-Phase 6 behavior remain intentionally unimplemented.**
+integration, and Phase 5-3C silhouette preview complete. Phase 5 remains the
+transient ROI editor; durable confirmation and Phase 6 behavior are implemented
+by the separate [investigation-confirmation](investigation-confirmation.md)
+boundary.**
 
 Recommendation: **Proceed to manual desktop/mobile acceptance and a controlled
-loopback backend smoke check before Phase 6, retaining the disposable harness as
-the acceptance tool.**
+loopback backend smoke check as the remaining Phase 5 evidence, retaining the
+disposable harness as the acceptance tool.**
 EfficientSAM-Ti produced useful initial shoe selections on the deployed CCTV
 inputs, but dense adjacent shoes can merge into one suggested ROI. Keep the
 existing manual ROI editor as the authoritative correction and recovery path.
@@ -553,5 +555,9 @@ manifest updates, investigation creation, tracking, recognition, disappearance
 reasoning, multiple ROIs, polygon/mask editing, NVR/replay/decoder changes, or
 automatic selection without a tap.
 
-Phase 6 is not started. There is no durable ROI or manifest write, no automatic
-investigation start, and no second authoritative ROI representation.
+Phase 6-2/6C now provides the durable confirmation/reconfirmation and manifest
+write after explicit review; it is the only authoritative persistence boundary
+for the Phase 5 draft. There is still no automatic investigation start, no
+second authoritative ROI representation, and no Phase 7 browser execution or
+result surface. Physical desktop/mobile acceptance and the controlled real-NVR
+Stage 2 workflow remain downstream gates.

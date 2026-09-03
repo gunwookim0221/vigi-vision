@@ -9,8 +9,9 @@ ordered candidate thumbnails with transient exactly-one frontend selection;
 Phase 4C-3 polishes explicit applied time and indeterminate busy feedback;
 Phase 5-1/5-2 adds a transient frontend-only one-rectangle ROI workspace over
 the selected image, including bounded move/resize, reset/recreate, keyboard
-editing, and an immutable Phase 6 handoff snapshot. ROI persistence,
-confirmation, and object comparison remain deferred.**
+editing, and an immutable Phase 6 handoff snapshot. Phase 6-2/6C now owns the
+separate durable confirmation/reconfirmation boundary; object comparison and
+temporal search remain downstream work.**
 
 The implemented internal slice validates source time into UTC, resolves a
 deterministic covering segment through `RecordingPlanner`, constrains its replay

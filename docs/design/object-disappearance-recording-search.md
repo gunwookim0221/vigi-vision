@@ -34,10 +34,13 @@ reconstruction envelope for `FOUND` and independently rebuilds it from the
  timestamps but no authoritative physical frame UTC. The normative section
  below defines the versioned request-relative schema 5–7 contract while keeping
  schemas 1–4 readable under their original strict physical-UTC semantics. Phase
- 7E-2 synchronous CLI/projection/retention is implemented with exact-object
- publication authority and crash-safe deletion. Phase 7E-3 validation and Phase
- 8 review-media generation remain unimplemented. The required Phase 6C
-schema 3 compatibility increment is complete.**
+7E-2 synchronous CLI/projection/retention is implemented with exact-object
+publication authority and crash-safe deletion. Phase 7E-3 Stage 1 bounded
+real-NVR acquisition/smoke validation passed with one recent replay, but no
+terminal search was run because a human-confirmed baseline, ROI, and labeled
+disappearance interval were unavailable. Stage 2 terminal acceptance and
+Phase 8 review-media generation remain pending. The required Phase 6C schema 3
+compatibility increment is complete.**
 
 This document is the current implementation and review contract for Phase 7.
 It is intentionally limited to one restaurant, one local application host, one
@@ -1201,7 +1204,7 @@ with the separate Phase 8 status.
 | 7E-1C | One replay/remux, `.media` ownership, ffprobe, common session, sparse/adaptive local decoding, the Phase 7E same-session selector (including logical-E strict-before mapping and duplicate/alias rejection), RGB24, persisted-frame A2/B4 adapters, and deadline propagation. |
 | 7E-1D | The Phase 7E C1 planner/composition adapter (`S` inclusion, logical `E`, explicit shared `BACKWARD_FROM_END` support mode, no clamp), C2/D1/D2 composition, complete source reconstruction, schema-7 atomic publication/reopen, and Phase 7 public status. Shared C1/C2 defaults to legacy `FORWARD`, schemas 1–4 remain unchanged, and this slice performs no Phase 8 mutation. |
 | 7E-2 | Synchronous CLI, POST 503, cleanup reserve, separate Phase 8 clip/request/retry repository, status join, and deletion command. |
-| 7E-3 | Bounded real-NVR acceptance and local fault injection only after 1A–2 approval. |
+| 7E-3 | Bounded real-NVR acceptance and local fault injection only after 1A–2 approval; Stage 1 acquisition passed, while Stage 2 terminal/human acceptance remains pending. |
 
 Dependency order is 1A → 1B → 1C → 1D → 2 → 3. Persistence precedes
 acquisition; media and B4 adapters cannot precede the zero-evidence schema-6
@@ -4228,10 +4231,12 @@ classification, filesystem write, manifest mutation, or schema change. Phase
 ### Phase 7E: request-relative production and real-NVR acceptance
 
 Phase 7E is split into the ordered 7E-1A, 7E-1B, 7E-1C, 7E-1D, 7E-2, and
-7E-3 gates defined in the normative Phase 7E section above. 7E-3 may
-start only after the
-request-relative decoder/persistence path and synchronous CLI have passed their
-reviews. Its bounded matrix must exercise the 300- and 600-second windows, one
+7E-3 gates defined in the normative Phase 7E section above. 7E-3 Stage 1 has
+passed the bounded acquisition/smoke gate against a real NVR; the result is
+limited to one validated recent replay and does not establish terminal search
+accuracy. Stage 2 may start only after the request-relative decoder/persistence
+path, synchronous CLI, and the human-input workflow have passed their reviews.
+Its bounded matrix must exercise the 300- and 600-second windows, one
 segment and touching-segment rejection, end-boundary selection, same-session
 PRESENT→supported-ABSENT, baseline-only lower bound, complete-grid NOT_FOUND,
 gaps/resets/duplicates, every blocking-operation timeout, interruption/crash,

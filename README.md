@@ -270,8 +270,11 @@ resizes by one (Alt+Shift by ten). Reset ROI clears only the transient ROI and
 leaves the selected candidate intact. Candidate changes, new results, and image
 replacement clear draft and committed ROI state. Pointer interruption clears
 the draft and active pointer while preserving a prior committed ROI. The
-frontend-only `getPhase6Snapshot()` handoff is immutable and transient; ROI
-persistence, confirmation, and manifest storage remain deferred.
+frontend-only `getPhase6Snapshot()` handoff is immutable and transient. Phase 6
+now owns the separate durable confirmation/reconfirmation boundary: the
+reviewed candidate, source-pixel ROI, channel, reference time, timezone, and
+investigation identity are persisted only after explicit confirmation;
+candidate-set and pre-confirmation draft state remain intentionally transient.
 
 After selecting a usable candidate, choose **Tap to suggest ROI** to enter an
 explicit assisted mode. A primary mouse, touch, or pen tap inside the displayed
