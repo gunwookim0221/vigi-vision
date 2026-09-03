@@ -349,11 +349,13 @@ outcome and publishes nothing. The timeout value is operator/runtime
 configuration, not visual evidence or an observation-identity input.
 
 The shared predictor and inference limiter remain process-local, one-at-a-time
-resources owned by the service composition. A timeout does not claim that the
-worker was terminated; the predictor's existing synchronization protects the
-cache while the abandoned call settles. A deterministic retry starts a new
-operation only after the prior attempt has been marked inactive and strict
-reload proves that no observation was committed.
+resources owned by the service composition. The Phase 7E process adapter owns
+one spawned classifier child per invocation and applies one bounded cleanup
+boundary on every post-start exit. It terminates, escalates, reaps, and closes
+the child and both IPC endpoints before returning or raising; cleanup failure is
+secondary typed context and never changes the primary operational category. A
+deterministic retry therefore starts only after the prior attempt has no live
+classifier child and strict reload proves that no observation was committed.
 
 The model's candidate score is used only inside the already verified
 score-to-mask selection step. It is not a Phase 7B outcome threshold and is not
@@ -812,17 +814,17 @@ Interruption outcomes are closed:
 | Window | Authoritative state after interruption | Reopen behavior |
 | --- | --- | --- |
 | Before classifier execution | The authoritative schema-2/A2 or existing schema-3 manifest has no new Phase 7B operation, observation, alias, or promotion. | Lost OS lock makes the run `INTERRUPTED`; no classifier result is inferred. |
-| During classifier execution | The authoritative tree is unchanged; partial in-memory measurements have no authority. A cancelled worker may still be running but has a revoked attempt token. | Inspection first tries the OS lock. If it is still held, it returns `RUNNING` without mutation; only after the lock is acquired and no active handle remains may it mark the nonterminal run `INTERRUPTED`. |
+| During classifier execution | The authoritative tree is unchanged; partial in-memory measurements have no authority. A cancelled or failed worker is bounded-cleaned and reaped before the adapter returns; no result crosses the evidence gate. | Inspection first tries the OS lock. If it is still held, it returns `RUNNING` without mutation; only after the lock is acquired and no active handle remains may it mark the nonterminal run `INTERRUPTED`. |
 | After measurements/staging but before final child publication | The authoritative tree is still unchanged; invocation-owned staging is not evidence and no operation is admitted. | Clean only proven owned staging, then mark `INTERRUPTED`; otherwise reject ambiguous residue. |
 | After final observation child publication but before manifest replacement | The child is unindexed and non-authoritative. | Remove only when the invocation marker proves ownership; otherwise reject as corruption. Never adopt it. |
 | After manifest replacement | The indexed observation is committed and immutable. | Validate it strictly, then mark the still-nonterminal run `INTERRUPTED` after lock loss; never delete or reuse it in another run. |
 
-The mutex is deliberately released while the bounded classifier worker runs,
-because the existing cancellation boundary may abandon a worker after the
-caller returns. Only the active handle-owned caller can reacquire the mutex and
-publish, and complete prepublication revalidation is mandatory. The OS lock
-remains continuously held by the run handle. Phase 7B adds no lease, fence, or
-takeover path.
+The mutex is deliberately released while the bounded classifier worker runs.
+The adapter's cancellation and deadline boundary never admits a late result,
+and it completes bounded child cleanup before the caller returns. Only the
+active handle-owned caller can reacquire the mutex and publish, and complete
+prepublication revalidation is mandatory. The OS lock remains continuously held
+by the run handle. Phase 7B adds no lease, fence, or takeover path.
 
 ### Cleanup and reopen
 

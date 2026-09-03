@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from multiprocessing.process import BaseProcess
 from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
@@ -11,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
+import vigi_vision.recording_search_7e_b4_process as b4_process
 from vigi_vision.assisted_roi_geometry import ImageSize, Point
 from vigi_vision.investigation_confirmation_integrity import compute_jpeg_integrity_from_bytes
 from vigi_vision.investigation_confirmation_models import (
@@ -31,6 +34,7 @@ from vigi_vision.recording_search_7e_b4_process import (
     B4ProcessCancelled,
     B4ProcessError,
     B4ProcessTimeout,
+    EfficientSamWorkerSpec,
     StaticMaskWorkerSpec,
     _build_request,
     _decode_request,
@@ -91,6 +95,75 @@ def _predictor(baseline: BinaryMask, probe: BinaryMask) -> object:
     return Predictor()
 
 
+def _send_worker_payload(connection: object, payload: dict[str, object]) -> None:
+    connection.send_bytes(json.dumps(payload).encode())
+    connection.close()
+
+
+def _malformed_worker_entry(connection: object, _encoded: bytes) -> None:
+    _send_worker_payload(
+        connection,
+        {
+            "version": 1,
+            "correlation_id": "malformed",
+            "kind": "failure",
+            "code": "worker_execution_failed",
+            "unexpected": True,
+        },
+    )
+
+
+def _wrong_version_worker_entry(connection: object, _encoded: bytes) -> None:
+    _send_worker_payload(
+        connection,
+        {
+            "version": 999,
+            "correlation_id": "protocol",
+            "kind": "failure",
+            "code": "worker_execution_failed",
+        },
+    )
+
+
+def _wrong_correlation_worker_entry(connection: object, _encoded: bytes) -> None:
+    _send_worker_payload(
+        connection,
+        {
+            "version": 1,
+            "correlation_id": "other",
+            "kind": "failure",
+            "code": "worker_execution_failed",
+        },
+    )
+
+
+def _extra_key_worker_entry(connection: object, _encoded: bytes) -> None:
+    _send_worker_payload(
+        connection,
+        {
+            "version": 1,
+            "correlation_id": "protocol",
+            "kind": "failure",
+            "code": "worker_execution_failed",
+            "unexpected": True,
+        },
+    )
+
+
+def _eof_worker_entry(connection: object, _encoded: bytes) -> None:
+    connection.close()
+
+
+def _active_classifier_children() -> list[BaseProcess]:
+    return [child for child in multiprocessing.active_children() if child.name == "vigi-phase7e-b4"]
+
+
+def _assert_reaped(pids: list[int]) -> None:
+    active = multiprocessing.active_children()
+    assert active == []
+    assert all(child.pid not in pids for child in active)
+
+
 def test_spawned_result_matches_shared_b4_computation() -> None:
     baseline, probe, baseline_mask, probe_mask, roi, policy = _values()
     expected = ObjectPresenceClassifier(policy).classify(
@@ -108,6 +181,171 @@ def test_spawned_result_matches_shared_b4_computation() -> None:
         timeout_seconds=3.0,
     )
     assert actual == expected
+    assert not _active_classifier_children()
+
+
+def test_worker_failure_envelope_is_reaped_immediately() -> None:
+    baseline, probe, _baseline_mask, _probe_mask, roi, policy = _values()
+    pids: list[int] = []
+    with pytest.raises(B4ProcessError) as raised:
+        run_b4_in_process(
+            baseline_image=baseline,
+            probe_image=probe,
+            source_width=32,
+            source_height=32,
+            roi=roi,
+            policy=policy,
+            worker_spec=EfficientSamWorkerSpec(
+                Path("missing-efficient-sam-checkpoint.pt"), "a" * 64, "cpu"
+            ),
+            correlation_id="failure-envelope",
+            timeout_seconds=3.0,
+            pid_observer=pids.append,
+        )
+    assert raised.value.code == "classifier_unavailable"
+    assert raised.value.cleanup_failed is False
+    assert len(pids) == 1
+    _assert_reaped(pids)
+
+
+def test_invalid_classifier_output_is_reaped_immediately() -> None:
+    baseline, probe, _baseline_mask, _probe_mask, roi, policy = _values()
+    empty = BinaryMask.from_rows(tuple(tuple(False for _ in range(32)) for _ in range(32)))
+    pids: list[int] = []
+    with pytest.raises(B4ProcessError) as raised:
+        run_b4_in_process(
+            baseline_image=baseline,
+            probe_image=probe,
+            source_width=32,
+            source_height=32,
+            roi=roi,
+            policy=policy,
+            worker_spec=StaticMaskWorkerSpec(empty, empty),
+            correlation_id="invalid-output",
+            timeout_seconds=3.0,
+            pid_observer=pids.append,
+        )
+    assert raised.value.code == "invalid_classifier_output"
+    assert raised.value.cleanup_failed is False
+    assert len(pids) == 1
+    _assert_reaped(pids)
+
+
+@pytest.mark.parametrize(
+    ("worker", "expected"),
+    [
+        (_malformed_worker_entry, "malformed_worker_protocol"),
+        (_wrong_version_worker_entry, "malformed_worker_protocol"),
+        (_wrong_correlation_worker_entry, "malformed_worker_protocol"),
+        (_extra_key_worker_entry, "malformed_worker_protocol"),
+    ],
+)
+def test_protocol_failure_from_spawned_worker_is_reaped(
+    monkeypatch: pytest.MonkeyPatch,
+    worker: object,
+    expected: str,
+) -> None:
+    baseline, probe, baseline_mask, probe_mask, roi, policy = _values()
+    monkeypatch.setattr(b4_process, "_worker_entry", worker)
+    pids: list[int] = []
+    with pytest.raises(B4ProcessError) as raised:
+        run_b4_in_process(
+            baseline_image=baseline,
+            probe_image=probe,
+            source_width=32,
+            source_height=32,
+            roi=roi,
+            policy=policy,
+            worker_spec=StaticMaskWorkerSpec(baseline_mask, probe_mask),
+            correlation_id="protocol",
+            timeout_seconds=3.0,
+            pid_observer=pids.append,
+        )
+    assert raised.value.code == expected
+    assert raised.value.cleanup_failed is False
+    assert len(pids) == 1
+    _assert_reaped(pids)
+
+
+def test_eof_without_result_is_reaped_immediately(monkeypatch: pytest.MonkeyPatch) -> None:
+    baseline, probe, baseline_mask, probe_mask, roi, policy = _values()
+    monkeypatch.setattr(b4_process, "_worker_entry", _eof_worker_entry)
+    pids: list[int] = []
+    with pytest.raises(B4ProcessError) as raised:
+        run_b4_in_process(
+            baseline_image=baseline,
+            probe_image=probe,
+            source_width=32,
+            source_height=32,
+            roi=roi,
+            policy=policy,
+            worker_spec=StaticMaskWorkerSpec(baseline_mask, probe_mask),
+            correlation_id="eof",
+            timeout_seconds=3.0,
+            pid_observer=pids.append,
+        )
+    assert raised.value.code == "worker_abnormal_exit"
+    assert raised.value.cleanup_failed is False
+    assert len(pids) == 1
+    _assert_reaped(pids)
+
+
+def test_parent_decode_exception_is_reaped_and_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    baseline, probe, baseline_mask, probe_mask, roi, policy = _values()
+
+    def fail_decode(raw: bytes, expected_correlation: str) -> object:
+        raise RuntimeError from None
+
+    monkeypatch.setattr(b4_process, "_decode_result", fail_decode)
+    pids: list[int] = []
+    with pytest.raises(B4ProcessError) as raised:
+        run_b4_in_process(
+            baseline_image=baseline,
+            probe_image=probe,
+            source_width=32,
+            source_height=32,
+            roi=roi,
+            policy=policy,
+            worker_spec=StaticMaskWorkerSpec(baseline_mask, probe_mask),
+            correlation_id="decode-error",
+            timeout_seconds=3.0,
+            pid_observer=pids.append,
+        )
+    assert raised.value.code == "worker_execution_failed"
+    assert raised.value.cleanup_failed is False
+    assert len(pids) == 1
+    _assert_reaped(pids)
+
+
+def test_cleanup_failure_is_secondary_to_primary_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline, probe, baseline_mask, probe_mask, roi, policy = _values()
+    original_close = b4_process._close_connection
+    close_calls = 0
+
+    def close_and_report_failure(connection: object) -> bool:
+        nonlocal close_calls
+        result = original_close(connection)
+        close_calls += 1
+        return result and close_calls == 1
+
+    monkeypatch.setattr(b4_process, "_close_connection", close_and_report_failure)
+    with pytest.raises(B4ProcessError) as raised:
+        run_b4_in_process(
+            baseline_image=baseline,
+            probe_image=probe,
+            source_width=32,
+            source_height=32,
+            roi=roi,
+            policy=policy,
+            worker_spec=StaticMaskWorkerSpec(baseline_mask, probe_mask),
+            correlation_id="cleanup-secondary",
+            timeout_seconds=0.05,
+        )
+    assert raised.value.code == "classifier_timeout"
+    assert raised.value.cleanup_failed is True
+    assert not _active_classifier_children()
 
 
 def test_timeout_terminates_process_and_retry_does_not_overlap() -> None:
@@ -127,6 +365,8 @@ def test_timeout_terminates_process_and_retry_does_not_overlap() -> None:
             pid_observer=pids.append,
         )
     assert len(pids) == 1
+    _assert_reaped(pids)
+    assert not _active_classifier_children()
     result = run_b4_in_process(
         baseline_image=baseline,
         probe_image=probe,
@@ -139,12 +379,14 @@ def test_timeout_terminates_process_and_retry_does_not_overlap() -> None:
         timeout_seconds=3.0,
     )
     assert result.outcome.value == "INDETERMINATE"
+    assert not _active_classifier_children()
 
 
 def test_cancellation_terminates_process_without_result() -> None:
     baseline, probe, baseline_mask, probe_mask, roi, policy = _values()
     cancelled = Event()
     outcome: list[BaseException] = []
+    pids: list[int] = []
 
     def invoke() -> None:
         try:
@@ -159,6 +401,7 @@ def test_cancellation_terminates_process_without_result() -> None:
                 correlation_id="test-cancel",
                 timeout_seconds=3.0,
                 cancellation=cancelled.is_set,
+                pid_observer=pids.append,
             )
         except BaseException as error:  # noqa: BLE001 - assert the closed cancellation type.
             outcome.append(error)
@@ -170,6 +413,8 @@ def test_cancellation_terminates_process_without_result() -> None:
     assert not thread.is_alive()
     assert len(outcome) == 1
     assert isinstance(outcome[0], B4ProcessCancelled)
+    assert len(pids) == 1
+    _assert_reaped(pids)
 
 
 @dataclass
@@ -343,6 +588,7 @@ def test_phase7e_production_adapter_keeps_existing_operation_shape(tmp_path: Pat
     assert result.payload["frame_id"] == authoritative.frame_record.identity
     assert result.payload["target_request_id"] == authoritative.target_request.identity
     assert result.payload["classifier_evidence"] is not None
+    assert not _active_classifier_children()
 
 
 def test_phase7e_production_adapter_timeout_is_operational_only(tmp_path: Path) -> None:
@@ -355,6 +601,7 @@ def test_phase7e_production_adapter_timeout_is_operational_only(tmp_path: Path) 
     assert result.payload["result_kind"] == "OPERATIONAL"
     assert result.payload["operational_reason"] == "classifier_timeout"
     assert result.payload["classifier_evidence"] is None
+    assert not _active_classifier_children()
 
 
 def test_phase7e_production_adapter_invalid_output_is_canonical_operational(

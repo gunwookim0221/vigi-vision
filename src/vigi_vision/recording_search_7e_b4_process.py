@@ -14,7 +14,7 @@ no repository, SDK, credential, or dotenv imports.
 # This module is an intentionally explicit lifecycle boundary; its small
 # protocol state machine is clearer as one unit than as a collection of
 # callback helpers.  Keep the contract-focused implementation readable.
-# ruff: noqa: ARG002, BLE001, C901, D107, EM101, N818, PLC0415, PLR0912, PLR0913, PLR0915, PT018, RSE102, S101, SIM105, TRY004
+# ruff: noqa: ARG002, BLE001, C901, D107, EM101, N818, PLC0415, PLR0912, PLR0913, PLR0915, PT018, RSE102, S101, SIM105, TRY004, TRY301
 
 from __future__ import annotations
 
@@ -51,6 +51,7 @@ MAX_RESULT_BYTES: Final = 4 * 1024 * 1024
 MAX_CHECKPOINT_PATH_CHARS: Final = 4096
 MAX_CORRELATION_CHARS: Final = 256
 MAX_STATIC_DELAY_SECONDS: Final = 60.0
+_CLEANUP_CEILING_SECONDS: Final = 0.5
 _SHA256_PATTERN: Final = re.compile(r"^[0-9a-fA-F]{64}$")
 _REQUEST_KEYS: Final = frozenset(
     {
@@ -213,6 +214,8 @@ def run_b4_in_process(
     child: Connection | None = None
     process: multiprocessing.Process | None = None
     started = False
+    primary_error: B4ProcessError | None = None
+    result: ClassificationResult | None = None
     try:
         operation_deadline = monotonic() + timeout_seconds
         parent, child = context.Pipe(duplex=False)
@@ -224,66 +227,45 @@ def run_b4_in_process(
         process.daemon = True
         try:
             process.start()
-        except (OSError, RuntimeError, ValueError) as error:
+        except Exception as error:
             # A platform start failure normally occurs before a child exists,
             # but a partially-created Process must not be allowed to escape
             # this boundary if the platform reports a PID.
             if process.pid is not None:
-                _terminate_and_reap(process, parent, 0.5)
+                started = True
             raise B4ProcessError("worker_start_failed") from error
         started = True
         if pid_observer is not None and process.pid is not None:
             try:
                 pid_observer(process.pid)
             except Exception as error:
-                cleanup_failed = _terminate_and_reap(process, parent, 0.5)
-                raise B4ProcessError(
-                    "worker_execution_failed", cleanup_failed=cleanup_failed
-                ) from error
-        child.close()
-        child = None
+                raise B4ProcessError("worker_execution_failed") from error
         while True:
             if _is_cancelled(cancellation):
-                cleanup_failed = _terminate_and_reap(process, parent, timeout_seconds)
-                raise B4ProcessCancelled(cleanup_failed=cleanup_failed)
+                raise B4ProcessCancelled()
             remaining = operation_deadline - monotonic()
             if remaining <= 0:
-                cleanup_failed = _terminate_and_reap(process, parent, 0.5)
-                raise B4ProcessTimeout(cleanup_failed=cleanup_failed)
+                raise B4ProcessTimeout()
             try:
                 available = parent.poll(min(0.05, remaining))
             except (OSError, EOFError) as error:
-                cleanup_failed = _terminate_and_reap(process, parent, min(0.5, remaining))
-                raise B4ProcessError(
-                    "worker_execution_failed", cleanup_failed=cleanup_failed
-                ) from error
+                raise B4ProcessError("worker_execution_failed") from error
             if available:
                 try:
                     raw = parent.recv_bytes(MAX_RESULT_BYTES + 1)
                 except (OSError, EOFError, ValueError) as error:
-                    cleanup_failed = _terminate_and_reap(process, parent, min(0.5, remaining))
-                    raise B4ProcessError(
-                        "worker_execution_failed", cleanup_failed=cleanup_failed
-                    ) from error
+                    raise B4ProcessError("worker_execution_failed") from error
                 # Cancellation and deadline win over a result that became
                 # available concurrently with the authority check.
-                if _is_cancelled(cancellation):
-                    cleanup_failed = _terminate_and_reap(process, parent, min(0.5, remaining))
-                    raise B4ProcessCancelled(cleanup_failed=cleanup_failed)
-                if monotonic() >= operation_deadline:
-                    cleanup_failed = _terminate_and_reap(process, parent, min(0.5, remaining))
-                    raise B4ProcessTimeout(cleanup_failed=cleanup_failed)
-                result = _decode_result(raw, correlation_id)
-                process.join(timeout=min(0.25, max(0.0, operation_deadline - monotonic())))
-                if process.is_alive():
-                    cleanup_failed = _terminate_and_reap(process, parent, min(0.5, remaining))
-                    raise B4ProcessError("worker_execution_failed", cleanup_failed=cleanup_failed)
                 if _is_cancelled(cancellation):
                     raise B4ProcessCancelled()
                 if monotonic() >= operation_deadline:
                     raise B4ProcessTimeout()
-                if process.exitcode != 0:
-                    raise B4ProcessError("worker_abnormal_exit")
+                result = _decode_result(raw, correlation_id)
+                if _is_cancelled(cancellation):
+                    raise B4ProcessCancelled()
+                if monotonic() >= operation_deadline:
+                    raise B4ProcessTimeout()
                 return result
             if not process.is_alive():
                 # Drain one queued message before classifying an exit without
@@ -300,29 +282,44 @@ def run_b4_in_process(
                             raise B4ProcessCancelled()
                         if monotonic() >= operation_deadline:
                             raise B4ProcessTimeout()
-                        if process.exitcode == 0:
-                            return result
+                        return result
                 except B4ProcessError:
                     raise
                 except (OSError, EOFError, ValueError):
                     pass
                 raise B4ProcessError("worker_abnormal_exit")
     except (KeyboardInterrupt, SystemExit) as error:
-        if process is not None and started:
-            cleanup_failed = _terminate_and_reap(process, parent, 0.5)
-        else:
-            cleanup_failed = False
-        raise B4ProcessInterrupted(cleanup_failed=cleanup_failed) from error
+        primary_error = B4ProcessInterrupted()
+        raise primary_error from error
+    except B4ProcessError as error:
+        primary_error = error
+        raise
+    except BaseException as error:
+        primary_error = B4ProcessError("worker_execution_failed")
+        raise primary_error from error
     finally:
-        if child is not None:
-            _close_connection(child)
-        if parent is not None:
-            _close_connection(parent)
-        if process is not None and started and not process.is_alive():
-            try:
-                process.close()
-            except (OSError, ValueError):
-                pass
+        cleanup_failed = True
+        exitcode: int | None = None
+        try:
+            cleanup_failed, exitcode = _cleanup_process_boundary(
+                process,
+                parent,
+                child,
+                started=started,
+                allow_graceful_exit=result is not None,
+                budget_seconds=_CLEANUP_CEILING_SECONDS,
+            )
+        except BaseException:
+            # The cleanup owner is defensive by itself, but a patched or
+            # platform-specific failure must never mask the primary outcome.
+            cleanup_failed = True
+        if primary_error is not None:
+            primary_error.cleanup_failed = primary_error.cleanup_failed or cleanup_failed
+        elif result is not None:
+            if exitcode != 0:
+                raise B4ProcessError("worker_abnormal_exit", cleanup_failed=cleanup_failed)
+            if cleanup_failed:
+                raise B4ProcessError("worker_execution_failed", cleanup_failed=True)
 
 
 def _build_request(
@@ -646,48 +643,107 @@ def _is_cancelled(cancellation: object | None) -> bool:
         return True
 
 
-def _terminate_and_reap(
-    process: multiprocessing.Process,
+def _cleanup_process_boundary(
+    process: multiprocessing.Process | None,
     connection: Connection | None,
+    child_connection: Connection | None,
+    *,
+    started: bool,
+    allow_graceful_exit: bool,
     budget_seconds: float,
-) -> bool:
-    """Terminate, escalate, reap, and close all process resources."""
+) -> tuple[bool, int | None]:
+    """Own every post-creation process/IPC cleanup path exactly once."""
     cleanup_failed = False
-    deadline = monotonic() + max(0.0, min(0.5, budget_seconds))
-    try:
-        if process.is_alive():
+    exitcode: int | None = None
+    reaped = False
+    deadline = monotonic() + max(0.0, min(_CLEANUP_CEILING_SECONDS, budget_seconds))
+    if process is not None and started:
+        alive = True
+        if allow_graceful_exit:
+            try:
+                remaining = max(0.0, deadline - monotonic())
+                process.join(timeout=remaining)
+            except BaseException:
+                cleanup_failed = True
+        try:
+            alive = process.is_alive()
+        except BaseException:
+            cleanup_failed = True
+        if not alive and not allow_graceful_exit:
+            try:
+                remaining = max(0.0, deadline - monotonic())
+                process.join(timeout=remaining)
+            except BaseException:
+                cleanup_failed = True
+        if alive:
             try:
                 process.terminate()
-            except (OSError, ValueError):
+            except BaseException:
                 cleanup_failed = True
-            remaining = max(0.0, deadline - monotonic())
-            process.join(timeout=remaining)
-        if process.is_alive():
+            try:
+                remaining = max(0.0, deadline - monotonic())
+                process.join(timeout=remaining)
+            except BaseException:
+                cleanup_failed = True
+        try:
+            alive = process.is_alive()
+        except BaseException:
+            cleanup_failed = True
+            alive = True
+        if alive:
             try:
                 process.kill()
-            except (AttributeError, OSError, ValueError):
+            except BaseException:
                 cleanup_failed = True
-            remaining = max(0.0, deadline - monotonic())
-            process.join(timeout=remaining)
-        if process.is_alive():
+            try:
+                remaining = max(0.0, deadline - monotonic())
+                process.join(timeout=remaining)
+            except BaseException:
+                cleanup_failed = True
+            try:
+                alive = process.is_alive()
+            except BaseException:
+                cleanup_failed = True
+                alive = True
+        if alive:
             cleanup_failed = True
-    except (OSError, ValueError):
+        else:
+            reaped = True
+            try:
+                exitcode = process.exitcode
+            except BaseException:
+                cleanup_failed = True
+    elif process is not None:
+        # A start failure may leave an unstarted Process wrapper behind.  It
+        # has no child to reap, but its native handle still belongs to us.
+        try:
+            process.close()
+        except BaseException:
+            cleanup_failed = True
+
+    if not _close_connection(connection):
         cleanup_failed = True
-    finally:
-        _close_connection(connection)
-        # The caller performs the one final Process.close() after checking
-        # that the object was reaped; a closed multiprocessing object cannot
-        # be queried with is_alive().
-    return cleanup_failed
+    if not _close_connection(child_connection):
+        cleanup_failed = True
+
+    if process is not None and started and reaped:
+        # close() is deliberately reached only after the final is_alive check
+        # above proved the child was reaped.
+        try:
+            process.close()
+        except BaseException:
+            cleanup_failed = True
+    return cleanup_failed, exitcode
 
 
-def _close_connection(connection: Connection | None) -> None:
+def _close_connection(connection: Connection | None) -> bool:
     if connection is None:
-        return
+        return True
     try:
         connection.close()
-    except OSError:
-        pass
+    except BaseException:
+        return False
+    return True
 
 
 __all__ = [
