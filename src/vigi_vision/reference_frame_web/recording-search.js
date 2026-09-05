@@ -21,6 +21,8 @@
   const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   const LOCAL_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/;
   const TERMINAL = new Set(["FOUND", "NOT_FOUND", "INCONCLUSIVE", "FAILED", "INTERRUPTED", "CORRUPT"]);
+  const REQUEST_TIMEOUT_MS = 15_000;
+  const CLIENT_POLL_DEADLINE_MS = 45 * 60 * 1_000;
   const START_KEYS = Object.freeze(["request_id", "investigation_id", "run_id", "status", "status_url"]);
   const STATUS_KEYS = Object.freeze([
     "investigation_id", "run_id", "schema_version", "status", "reason_code",
@@ -45,9 +47,98 @@
   let confirmation = null;
   let activeRun = null;
   let controller = null;
-  let timer = null;
   let pollCount = 0;
   let submitting = false;
+  let lifecycleGeneration = 0;
+  let lifecycle = null;
+
+  function isCurrentLifecycle(owner) {
+    return owner !== null && lifecycle === owner && !owner.closed
+      && owner.generation === lifecycleGeneration;
+  }
+
+  function clearRequest(owner) {
+    if (owner.requestTimer !== null) window.clearTimeout(owner.requestTimer);
+    owner.requestTimer = null;
+    owner.requestController = null;
+    owner.requestActive = false;
+    owner.requestKind = null;
+  }
+
+  function stopPolling(owner, announce = true) {
+    if (owner === null) return;
+    if (owner.pollTimer !== null) window.clearTimeout(owner.pollTimer);
+    owner.pollTimer = null;
+    if (announce && isCurrentLifecycle(owner)) status.setAttribute("aria-busy", "false");
+  }
+
+  function invalidateLifecycle(owner) {
+    if (owner === null) return;
+    owner.closed = true;
+    stopPolling(owner, false);
+    if (owner.requestTimer !== null) window.clearTimeout(owner.requestTimer);
+    owner.requestTimer = null;
+    owner.requestController?.abort();
+    owner.requestController = null;
+    owner.requestActive = false;
+    owner.requestKind = null;
+    if (lifecycle === owner) lifecycle = null;
+    lifecycleGeneration += 1;
+  }
+
+  function createLifecycle() {
+    if (lifecycle !== null) invalidateLifecycle(lifecycle);
+    const owner = {
+      generation: lifecycleGeneration + 1,
+      deadlineAt: Date.now() + CLIENT_POLL_DEADLINE_MS,
+      requestController: null,
+      requestTimer: null,
+      pollTimer: null,
+      requestActive: false,
+      closed: false,
+    };
+    lifecycleGeneration = owner.generation;
+    lifecycle = owner;
+    return owner;
+  }
+
+  function requestControllerFor(owner, kind) {
+    if (!isCurrentLifecycle(owner)) return null;
+    if (owner.requestActive) {
+      fail("internal_error", owner);
+      return null;
+    }
+    const remaining = owner.deadlineAt - Date.now();
+    if (remaining <= 0) {
+      fail("recording_search_unavailable", owner);
+      return null;
+    }
+    if (typeof AbortController !== "function") {
+      fail("recording_search_unavailable", owner);
+      return null;
+    }
+    const requestController = new AbortController();
+    owner.requestController = requestController;
+    owner.requestActive = true;
+    owner.requestKind = kind;
+    owner.requestTimer = window.setTimeout(() => {
+      if (!isCurrentLifecycle(owner) || !owner.requestActive || owner.requestController !== requestController) return;
+      requestController?.abort();
+      clearRequest(owner);
+      fail("recording_search_unavailable", owner);
+    }, Math.max(1, Math.min(REQUEST_TIMEOUT_MS, remaining)));
+    return requestController;
+  }
+
+  function completeRequest(owner, requestController) {
+    if (!isCurrentLifecycle(owner) || owner.requestController !== requestController) return false;
+    if (owner.requestTimer !== null) window.clearTimeout(owner.requestTimer);
+    owner.requestTimer = null;
+    owner.requestController = null;
+    owner.requestActive = false;
+    owner.requestKind = null;
+    return true;
+  }
 
   function hasExactKeys(value, keys) {
     return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -68,8 +159,11 @@
     status.setAttribute("aria-busy", busyText);
   }
 
-  function fail(code) {
-    stopPolling();
+  function fail(code, owner = null) {
+    if (owner !== null) {
+      if (!isCurrentLifecycle(owner)) return;
+      invalidateLifecycle(owner);
+    }
     const message = ERROR_MESSAGES[code] ?? ERROR_MESSAGES.internal_error;
     setStatus(message, "error");
     error.textContent = message;
@@ -211,12 +305,15 @@
       investigationId: confirmation.investigationId,
       searchEnd: endInput.value,
     };
+    const owner = createLifecycle();
+    const requestController = requestControllerFor(owner, "start");
+    if (!isCurrentLifecycle(owner) || requestController === null) return;
     submitting = true;
     renderInput();
     setStatus("검색 요청을 접수하는 중입니다…", "loading", true);
     error.hidden = true;
     try {
-      const response = await fetch("/api/v1/recording-searches", {
+      const requestOptions = {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({
@@ -224,24 +321,32 @@
           search_end: expected.searchEnd,
           request_id: expected.requestId,
         }),
-      });
+      };
+      requestOptions.signal = requestController.signal;
+      const response = await fetch("/api/v1/recording-searches", requestOptions);
+      if (!isCurrentLifecycle(owner)) return;
       const payload = await response.json().catch(() => null);
+      if (!isCurrentLifecycle(owner)) return;
+      completeRequest(owner, requestController);
       submitting = false;
       if (response.status !== 202) {
-        fail(payload?.error?.code);
+        fail(payload?.error?.code, owner);
         return;
       }
       if (!validStart(payload, expected)) {
-        fail("internal_error");
+        fail("internal_error", owner);
         return;
       }
       rememberRun(payload);
+      owner.runId = payload.run_id;
       setStatus("검색 요청이 접수되었습니다.", "accepted", true);
       pollCount = 0;
-      schedulePoll(0);
+      schedulePoll(owner, 0);
     } catch (_caught) {
+      if (!isCurrentLifecycle(owner)) return;
+      completeRequest(owner, requestController);
       submitting = false;
-      fail("recording_search_unavailable");
+      fail("recording_search_unavailable", owner);
     }
   }
 
@@ -267,39 +372,55 @@
     }[kind] ?? "검색 상태를 확인할 수 없습니다.";
   }
 
-  function finish(payload) {
-    stopPolling();
+  function finish(payload, owner) {
+    if (!isCurrentLifecycle(owner)) return;
+    invalidateLifecycle(owner);
     setStatus("녹화 기록 검색이 종료되었습니다.", "complete");
     resultKind.textContent = terminalText(payload.status);
     resultReason.textContent = payload.reason_code === null
       ? "서버가 추가 사유를 제공하지 않았습니다."
       : `결과 사유: ${payload.reason_code}`;
     result.hidden = false;
+    renderInput();
     result.focus?.({ preventScroll: true });
   }
 
-  async function poll() {
-    if (activeRun === null) return;
+  async function poll(owner) {
+    if (!isCurrentLifecycle(owner) || activeRun === null || owner.runId !== activeRun.runId) return;
+    if (Date.now() >= owner.deadlineAt) {
+      fail("recording_search_unavailable", owner);
+      return;
+    }
     pollCount += 1;
     if (pollCount > 1350) {
-      fail("recording_search_unavailable");
+      fail("recording_search_unavailable", owner);
+      return;
+    }
+    const run = activeRun;
+    const requestController = requestControllerFor(owner, "status");
+    if (!isCurrentLifecycle(owner) || requestController === null) {
       return;
     }
     try {
+      const requestOptions = { signal: requestController.signal };
       const response = await fetch(
-        `/api/v1/recording-searches/${encodeURIComponent(activeRun.investigationId)}/${encodeURIComponent(activeRun.runId)}`,
+        `/api/v1/recording-searches/${encodeURIComponent(run.investigationId)}/${encodeURIComponent(run.runId)}`,
+        requestOptions,
       );
+      if (!isCurrentLifecycle(owner) || activeRun !== run) return;
       const payload = await response.json().catch(() => null);
+      if (!isCurrentLifecycle(owner) || activeRun !== run) return;
+      completeRequest(owner, requestController);
       if (!response.ok || !validStatus(payload)) {
-        fail(payload?.error?.code);
+        fail(payload?.error?.code, owner);
         return;
       }
       if (TERMINAL.has(payload.status)) {
-        finish(payload);
+        finish(payload, owner);
         return;
       }
       if (!["ACCEPTED", "RUNNING"].includes(payload.status)) {
-        fail("internal_error");
+        fail("internal_error", owner);
         return;
       }
       setStatus(
@@ -307,21 +428,26 @@
         "loading",
         true,
       );
-      schedulePoll(2000);
+      schedulePoll(owner, 2000);
     } catch (_caught) {
-      fail("recording_search_unavailable");
+      if (!isCurrentLifecycle(owner)) return;
+      completeRequest(owner, requestController);
+      fail("recording_search_unavailable", owner);
     }
   }
 
-  function schedulePoll(delay) {
-    if (timer !== null) window.clearTimeout(timer);
-    timer = window.setTimeout(() => { void poll(); }, delay);
-  }
-
-  function stopPolling() {
-    if (timer !== null) window.clearTimeout(timer);
-    timer = null;
-    status.setAttribute("aria-busy", "false");
+  function schedulePoll(owner, delay) {
+    if (!isCurrentLifecycle(owner)) return;
+    if (owner.pollTimer !== null) window.clearTimeout(owner.pollTimer);
+    const remaining = owner.deadlineAt - Date.now();
+    if (remaining <= 0) {
+      fail("recording_search_unavailable", owner);
+      return;
+    }
+    owner.pollTimer = window.setTimeout(() => {
+      owner.pollTimer = null;
+      if (isCurrentLifecycle(owner)) void poll(owner);
+    }, Math.min(delay, remaining));
   }
 
   function resumeFromLocation() {
@@ -332,9 +458,11 @@
       return;
     }
     if (runId !== null && RUN_PATTERN.test(runId) && confirmation !== null) {
+      const owner = createLifecycle();
       activeRun = { investigationId: confirmation.investigationId, runId };
+      owner.runId = runId;
       setStatus("이전 검색 상태를 다시 확인하는 중입니다…", "loading", true);
-      schedulePoll(0);
+      schedulePoll(owner, 0);
     }
   }
 
@@ -369,14 +497,14 @@
   window.addEventListener("vigi:investigation-confirmed", receiveConfirmation);
   window.addEventListener("pagehide", () => {
     controller?.abort();
-    stopPolling();
+    invalidateLifecycle(lifecycle);
   });
   window.vigiVisionRecordingSearch = Object.freeze({
     getState: () => ({
       investigationId: confirmation?.investigationId ?? null,
       runId: activeRun?.runId ?? null,
       submitting,
-      polling: timer !== null,
+      polling: lifecycle !== null,
     }),
   });
   loadFromLocation();

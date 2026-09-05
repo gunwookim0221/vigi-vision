@@ -127,6 +127,7 @@ for (const terminal of ["FOUND", "NOT_FOUND", "INCONCLUSIVE", "FAILED", "INTERRU
     assert.equal(statusCalls, 2);
     assert.equal(harness.pendingTimerCount(), 0);
     assert.equal(harness.recordingSearchResult.hidden, false);
+    assert.equal(harness.recordingSearchStart.disabled, true);
     assert.doesNotMatch(harness.recordingSearchResultKind.textContent, /theft|identity|intent|UTC/i);
   });
 }
@@ -209,5 +210,225 @@ test("invalid search bounds never reach the HTTP start boundary and page teardow
   await settle();
   assert.equal(harness.pendingTimerCount(), 1);
   harness.windowListeners.pagehide({});
+  assert.equal(harness.pendingTimerCount(), 0);
+});
+
+test("deferred status completion after pagehide cannot render stale terminal evidence", async () => {
+  const statusResponse = deferred();
+  let statusOptions;
+  const harness = createHarness((url, options) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    statusOptions = options;
+    return statusResponse.promise;
+  }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  const statusBeforeTeardown = harness.recordingSearchStatus.textContent;
+
+  harness.window.dispatchEvent({ type: "pagehide" });
+  statusResponse.resolve({ ok: true, status: 200, json: async () => status("FOUND") });
+  await settle();
+  await settle();
+
+  assert.equal(statusOptions.signal.aborted, true);
+  assert.equal(harness.recordingSearchResult.hidden, true);
+  assert.equal(harness.recordingSearchStatus.textContent, statusBeforeTeardown);
+  assert.equal(harness.pendingTimerCount(), 0);
+  assert.equal(harness.window.vigiVisionRecordingSearch.getState().polling, false);
+});
+
+test("never-resolving status request is aborted at its bounded request deadline", async () => {
+  const statusResponse = new Promise(() => {});
+  let statusOptions;
+  const nativeError = "rtsp://user:password@nvr.example/private";
+  const harness = createHarness((url, options) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    statusOptions = options;
+    return statusResponse;
+  }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  harness.runTimers();
+  await settle();
+
+  assert.equal(statusOptions.signal.aborted, true);
+  assert.equal(harness.window.vigiVisionRecordingSearch.getState().polling, false);
+  assert.equal(harness.pendingTimerCount(), 0);
+  assert.equal(harness.recordingSearchResult.hidden, true);
+  assert.match(harness.recordingSearchStatus.textContent, /녹화 기록 검색을 사용할 수 없습니다/);
+  assert.doesNotMatch(harness.recordingSearchStatus.textContent, /rtsp|password|nvr\.example/i);
+  assert.doesNotMatch(harness.recordingSearchError.textContent, new RegExp(nativeError));
+});
+
+test("overall client deadline bounds an in-flight status request", async () => {
+  const baseNow = Date.now();
+  let now = baseNow;
+  const statusResponse = new Promise(() => {});
+  let statusOptions;
+  const harness = createHarness((url, options) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    statusOptions = options;
+    return statusResponse;
+  }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID, now: () => now });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  now = baseNow + (45 * 60 * 1_000) - 5_000;
+  harness.runTimers();
+  await settle();
+  assert.equal(harness.timerDelays.at(-1), 5_000);
+  harness.runTimers();
+  await settle();
+  assert.equal(statusOptions.signal.aborted, true);
+  assert.equal(harness.window.vigiVisionRecordingSearch.getState().polling, false);
+  assert.equal(harness.pendingTimerCount(), 0);
+});
+
+test("intentional status abort after teardown does not announce a failure", async () => {
+  let rejectStatus;
+  const statusResponse = new Promise((_resolve, reject) => { rejectStatus = reject; });
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    return statusResponse;
+  }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  const statusBeforeTeardown = harness.recordingSearchStatus.textContent;
+  harness.window.dispatchEvent({ type: "pagehide" });
+  rejectStatus(Object.assign(new Error("aborted"), { name: "AbortError" }));
+  await settle();
+  await settle();
+
+  assert.equal(harness.recordingSearchStatus.textContent, statusBeforeTeardown);
+  assert.equal(harness.recordingSearchError.hidden, true);
+  assert.equal(harness.pendingTimerCount(), 0);
+});
+
+test("deferred start response after pagehide cannot establish a run or polling", async () => {
+  const startResponse = deferred();
+  let startOptions;
+  const harness = createHarness((url, options) => {
+    startOptions = options;
+    return startResponse.promise;
+  }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  const statusBeforeTeardown = harness.recordingSearchStatus.textContent;
+  harness.window.dispatchEvent({ type: "pagehide" });
+  startResponse.resolve({ ok: true, status: 202, json: async () => accepted() });
+  await settle();
+  await settle();
+
+  assert.equal(startOptions.signal.aborted, true);
+  assert.equal(harness.window.vigiVisionRecordingSearch.getState().runId, null);
+  assert.equal(harness.window.vigiVisionRecordingSearch.getState().polling, false);
+  assert.equal(harness.recordingSearchStatus.textContent, statusBeforeTeardown);
+  assert.equal(harness.recordingSearchResult.hidden, true);
+  assert.equal(harness.pendingTimerCount(), 0);
+});
+
+test("old status completion cannot mutate a newer lifecycle", async () => {
+  const firstStatus = deferred();
+  const secondStatus = deferred();
+  let statusCalls = 0;
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    statusCalls += 1;
+    return statusCalls === 1 ? firstStatus.promise : secondStatus.promise;
+  }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  harness.window.dispatchEvent({ type: "pagehide" });
+
+  harness.window.dispatchEvent({
+    type: "vigi:investigation-confirmed",
+    detail: {
+      investigationId: INVESTIGATION_ID,
+      anchorTimeUtc: "2026-07-20T03:34:18Z",
+      sourceTimezone: "Asia/Seoul",
+      schemaVersion: 3,
+    },
+  });
+  await settle();
+  harness.runTimers();
+  await settle();
+  assert.equal(statusCalls, 2);
+  const statusBeforeOldResponse = harness.recordingSearchStatus.textContent;
+  firstStatus.resolve({ ok: true, status: 200, json: async () => status("FOUND") });
+  await settle();
+  await settle();
+  assert.equal(harness.recordingSearchResult.hidden, true);
+  assert.equal(harness.recordingSearchStatus.textContent, statusBeforeOldResponse);
+
+  secondStatus.resolve({ ok: true, status: 200, json: async () => status("FOUND") });
+  await settle();
+  await settle();
+  assert.equal(harness.recordingSearchResult.hidden, false);
+});
+
+test("status requests remain serialized and active timeout is safe", async () => {
+  const firstStatus = deferred();
+  let statusCalls = 0;
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    statusCalls += 1;
+    return statusCalls === 1
+      ? firstStatus.promise
+      : Promise.resolve({ ok: true, status: 200, json: async () => status("FOUND") });
+  }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  assert.equal(statusCalls, 1);
+
+  firstStatus.resolve({ ok: true, status: 200, json: async () => status("RUNNING") });
+  await settle();
+  await settle();
+  harness.runTimers();
+  await settle();
+  assert.equal(statusCalls, 2);
+  harness.runTimers();
+  await settle();
+  assert.equal(harness.recordingSearchResult.hidden, false);
   assert.equal(harness.pendingTimerCount(), 0);
 });

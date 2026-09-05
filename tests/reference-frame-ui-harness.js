@@ -353,12 +353,20 @@ function createHarness(
       }
     },
     AbortController: FakeAbortController,
-     fetch: (url, requestOptions) => url === "/api/v1/reference-frames/channels"
+    fetch: (url, requestOptions) => url === "/api/v1/reference-frames/channels"
        ? (channelRequests += 1, typeof channelResponse === "function" ? channelResponse(url, requestOptions) : Promise.resolve(channelResponse))
        : (!options.confirmation && url.startsWith("/api/v1/investigation-confirmations/")
          ? Promise.resolve({ ok: false, status: 404, json: async () => ({ error: { code: "investigation_not_found" } }) })
          : fetchImplementation(url, requestOptions)),
   });
+  if (typeof options.now === "function") {
+    const NativeDate = Date;
+    context.Date = class HarnessDate extends NativeDate {
+      static now() {
+        return options.now();
+      }
+    };
+  }
   vm.runInContext(formScript, context);
   vm.runInContext(selectionScript, context);
   vm.runInContext(roiGeometryScript, context);
