@@ -12,13 +12,13 @@ for the next object-disappearance phase. The HTTP API is implemented in Phase
 confirmation, and reopen flow.
 
 The contract reuses the implemented reference-frame resource and investigation
-artifact ownership boundaries. It does not add object comparison, temporal
-search, reports, OpenAI, YOLO, background work, or a database.
+artifact ownership boundaries. Phase 6 itself does not add object comparison,
+temporal search, reports, OpenAI, YOLO, background work, or a database.
 
-Phase 6 is ready to hand a confirmed schema-3 input to Phase 7, but it does not
-start a search. The current Phase 7E public request is CLI-owned; connecting a
-browser action to execution and presenting status/results is a separate product
-slice because the existing HTTP execution POST is intentionally disabled.
+Phase 6 hands a confirmed schema-3 input to the shared Phase 7E service but does
+not itself start a search. The browser execution slice now provides the separate
+explicit search-end action and safe status/result presentation. Its POST cannot
+replace Phase 6 channel, timezone, frame, ROI, or identity facts.
 
 ## Terminology and non-goals
 

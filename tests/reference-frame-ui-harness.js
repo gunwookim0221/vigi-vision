@@ -12,6 +12,7 @@ const assistedPointerScript = readFileSync(join(__dirname, "..", "src", "vigi_vi
 const roiInteractionScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-roi-interaction.js"), "utf8");
 const script = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-ui.js"), "utf8");
 const confirmationScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "reference-frame-confirmation.js"), "utf8");
+const recordingSearchScript = readFileSync(join(__dirname, "..", "src", "vigi_vision", "reference_frame_web", "recording-search.js"), "utf8");
 
 class FakeElement {
   constructor(tagName) {
@@ -36,6 +37,7 @@ class FakeElement {
     this.width = 0;
     this.height = 0;
     this.canvasOperations = [];
+    this.scrollCalls = [];
   }
 
   addEventListener(name, handler, options = {}) {
@@ -73,6 +75,10 @@ class FakeElement {
 
   focus() {
     this.focused = true;
+  }
+
+  scrollIntoView(options) {
+    this.scrollCalls.push(options);
   }
 
   getBoundingClientRect() {
@@ -187,6 +193,10 @@ function createHarness(
   form.reportValidity = () => true;
   const elements = new Map([
     ["#candidate-form", form],
+    ["#candidate-intro", new FakeElement("section")],
+    ["#candidate-request-panel", new FakeElement("section")],
+    ["#candidate-results-panel", new FakeElement("section")],
+    ["#selected-preview-panel", new FakeElement("section")],
     ["#channel-id", new FakeElement("select")],
     ["#channel-status", new FakeElement("p")],
     ["#reference-time", new FakeElement("input")],
@@ -240,6 +250,16 @@ function createHarness(
     ["#confirmation-id", new FakeElement("dd")],
     ["#confirmation-confirmed-at", new FakeElement("dd")],
     ["#confirmation-artifact", new FakeElement("dd")],
+    ["#recording-search-panel", new FakeElement("section")],
+    ["#recording-search-confirmed-time", new FakeElement("dd")],
+    ["#recording-search-timezone", new FakeElement("dd")],
+    ["#recording-search-end", new FakeElement("input")],
+    ["#recording-search-start", new FakeElement("button")],
+    ["#recording-search-status", new FakeElement("p")],
+    ["#recording-search-error", new FakeElement("p")],
+    ["#recording-search-result", new FakeElement("div")],
+    ["#recording-search-result-kind", new FakeElement("p")],
+    ["#recording-search-result-reason", new FakeElement("p")],
   ]);
   elements.get("#channel-id").value = "1";
   elements.get("#source-timezone").value = "Asia/Seoul";
@@ -268,6 +288,9 @@ function createHarness(
   elements.get("#confirmation-reconfirm-action").hidden = true;
   elements.get("#confirmation-reconfirm-action").disabled = true;
   elements.get("#confirmation-error").hidden = true;
+  elements.get("#recording-search-panel").hidden = true;
+  elements.get("#recording-search-result").hidden = true;
+  elements.get("#recording-search-error").hidden = true;
   elements.get("#roi-status").textContent = "Select a candidate first.";
   elements.get("#roi-status").dataset.state = "disabled";
   elements.get("#roi-status").setAttribute("aria-busy", "false");
@@ -276,6 +299,7 @@ function createHarness(
   const windowListeners = {};
   const timers = new Map();
   const timerDelays = [];
+  let channelRequests = 0;
   let timerSequence = 0;
   const setTimeout = (handler, delay) => {
     const id = ++timerSequence;
@@ -299,6 +323,15 @@ function createHarness(
     window: {
       clearTimeout,
       setTimeout,
+      location: { href: options.location ?? "http://127.0.0.1/" },
+      history: {
+        replaceState(_state, _title, location) {
+          context.window.location.href = String(location);
+        },
+      },
+      crypto: {
+        randomUUID: () => options.requestId ?? "12345678-1234-4234-8234-123456789abc",
+      },
       addEventListener(name, handler) {
         if (windowListeners[name] === undefined) {
           const handlers = [];
@@ -308,10 +341,20 @@ function createHarness(
         }
         windowListeners[name].handlers.push(handler);
       },
+      dispatchEvent(event) {
+        windowListeners[event.type]?.(event);
+      },
+    },
+    URL,
+    CustomEvent: class CustomEvent {
+      constructor(type, init = {}) {
+        this.type = type;
+        this.detail = init.detail;
+      }
     },
     AbortController: FakeAbortController,
      fetch: (url, requestOptions) => url === "/api/v1/reference-frames/channels"
-       ? (typeof channelResponse === "function" ? channelResponse(url, requestOptions) : Promise.resolve(channelResponse))
+       ? (channelRequests += 1, typeof channelResponse === "function" ? channelResponse(url, requestOptions) : Promise.resolve(channelResponse))
        : (!options.confirmation && url.startsWith("/api/v1/investigation-confirmations/")
          ? Promise.resolve({ ok: false, status: 404, json: async () => ({ error: { code: "investigation_not_found" } }) })
          : fetchImplementation(url, requestOptions)),
@@ -326,6 +369,9 @@ function createHarness(
   vm.runInContext(roiInteractionScript, context);
   vm.runInContext(script, context);
   vm.runInContext(confirmationScript, context);
+  if (options.search) {
+    vm.runInContext(recordingSearchScript, context);
+  }
   return {
     form,
     channel: elements.get("#channel-id"),
@@ -349,6 +395,10 @@ function createHarness(
     previewImage: elements.get("#selected-preview-image"),
     previewFacts: elements.get("#selected-preview-facts"),
     previewWarnings: elements.get("#selected-preview-warnings"),
+    candidateIntro: elements.get("#candidate-intro"),
+    candidateRequestPanel: elements.get("#candidate-request-panel"),
+    candidateResultsPanel: elements.get("#candidate-results-panel"),
+    selectedPreviewPanel: elements.get("#selected-preview-panel"),
     roiWorkspace: elements.get("#roi-workspace"),
     roiStage: elements.get("#roi-stage"),
     assistedButton: elements.get("#roi-assisted-button"),
@@ -381,8 +431,19 @@ function createHarness(
     confirmationId: elements.get("#confirmation-id"),
     confirmationConfirmedAt: elements.get("#confirmation-confirmed-at"),
     confirmationArtifact: elements.get("#confirmation-artifact"),
+    recordingSearchPanel: elements.get("#recording-search-panel"),
+    recordingSearchConfirmedTime: elements.get("#recording-search-confirmed-time"),
+    recordingSearchTimezone: elements.get("#recording-search-timezone"),
+    recordingSearchEnd: elements.get("#recording-search-end"),
+    recordingSearchStart: elements.get("#recording-search-start"),
+    recordingSearchStatus: elements.get("#recording-search-status"),
+    recordingSearchError: elements.get("#recording-search-error"),
+    recordingSearchResult: elements.get("#recording-search-result"),
+    recordingSearchResultKind: elements.get("#recording-search-result-kind"),
+    recordingSearchResultReason: elements.get("#recording-search-result-reason"),
     windowListeners,
     window: context.window,
+    channelRequests: () => channelRequests,
     runTimers,
     timerDelays,
     pendingTimerCount: () => timers.size,

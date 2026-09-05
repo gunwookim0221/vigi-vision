@@ -1543,12 +1543,17 @@ class Phase7E1CExecutor:
     acquirer: CommonSessionAcquirer
 
     @contextmanager
-    def invocation(self, request: CommonSessionRequest) -> Generator[Phase7EInvocation]:
+    def invocation(
+        self,
+        request: CommonSessionRequest,
+        *,
+        cancellation: Callable[[], bool] | None = None,
+    ) -> Generator[Phase7EInvocation]:
         """Hold one OS owner and one cumulative budget across caller-composed 1C work."""
         budget = InvocationBudget(
             request.policy,
             self.acquirer.monotonic_clock,
-            self.acquirer.cancellation,
+            self.acquirer.cancellation if cancellation is None else cancellation,
         )
         budget.check()
         lock_timeout = budget.operation_timeout(

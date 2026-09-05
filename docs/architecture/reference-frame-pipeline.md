@@ -271,6 +271,9 @@ The reference-frame API is a local FastAPI application served by uvicorn.
 | POST | `/api/v1/reference-frames` | Create or resolve a single reference frame |
 | GET | `/api/v1/reference-frames/{resource_id}/image` | Retrieve a durable JPEG |
 | POST | `/api/v1/reference-frame-candidate-sets` | Create or reuse bounded candidates |
+| POST/GET | `/api/v1/investigation-confirmations[...]` | Confirm, reopen, or explicitly reconfirm Phase 6 authority |
+| POST | `/api/v1/recording-searches` | Validate and asynchronously accept one confirmed Phase 7E search |
+| GET | `/api/v1/recording-searches/{investigation_id}/{run_id}` | Read safe Phase 7E/Phase 8 status without mutation |
 
 ### Concurrency
 
@@ -328,6 +331,12 @@ installed by
   confirmation/reconfirmation persists the reviewed candidate, ROI, and
   investigation facts; pre-confirmation selection and draft state remain
   browser-memory only.
-- The shell has no caller for the Phase 7E execution boundary. Search remains
-  CLI-owned, the Phase 7E HTTP POST is intentionally disabled, and no browser
-  status/result or Phase 8 review-media surface is present.
+- After strict schema-3 confirmation, the shell exposes one labeled search-end
+  input and explicit start action. It submits only the confirmation ID, local
+  whole-second end, and UUIDv4 request ID; it cannot author ROI, frame, channel,
+  timezone, manifest, run, media, classifier, or credential facts.
+- HTTP acceptance uses one bounded worker and the same public execution service
+  as the CLI. The shell polls the read-only status route every two seconds,
+  stops at terminal/teardown/45-minute client bounds, and can reconstruct a run
+  from safe URL identifiers after reload.
+- No Phase 8 review-media or deletion surface is present.

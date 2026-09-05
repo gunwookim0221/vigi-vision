@@ -1,0 +1,32 @@
+.recording-search-panel {
+  display: grid;
+  gap: 1rem;
+  scroll-margin-block-start: 1rem;
+}
+
+.recording-search-panel[hidden],
+.recording-search-result[hidden] {
+  display: none;
+}
+
+.recording-search-facts {
+  margin: 0;
+}
+
+.recording-search-field {
+  max-width: 32rem;
+}
+
+.recording-search-result {
+  border-left: 0.25rem solid var(--color-accent, #2563eb);
+  padding: 0.75rem 1rem;
+}
+
+.recording-search-result h3,
+.recording-search-result p {
+  margin-block: 0 0.4rem;
+}
+
+html[data-restored-investigation="true"] [data-candidate-workflow] {
+  display: none !important;
+}

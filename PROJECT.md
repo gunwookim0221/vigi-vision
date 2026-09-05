@@ -216,9 +216,10 @@ snapshot from indexed schema-2/3 evidence, reloads the post-D1 schema-3
 manifest under the mutation boundary, persists a validated D1 reconstruction
 envelope for FOUND, and publishes only after strict readback; a post-commit
 readback failure never downgrades schema 4. Phase 7E-2 public CLI/projection
-integration is implemented locally: the documented synchronous search/status/
-handoff/deletion commands, CLI-only HTTP execution boundary, strict status
-projection, atomic closed-membership Phase 8 source-clip package, and durable
+integration and the first browser execution slice are implemented locally: the
+documented synchronous search/status/handoff/deletion commands, strict
+asynchronous HTTP start boundary, browser status/result projection, atomic
+closed-membership Phase 8 source-clip package, and durable
 two-media `READY`/`DELETING`/`DELETED` lifecycle are available. The source clip
 is generated locally only from the strictly verified retained common-session
 MP4; its repository-owned operational record binds the final publication-time
@@ -285,17 +286,15 @@ capability.
    feedback, ordered thumbnails, transient exactly-one selection, and one
    source-pixel ROI that can be moved, resized, reset, recreated, and edited
    with keyboard input. Preserve the Phase 5 assisted-ROI boundaries and the
-   Phase 6-2/6C durable confirmation/reconfirmation boundary. The next product
-   priority is the smallest user-reachable vertical slice: make the selected
-   candidate/ROI handoff explicit, collect the Phase 7 search end, connect the
-   confirmed schema-3 input to an approved execution boundary, and show status
-   and terminal results. Resolve the browser-execution contract before adding
-   a caller because the current HTTP POST is intentionally CLI-only. Keep
-   physical desktop/mobile acceptance and real-NVR Stage 2 validation behind
-   that workflow slice.
-6. Preserve the implemented Phase 7E-1A through 1D and 7E-2 foundation, then
-   prepare 7E-3 Stage 2 only after the confirmed user-workflow slice is
-   reachable: 7E-1A owns the 26 request-relative identity families,
+   Phase 6-2/6C durable confirmation/reconfirmation boundary and the first
+   Phase 7E browser slice. That slice reloads only a strict schema-3
+   confirmation, accepts one bounded search end, starts the shared production
+   service asynchronously, and polls the read-only safe status projection.
+   Keep physical desktop/mobile acceptance and real-NVR Stage 2 validation as
+   the next gate.
+6. Preserve the implemented Phase 7E-1A through 1D, 7E-2, and confirmed
+   browser workflow foundation, then run Phase 7E-3 Stage 2 against a
+   human-labeled real-NVR scenario: 7E-1A owns the 26 request-relative identity families,
    search/classifier/media policies, exact
    schema-5/6 matrices, schema dispatch, vectors, and pure validation; 7E-1B owns pre-acquisition schema 5, the zero-evidence
    schema-6 transition, incremental admission, and strict reopen; 7E-1C owns one
@@ -304,8 +303,9 @@ capability.
    the Phase 7E C1 planning adapter with `S` and the shared explicit
    `BACKWARD_FROM_END` support mode (legacy C1/C2 remains default `FORWARD`),
    C2/D1/D2, complete source reconstruction, immutable schema 7, and Phase 7
-   status; 7E-2 owns the synchronous CLI, disabled POST, cleanup, and the
-   separate Phase 8 clip/handoff/retry/deletion repository; 7E-3 owns bounded
+   status; 7E-2 owns the synchronous CLI, asynchronous browser POST, bounded
+   worker/startup recovery, cleanup, and the separate Phase 8
+   clip/handoff/retry/deletion repository; 7E-3 owns bounded
    real-NVR acceptance and fault injection. Preserve the 600-second search
    ceiling, 2,520-second invocation ceiling, one session/segment, schemas 1–4,
    Phase 6 immutability, and the rule that operational failure cannot become

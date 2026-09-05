@@ -217,5 +217,35 @@ def test_web_ui_exposes_the_phase6_confirmation_surface_safely() -> None:
     assert "innerHTML" not in script.text
 
 
+def test_web_ui_exposes_the_phase7e_search_surface_safely() -> None:
+    client = _client()
+
+    page = client.get("/")
+    script = client.get("/static/recording-search.js")
+
+    assert page.status_code == 200
+    assert 'id="recording-search-panel"' in page.text
+    assert 'id="recording-search-confirmed-time"' in page.text
+    assert 'id="recording-search-timezone"' in page.text
+    assert 'id="recording-search-end"' in page.text
+    assert 'id="recording-search-start"' in page.text
+    assert 'id="recording-search-status"' in page.text
+    assert 'aria-live="polite"' in page.text
+    assert script.status_code == 200
+    assert 'fetch("/api/v1/recording-searches"' in script.text
+    assert "request_id" in script.text
+    assert "search_end" in script.text
+    assert "innerHTML" not in script.text
+
+
+def test_web_ui_marks_restored_startup_before_candidate_initialization() -> None:
+    page = _client().get("/")
+
+    assert page.status_code == 200
+    assert "dataset.restoredInvestigation" in page.text
+    assert "data-candidate-workflow" in page.text
+    assert "data-candidate-workflow] {" in _client().get("/static/recording-search.css").text
+
+
 def _client() -> TestClient:
     return TestClient(create_reference_frame_app(UnusedExecutor(), UnusedResources()))

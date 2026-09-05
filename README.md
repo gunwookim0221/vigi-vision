@@ -275,6 +275,16 @@ now owns the separate durable confirmation/reconfirmation boundary: the
 reviewed candidate, source-pixel ROI, channel, reference time, timezone, and
 investigation identity are persisted only after explicit confirmation;
 candidate-set and pre-confirmation draft state remain intentionally transient.
+After a schema-3 confirmation, the same page shows the confirmed investigation
+boundary and timezone, accepts an explicit whole-second search end no more than
+600 seconds later, and starts Phase 7E through `POST /api/v1/recording-searches`.
+The browser sends only `investigation_id`, `search_end`, and a lowercase UUIDv4
+`request_id`; the server strictly reopens Phase 6 and reconstructs channel,
+timezone, reference-frame, and ROI authority. Acceptance is HTTP `202`, and the
+page polls the returned read-only status URL every two seconds until a safe
+terminal result. The investigation and run IDs are kept in the loopback URL so
+a reload reopens confirmation and status from the server. This slice does not
+present Phase 8 media, delete recordings, or make Phase 9 judgments.
 
 After selecting a usable candidate, choose **Tap to suggest ROI** to enter an
 explicit assisted mode. A primary mouse, touch, or pen tap inside the displayed

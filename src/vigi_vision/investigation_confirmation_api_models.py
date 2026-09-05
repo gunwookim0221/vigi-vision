@@ -107,6 +107,7 @@ class InvestigationConfirmationSummaryResponse(BaseModel):
     candidate_offset_seconds: StrictInt = Field(ge=-300, le=300)
     reference_frame_resource_id: StrictStr
     requested_time_utc: datetime
+    source_timezone: StrictStr
     timing: InvestigationConfirmationTimingResponse
     source_width: StrictInt = Field(gt=0)
     source_height: StrictInt = Field(gt=0)
@@ -158,6 +159,7 @@ def _response_from_manifest(
             candidate_offset_seconds=confirmation.candidate_offset_seconds,
             reference_frame_resource_id=reference.resource_id,
             requested_time_utc=reference.requested_time_utc,
+            source_timezone=manifest.source_timezone,
             timing=InvestigationConfirmationTimingResponse(
                 estimated_source_time_utc=timing.estimated_source_time_utc,
                 timing_precision_status=timing.timing_precision_status,

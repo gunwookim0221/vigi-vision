@@ -545,4 +545,12 @@ channelIdInput.addEventListener("change", () => {
 });
 window.vigiVisionReferenceFrameCandidates = Object.freeze({ invalidate: invalidateCandidateRequest });
 window.vigiVisionReferenceFrameChannels = Object.freeze({ refresh: loadChannels });
-void loadChannels();
+let restoredInvestigation = null;
+try {
+  restoredInvestigation = new URL(window.location.href).searchParams.get("investigation_id");
+} catch (_caught) {
+  restoredInvestigation = null;
+}
+if (!/^object-disappearance-v3-ch[1-9][0-9]*-[0-9]{8}T[0-9]{6}Z$/.test(restoredInvestigation ?? "")) {
+  void loadChannels();
+}

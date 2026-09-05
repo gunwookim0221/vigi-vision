@@ -33,6 +33,7 @@
     "candidate_offset_seconds",
     "reference_frame_resource_id",
     "requested_time_utc",
+    "source_timezone",
     "timing",
     "source_width",
     "source_height",
@@ -266,6 +267,7 @@
       && confirmation?.candidate_offset_seconds === submitted.candidateOffsetSeconds
       && confirmation?.reference_frame_resource_id === submitted.resourceId
       && sameUtcTimestamp(confirmation?.requested_time_utc, submitted.candidateRequestedTimeUtc)
+      && confirmation?.source_timezone === submitted.sourceTimezone
       && sameUtcTimestamp(submitted.frameRequestedTimeUtc, submitted.candidateRequestedTimeUtc)
       && confirmation?.source_width === submitted.sourceWidth
       && confirmation?.source_height === submitted.sourceHeight
@@ -310,6 +312,7 @@
       && validPositive(confirmation.source_width) && confirmation.source_width === value.frame.image.width
       && validPositive(confirmation.source_height) && confirmation.source_height === value.frame.image.height
       && sameUtcTimestamp(confirmation.requested_time_utc, value.candidate.candidate_requested_time_utc)
+      && confirmation.source_timezone === value.request.source_timezone
       && hasExactKeys(confirmation.timing, TIMING_KEYS)
       && (confirmation.timing.estimated_source_time_utc === null || validUtcTimestamp(confirmation.timing.estimated_source_time_utc))
       && ALLOWED_TIMING_PRECISION.has(confirmation.timing.timing_precision_status)
@@ -398,6 +401,27 @@
       payload.confirmation.roi.provenance,
     );
     displayConfirmed(payload);
+    if (payload.schema_version === 3) {
+      const anchorTimeUtc = new Date(
+        new Date(payload.confirmation.requested_time_utc).getTime()
+          - payload.confirmation.candidate_offset_seconds * 1000,
+      ).toISOString().replace(".000Z", "Z");
+      try {
+        const location = new URL(window.location.href);
+        location.searchParams.set("investigation_id", payload.investigation_id);
+        window.history.replaceState(null, "", location);
+      } catch (_caught) {
+        // A durable confirmation still succeeds when URL history is unavailable.
+      }
+      window.dispatchEvent(new CustomEvent("vigi:investigation-confirmed", {
+        detail: Object.freeze({
+          investigationId: payload.investigation_id,
+          anchorTimeUtc,
+          sourceTimezone: payload.confirmation.source_timezone,
+          schemaVersion: payload.schema_version,
+        }),
+      }));
+    }
   }
 
   function safeFailure(code, message = ERROR_MESSAGES[code] ?? ERROR_MESSAGES.confirmation_unavailable) {
@@ -600,6 +624,15 @@
 
   action.addEventListener("click", confirm);
   reconfirmAction.addEventListener("click", reconfirm);
-  window.vigiVisionReferenceFrameConfirmation = Object.freeze({ getState: () => ({ phase, locked, submitting: activeSubmission !== null || reconfirming, investigationId: currentResult?.investigation_id ?? null }), refresh });
+  window.vigiVisionReferenceFrameConfirmation = Object.freeze({
+    getState: () => ({
+      phase,
+      locked,
+      submitting: activeSubmission !== null || reconfirming,
+      investigationId: currentResult?.investigation_id ?? null,
+      sourceTimezone: currentResult?.confirmation?.source_timezone ?? null,
+    }),
+    refresh,
+  });
   void refresh();
 })();

@@ -9,6 +9,9 @@ prove that production VIGI replay cannot supply authoritative frame UTC but can
 sustain one common replay/decode session for the bounded MVP. The 7E-1C
 common-session acquisition/local frame-admission, 7E-1D terminal schema-7
 orchestration, and 7E-2 CLI/projection/retention boundaries are implemented.
+The first browser slice adds a strict HTTP `202` start and read-only polling
+surface over that same public service; it introduces no new search schema or
+repository.
 Phase 7E-2 Correction B now runs production B4 computation behind a bounded
 Windows-spawn child-process boundary: the parent retains authority, timeout,
 cancellation, reaping, and evidence admission, while late child output is
@@ -106,11 +109,17 @@ from corruption. Terminal `DELETED` requires a final closed-membership proof;
 foreign name reuse is preserved and retains or restores `DELETING` instead of
 publishing a false success.
 
-Production execution remains synchronous and CLI-only. The existing execution
-POST validates its request and returns HTTP 503
-`recording_search_execution_requires_cli` with zero side effects. No worker,
-lease, takeover, resume, frontend, Phase 8 executor, or Phase 9 behavior is
-authorized. The internal Phase 7E B4 child is bounded, single-use, and
+Production CLI execution remains synchronous. The browser POST accepts exactly
+`investigation_id`, local whole-second `search_end`, and canonical lowercase
+UUIDv4 `request_id`; strict Phase 6 reopen supplies every server-owned fact.
+The UUID deterministically derives the run ID, making exact retries compatible
+and conflicting reuse rejectable. One fixed single-worker executor provides
+prompt HTTP `202` acceptance and feeds cancellation into the existing
+invocation-wide budget. The per-investigation OS lock remains execution
+authority. GET never recovers or mutates; bounded server startup interrupts
+unowned RUNNING schemas and never resumes abandoned work. There is no lease,
+takeover, Phase 8 executor/UI, or Phase 9 behavior. The internal Phase 7E B4
+child is bounded, single-use, and
 persistence-neutral. Implementation order is 7E-1A identities/models/matrices/validation,
 1B schema-5/6 persistence, 1C one-session media plus exact logical-target frame
 selection and A2/B4 adapters, 1D the Phase 7E-specific C1 planner adaptation
@@ -136,6 +145,8 @@ families:
    explicitly create a new run with a new ID and directory.
 7. Evidence from a prior failed or interrupted run is never silently merged
    into a new run.
+8. HTTP uses one bounded process-local worker and a 64-entry request ledger;
+   the durable schemas, not the ledger, remain restart authority.
 
 The following search-policy description records the implemented strict
 schemas 1–4 path. For schemas 5–7, the Phase 7E request-relative amendment and

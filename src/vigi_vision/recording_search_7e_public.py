@@ -16,6 +16,13 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, StrictStr
 
+from vigi_vision.investigation_confirmation_models import (
+    ConfirmationArtifactError,
+    ConfirmationCorruptError,
+    ConfirmedInputInvalidError,
+    InvestigationConfirmationNotFoundError,
+    LegacyInvestigationError,
+)
 from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
 from vigi_vision.recording_search_7e_1c import (
     CommonSessionAcquirer,
@@ -37,6 +44,7 @@ from vigi_vision.recording_search_7e_phase8 import (
     Phase8LifecycleError,
 )
 from vigi_vision.recording_search_7e_repository import (
+    Phase7EConflictError,
     Phase7ECorruptError,
     Phase7EInProgressError,
     Phase7ENotFoundError,
@@ -59,6 +67,31 @@ class Phase7EPublicError(RuntimeError):
 
 
 _MAX_SEARCH_SECONDS = 600
+_MAX_STARTUP_RECOVERY_RUNS = 1024
+
+
+def _bounded_recovery_candidates(root: Path) -> list[tuple[str, str]]:
+    """Collect run identities without allowing an unbounded startup walk."""
+    candidates: list[tuple[str, str]] = []
+    investigation_entries = 0
+    run_entries = 0
+    for investigation in root.iterdir():
+        investigation_entries += 1
+        if investigation_entries > _MAX_STARTUP_RECOVERY_RUNS:
+            raise Phase7EPublicError("recovery_capacity_exceeded")
+        if (
+            investigation.name.startswith(".")
+            or investigation.is_symlink()
+            or not investigation.is_dir()
+        ):
+            continue
+        for run in investigation.iterdir():
+            run_entries += 1
+            if run_entries > _MAX_STARTUP_RECOVERY_RUNS:
+                raise Phase7EPublicError("recovery_capacity_exceeded")
+            if not run.is_symlink() and run.is_dir():
+                candidates.append((investigation.name, run.name))
+    return candidates
 
 
 class StrictRequestModel(BaseModel):
@@ -73,6 +106,16 @@ class Phase7EPublicRequest(StrictRequestModel):
     investigation_id: StrictStr
     search_end_time_text: StrictStr
     source_timezone: StrictStr
+
+
+@dataclass(frozen=True, slots=True)
+class Phase7EPreparedRequest:
+    """Server-reconstructed execution facts for one strict public request."""
+
+    request: CommonSessionRequest
+    schema5: StrictIdentityEnvelope
+    base_records: tuple[StrictIdentityEnvelope, ...]
+    coarse_targets: tuple[StrictIdentityEnvelope, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,29 +162,86 @@ class Phase7EPublicService:
         create_phase8_handoff: bool = False,
     ) -> Phase7EPublicStatus:
         """Execute one bounded synchronous search and optionally persist handoff."""
+        try:
+            prepared = self.prepare(
+                request.investigation_id,
+                request.search_end_time_text,
+                request.source_timezone,
+                run_id=f"search-run-{token_hex(16)}",
+            )
+        except Phase7EPublicError as error:
+            if error.code in {
+                "investigation_not_found",
+                "reconfirmation_required",
+                "confirmation_corrupt",
+                "confirmation_unavailable",
+            }:
+                raise Phase7EPublicError("baseline_unavailable") from error
+            raise
+        return self.execute_prepared(
+            prepared,
+            create_phase8_handoff=create_phase8_handoff,
+        )
+
+    def prepare_http(
+        self,
+        investigation_id: str,
+        search_end: str,
+        request_id: str,
+    ) -> Phase7EPreparedRequest:
+        """Reconstruct all server-owned facts for one browser start request."""
+        return self.prepare(
+            investigation_id,
+            search_end,
+            None,
+            run_id=f"search-run-{request_id.replace('-', '')}",
+        )
+
+    def prepare(
+        self,
+        investigation_id: str,
+        search_end_time_text: str,
+        source_timezone: str | None,
+        *,
+        run_id: str,
+    ) -> Phase7EPreparedRequest:
+        """Strictly reopen Phase 6 and build the deterministic Phase 7E plan."""
         if self.classifier is None or self.local_decoder is None:
             raise Phase7EPublicError("recording_search_execution_unavailable")
         try:
-            confirmed = self.confirmation_service.load_confirmed(request.investigation_id)
+            confirmed = self.confirmation_service.load_confirmed(investigation_id)
+        except InvestigationConfirmationNotFoundError as error:
+            raise Phase7EPublicError("investigation_not_found") from error
+        except LegacyInvestigationError as error:
+            raise Phase7EPublicError("reconfirmation_required") from error
+        except (
+            ConfirmationCorruptError,
+            ConfirmationArtifactError,
+            ConfirmedInputInvalidError,
+        ) as error:
+            raise Phase7EPublicError("confirmation_corrupt") from error
         except Exception as error:
-            raise Phase7EPublicError("baseline_unavailable") from error
-        if request.source_timezone != confirmed.source_timezone:
+            raise Phase7EPublicError("confirmation_unavailable") from error
+        if source_timezone is not None and source_timezone != confirmed.source_timezone:
             raise Phase7EPublicError("invalid_request")
         try:
             end = parse_reference_frame_request(
                 channel_id=confirmed.channel_id,
-                requested_time_text=request.search_end_time_text,
-                source_timezone=request.source_timezone,
+                requested_time_text=search_end_time_text,
+                source_timezone=confirmed.source_timezone,
                 now_utc=self.now_utc(),
             ).requested_time_utc
-            duration = int((end - confirmed.anchor_time_utc).total_seconds())
+            duration_seconds = (end - confirmed.anchor_time_utc).total_seconds()
         except Exception as error:
             raise Phase7EPublicError("invalid_request") from error
-        if duration <= 0 or duration > 600:
+        if (
+            duration_seconds != int(duration_seconds)
+            or duration_seconds <= 0
+            or duration_seconds > _MAX_SEARCH_SECONDS
+        ):
             raise Phase7EPublicError("invalid_request")
-        run_id = f"search-run-{token_hex(16)}"
         request_domain = CommonSessionRequest(
-            request.investigation_id,
+            investigation_id,
             run_id,
             confirmed.channel_id,
             confirmed.anchor_time_utc,
@@ -163,19 +263,79 @@ class Phase7EPublicService:
             },
         )
         base_records = (self.policy, bundle.plan, *bundle.coarse_targets)
-        with self.executor.invocation(request_domain) as invocation:
-            admitted = self.executor.execute(
-                request_domain,
-                schema5,
-                base_records,
-                self.classifier_policy,
-                bundle.coarse_targets,
-                invocation=invocation,
+        return Phase7EPreparedRequest(
+            request_domain,
+            schema5,
+            base_records,
+            tuple(bundle.coarse_targets),
+        )
+
+    def resolve_existing(self, prepared: Phase7EPreparedRequest) -> Phase7EPublicStatus | None:
+        """Resolve a durable retry, interrupting only an unowned active predecessor."""
+        request = prepared.request
+        try:
+            self.repository.ensure_root()
+            run = self.repository.inspect_current_read_only(
+                request.investigation_id,
+                request.run_id,
             )
-            _ = Phase7E1DService(
-                self.repository,
-                local_evidence=self._local_evidence(),
-            ).execute(invocation, admitted.acquisition)
+        except Phase7ENotFoundError:
+            return None
+        except Phase7EInProgressError as error:
+            raise Phase7EPublicError("already_running") from error
+        except Phase7ECorruptError as error:
+            raise Phase7EPublicError("search_run_corrupt") from error
+        schema5 = (
+            run.manifest
+            if run.is_schema5
+            else next(
+                (record for record in run.records if record.family == "schema5-manifest"),
+                None,
+            )
+        )
+        if schema5 is None or schema5.identity != prepared.schema5.identity:
+            raise Phase7EPublicError("request_conflict")
+        if run.state.run_state == "RUNNING":
+            try:
+                _ = self.repository.recover_active(request.investigation_id, request.run_id)
+            except Phase7EInProgressError as error:
+                raise Phase7EPublicError("already_running") from error
+            except Phase7ECorruptError as error:
+                raise Phase7EPublicError("search_run_corrupt") from error
+        return self.status(request.investigation_id, request.run_id)
+
+    def execute_prepared(
+        self,
+        prepared: Phase7EPreparedRequest,
+        *,
+        cancellation: Callable[[], bool] | None = None,
+        create_phase8_handoff: bool = False,
+    ) -> Phase7EPublicStatus:
+        """Execute one already validated request under one cancellable invocation."""
+        request_domain = prepared.request
+        try:
+            with self.executor.invocation(
+                request_domain,
+                cancellation=cancellation,
+            ) as invocation:
+                admitted = self.executor.execute(
+                    request_domain,
+                    prepared.schema5,
+                    prepared.base_records,
+                    self.classifier_policy,
+                    prepared.coarse_targets,
+                    invocation=invocation,
+                )
+                _ = Phase7E1DService(
+                    self.repository,
+                    local_evidence=self._local_evidence(),
+                ).execute(invocation, admitted.acquisition)
+        except Phase7EInProgressError as error:
+            raise Phase7EPublicError("already_running") from error
+        except Phase7EConflictError as error:
+            raise Phase7EPublicError("request_conflict") from error
+        except Phase7ECorruptError as error:
+            raise Phase7EPublicError("search_run_corrupt") from error
         phase8_status: tuple[str | None, str | None] = (None, None)
         if create_phase8_handoff:
             self.create_phase8_handoff(
@@ -184,7 +344,11 @@ class Phase7EPublicService:
             )
             phase8_status = ("READY", None)
         return Phase7EPublicStatus(
-            read_phase7_status(self.repository, request_domain.investigation_id, run_id),
+            read_phase7_status(
+                self.repository,
+                request_domain.investigation_id,
+                request_domain.run_id,
+            ),
             phase8_status[0],
             phase8_status[1],
         )
@@ -199,6 +363,26 @@ class Phase7EPublicService:
                 run = None
         phase8, reason = self.phase8_repository.status(run, investigation_id, run_id)
         return Phase7EPublicStatus(phase7, phase8, reason)
+
+    def recover_abandoned(self) -> int:
+        """Interrupt bounded, strictly reopened active runs left by a prior process."""
+        try:
+            self.repository.ensure_root()
+            candidates = _bounded_recovery_candidates(self.repository.root)
+        except OSError as error:
+            raise Phase7EPublicError("recovery_unavailable") from error
+        recovered = 0
+        for investigation_id, run_id in candidates:
+            try:
+                run = self.repository.inspect_current_read_only(investigation_id, run_id)
+                if run.is_schema7 or run.state.run_state != "RUNNING":
+                    continue
+                interrupted = self.repository.recover_active(investigation_id, run_id)
+                if interrupted.state.run_state == "INTERRUPTED":
+                    recovered += 1
+            except (Phase7ENotFoundError, Phase7EInProgressError, Phase7ECorruptError):
+                continue
+        return recovered
 
     def create_phase8_handoff(self, investigation_id: str, run_id: str) -> StrictIdentityEnvelope:
         """Create/reuse a request from strictly reopened terminal evidence."""
@@ -463,6 +647,7 @@ def _classifier_payload() -> dict[str, object]:
 
 
 __all__ = [
+    "Phase7EPreparedRequest",
     "Phase7EPublicError",
     "Phase7EPublicRequest",
     "Phase7EPublicService",

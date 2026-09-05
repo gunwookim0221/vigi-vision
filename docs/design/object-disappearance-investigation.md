@@ -122,14 +122,13 @@ Existing OpenAI profile analysis and business reports remain separate from
 this proposed workflow. They must not be treated as an implementation of
 object-presence or disappearance classification.
 
-## Capabilities not yet implemented
+## Capabilities and remaining exclusions
 
-The repository does **not** currently provide:
-
-- a browser caller that creates and executes the exact `Phase7EPublicRequest`;
-- a browser status/result surface for the CLI-owned Phase 7E run;
-- Phase 8 boundary images, evidence timeline, or review clip; or
-- a Phase 9 operator review surface for recording-search results.
+The repository now provides the first browser caller for confirmed schema-3
+investigations: it collects one bounded search end, starts the shared Phase 7E
+service through HTTP `202`, and polls a safe read-only status/result projection.
+It does **not** currently provide Phase 8 boundary images, evidence timeline or
+review clip, or a Phase 9 operator review surface.
 
 Phase 7B now provides a bounded single-probe classifier, deterministic outcomes,
 schema-3 observation publication, and strict reopening. Those outcomes describe
@@ -365,12 +364,14 @@ recording `ABSENT` cannot establish automatic `FOUND`; at least one recording
 Otherwise the public outcome is non-FOUND `INCONCLUSIVE` with
 `BASELINE_ONLY_LOWER_BOUND` and human review is required.
 
-Execution will be one synchronous local `search-recordings` CLI invocation that
-retains the existing process-owned handle through terminalization. The existing
-GET status stays read-only; the existing POST will return a fixed HTTP 503 and
-create no run until a separately designed HTTP executor exists. No Phase 7
-frontend, background worker, lease, takeover, or resume behavior is part of the
-approved direction.
+Execution uses the same `Phase7EPublicService` for the synchronous local
+`search-recordings` CLI and the asynchronous browser start. HTTP admission uses
+one fixed single-worker executor, returns before replay begins, and retains the
+existing process-owned handle through terminalization. GET status stays
+read-only. Exact request-ID duplicates reuse the same derived run identity;
+conflicting or concurrent starts do not create overlapping work. Startup marks
+strictly reopened, unowned RUNNING schemas interrupted and never resumes their
+decode or classification work. There is no lease or takeover behavior.
 
 The selected comparator uses the existing verified EfficientSAM-Ti point-mask
 path plus aligned source-ROI mask IoU and mean-centered luma correlation. Its

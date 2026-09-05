@@ -233,6 +233,7 @@ def test_confirmation_api_creates_and_retrieves_safe_schema_three_result(tmp_pat
     assert payload.confirmation.channel_id == 1
     assert payload.confirmation.reference_frame_resource_id == context.resource_id
     assert payload.confirmation.requested_time_utc.isoformat() == "2026-07-20T03:34:18+00:00"
+    assert payload.confirmation.source_timezone == "Asia/Seoul"
     assert payload.confirmation.timing.timing_precision_status.value == "measured_clip_relative"
     assert payload.confirmation.roi.coordinate_space == "source_pixels"
     assert str(tmp_path) not in response.text

@@ -12,6 +12,19 @@
     <link rel="stylesheet" href="/static/reference-frame-candidates.css">
     <link rel="stylesheet" href="/static/reference-frame-form.css">
     <link rel="stylesheet" href="/static/reference-frame-roi.css">
+    <link rel="stylesheet" href="/static/recording-search.css">
+    <script>
+      (() => {
+        try {
+          const investigationId = new URL(window.location.href).searchParams.get("investigation_id");
+          if (/^object-disappearance-v3-ch[1-9][0-9]*-[0-9]{8}T[0-9]{6}Z$/.test(investigationId ?? "")) {
+            document.documentElement.dataset.restoredInvestigation = "true";
+          }
+        } catch (_caught) {
+          // Invalid startup URLs stay on the ordinary candidate workflow.
+        }
+      })();
+    </script>
     <script src="/static/reference-frame-form.js" defer></script>
     <script src="/static/reference-frame-selection.js" defer></script>
     <script src="/static/reference-frame-roi-geometry.js" defer></script>
@@ -22,6 +35,7 @@
     <script src="/static/reference-frame-roi-interaction.js" defer></script>
     <script src="/static/reference-frame-ui.js" defer></script>
     <script src="/static/reference-frame-confirmation.js" defer></script>
+    <script src="/static/recording-search.js" defer></script>
   </head>
   <body>
     <header class="site-header">
@@ -31,7 +45,7 @@
       </div>
     </header>
     <main class="content-limiter page-content">
-      <section class="intro" aria-labelledby="page-title">
+      <section id="candidate-intro" data-candidate-workflow class="intro" aria-labelledby="page-title">
         <p class="section-kicker">후보 검토</p>
         <h1 id="page-title">요청한 프레임 후보 생성</h1>
         <p>
@@ -40,7 +54,7 @@
         </p>
       </section>
 
-      <section class="panel" aria-labelledby="candidate-form-title">
+      <section id="candidate-request-panel" data-candidate-workflow class="panel" aria-labelledby="candidate-form-title">
         <div class="section-heading">
           <h2 id="candidate-form-title">요청 정보</h2>
           <p>첫 검토 단계에서는 기본 오프셋을 사용합니다.</p>
@@ -104,7 +118,7 @@
         </div>
       </section>
 
-      <section class="panel results-panel" aria-labelledby="candidate-results-title">
+      <section id="candidate-results-panel" data-candidate-workflow class="panel results-panel" aria-labelledby="candidate-results-title">
         <div class="section-heading">
           <h2 id="candidate-results-title">후보 결과</h2>
           <p>결과는 서버가 제공한 요청 순서로 표시됩니다.</p>
@@ -122,7 +136,7 @@
         </fieldset>
       </section>
 
-      <section class="panel selected-preview-panel" aria-labelledby="selected-preview-title">
+      <section id="selected-preview-panel" data-candidate-workflow class="panel selected-preview-panel" aria-labelledby="selected-preview-title">
         <div class="section-heading">
           <h2 id="selected-preview-title">선택한 후보</h2>
           <p>선택한 프레임에서 정보용 관심 영역(ROI)을 하나 그립니다.</p>
@@ -221,7 +235,7 @@
         </div>
       </section>
 
-      <section id="confirmation-panel" class="panel confirmation-panel" aria-labelledby="confirmation-title" hidden>
+      <section id="confirmation-panel" data-candidate-workflow class="panel confirmation-panel" aria-labelledby="confirmation-title" hidden>
         <div class="section-heading">
           <h2 id="confirmation-title">조사 확인</h2>
           <p>선택한 기준 프레임과 ROI를 검토한 뒤 서버에 한 번만 확인합니다.</p>
@@ -240,6 +254,30 @@
             <div class="candidate-fact"><dt>확인 시각 (KST)</dt><dd id="confirmation-confirmed-at" class="mono"></dd></div>
             <div class="candidate-fact"><dt>아티팩트 디렉터리</dt><dd id="confirmation-artifact" class="mono"></dd></div>
           </dl>
+        </div>
+      </section>
+
+      <section id="recording-search-panel" class="panel recording-search-panel" aria-labelledby="recording-search-title" hidden>
+        <div class="section-heading">
+          <h2 id="recording-search-title">녹화 기록 검색</h2>
+          <p>확인된 조사 시각 이후 최대 10분 범위에서 대상이 사라진 시점을 검색합니다.</p>
+        </div>
+        <dl class="candidate-facts recording-search-facts">
+          <div class="candidate-fact"><dt>확인된 조사 시각</dt><dd id="recording-search-confirmed-time" class="mono"></dd></div>
+          <div class="candidate-fact"><dt>원본 시간대</dt><dd id="recording-search-timezone" class="mono"></dd></div>
+        </dl>
+        <div class="field recording-search-field">
+          <label for="recording-search-end">검색 종료 날짜 및 시각</label>
+          <input id="recording-search-end" type="datetime-local" step="1" required aria-describedby="recording-search-hint recording-search-status">
+          <p id="recording-search-hint" class="field-hint">확인된 시각보다 늦고, 10분 이내이며, 미래가 아닌 시각을 입력하세요.</p>
+        </div>
+        <button id="recording-search-start" type="button" disabled>녹화 기록 검색 시작</button>
+        <p id="recording-search-status" class="request-status" role="status" aria-live="polite" aria-busy="false" tabindex="-1">확인된 조사가 필요합니다.</p>
+        <p id="recording-search-error" class="request-error" role="alert" tabindex="-1" hidden></p>
+        <div id="recording-search-result" class="recording-search-result" tabindex="-1" hidden>
+          <h3>검색 결과</h3>
+          <p id="recording-search-result-kind"></p>
+          <p id="recording-search-result-reason" class="field-hint"></p>
         </div>
       </section>
     </main>

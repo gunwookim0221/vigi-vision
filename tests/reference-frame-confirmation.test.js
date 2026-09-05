@@ -29,6 +29,7 @@ function confirmationResponse(overrides = {}) {
       candidate_offset_seconds: -10,
       reference_frame_resource_id: "resource--10",
       requested_time_utc: "2026-07-20T03:34:08Z",
+      source_timezone: "Asia/Seoul",
       timing: { estimated_source_time_utc: null, timing_precision_status: "measured_clip_relative" },
       source_width: 2560,
       source_height: 1440,

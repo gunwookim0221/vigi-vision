@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
 from anyio.to_thread import run_sync
 from fastapi import APIRouter, FastAPI, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 
+from vigi_vision.recording_search_7e_background import (
+    Phase7EBackgroundManager,
+    Phase7EStartReceipt,
+)
+from vigi_vision.recording_search_7e_public import Phase7EPublicError
 from vigi_vision.recording_search_a2_models import RecordingSearchManifestV2
 from vigi_vision.recording_search_d2_status import RecordingSearchStatusV4
 from vigi_vision.recording_search_models import (
@@ -78,13 +83,55 @@ class Phase7EStatusResponse(BaseModel):
     phase8_reason: str | None
 
 
+class Phase7EStartRequestBody(BaseModel):
+    """Closed browser start body containing no server-owned execution facts."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    investigation_id: StrictStr = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+    )
+    search_end: StrictStr = Field(pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
+    request_id: StrictStr = Field(
+        pattern=(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+            r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        )
+    )
+
+
+Phase7EStartStatus = Literal[
+    "ACCEPTED",
+    "RUNNING",
+    "FOUND",
+    "NOT_FOUND",
+    "INCONCLUSIVE",
+    "FAILED",
+    "INTERRUPTED",
+]
+
+
+class Phase7EStartResponse(BaseModel):
+    """Credential-free accepted or idempotently resolved start receipt."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    request_id: str
+    investigation_id: str
+    run_id: str
+    status: Phase7EStartStatus
+    status_url: str
+
+
 @dataclass(frozen=True, slots=True)
 class RecordingSearchApiDependencies:
     """Route dependencies."""
 
     service: RecordingSearchService | None
     limiter: anyio.CapacityLimiter
-    phase7e_service: Phase7EPublicService | None
+    phase7e_manager: Phase7EBackgroundManager | None
 
 
 def install_recording_search_routes(  # noqa: C901 - explicit legacy/Phase 7E dispatch.
@@ -95,15 +142,19 @@ def install_recording_search_routes(  # noqa: C901 - explicit legacy/Phase 7E di
     phase7e_service: Phase7EPublicService | None = None,
 ) -> None:
     """Install the recording-search start and status routes."""
-    dependencies = RecordingSearchApiDependencies(service, limiter, phase7e_service)
+    phase7e_manager = None if phase7e_service is None else Phase7EBackgroundManager(phase7e_service)
+    dependencies = RecordingSearchApiDependencies(
+        service,
+        limiter,
+        phase7e_manager,
+    )
     app.state.phase7e_recording_search = phase7e_service is not None
+    app.state.phase7e_background_manager = phase7e_manager
     router = APIRouter(prefix="/api/v1/recording-searches", tags=["recording-searches"])
 
-    async def start(
+    async def start_legacy(
         body: RecordingSearchRequestBody, response: Response
     ) -> RecordingSearchManifest | RecordingSearchManifestV2 | JSONResponse:
-        if dependencies.phase7e_service is not None:
-            return _phase7e_cli_only()
         if dependencies.service is None:
             return _unavailable()
         try:
@@ -125,15 +176,35 @@ def install_recording_search_routes(  # noqa: C901 - explicit legacy/Phase 7E di
         )
         return result.manifest
 
+    async def start_phase7e(
+        body: Phase7EStartRequestBody,
+    ) -> Phase7EStartResponse | JSONResponse:
+        manager = dependencies.phase7e_manager
+        if manager is None:
+            return _unavailable()
+        try:
+            receipt = await run_sync(
+                manager.start,
+                body.investigation_id,
+                body.search_end,
+                body.request_id,
+                limiter=dependencies.limiter,
+            )
+        except Phase7EPublicError as error:
+            return _phase7e_error_response(error)
+        except Exception:  # noqa: BLE001 - HTTP boundary redacts unexpected failures.
+            return _phase7e_error_response(Phase7EPublicError("internal_error"))
+        return _phase7e_start_response(receipt)
+
     async def get_status(  # noqa: PLR0911 - explicit legacy/Phase 7E status dispatch.
         investigation_id: str, search_run_id: str
     ) -> (
         RecordingSearchManifest | RecordingSearchManifestV2 | RecordingSearchStatusV4 | JSONResponse
     ):
-        if dependencies.phase7e_service is not None:
+        if dependencies.phase7e_manager is not None:
             try:
                 projected = await run_sync(
-                    dependencies.phase7e_service.status,
+                    dependencies.phase7e_manager.status,
                     investigation_id,
                     search_run_id,
                     limiter=dependencies.limiter,
@@ -167,13 +238,16 @@ def install_recording_search_routes(  # noqa: C901 - explicit legacy/Phase 7E di
 
     router.add_api_route(
         "",
-        start,
+        start_phase7e if phase7e_manager is not None else start_legacy,
         methods=["POST"],
-        response_model=RecordingSearchManifest
-        | RecordingSearchManifestV2
-        | RecordingSearchStatusV4
-        | Phase7EStatusResponse,
-        status_code=status.HTTP_201_CREATED,
+        response_model=(
+            Phase7EStartResponse
+            if phase7e_manager is not None
+            else RecordingSearchManifest | RecordingSearchManifestV2 | RecordingSearchStatusV4
+        ),
+        status_code=(
+            status.HTTP_202_ACCEPTED if phase7e_manager is not None else status.HTTP_201_CREATED
+        ),
         responses={
             status.HTTP_400_BAD_REQUEST: {"model": ReferenceFrameErrorResponse},
             status.HTTP_409_CONFLICT: {"model": ReferenceFrameErrorResponse},
@@ -185,10 +259,11 @@ def install_recording_search_routes(  # noqa: C901 - explicit legacy/Phase 7E di
         "/{investigation_id}/{search_run_id}",
         get_status,
         methods=["GET"],
-        response_model=RecordingSearchManifest
-        | RecordingSearchManifestV2
-        | RecordingSearchStatusV4
-        | Phase7EStatusResponse,
+        response_model=(
+            Phase7EStatusResponse
+            if phase7e_manager is not None
+            else RecordingSearchManifest | RecordingSearchManifestV2 | RecordingSearchStatusV4
+        ),
         status_code=status.HTTP_200_OK,
         responses={
             status.HTTP_404_NOT_FOUND: {"model": ReferenceFrameErrorResponse},
@@ -198,6 +273,9 @@ def install_recording_search_routes(  # noqa: C901 - explicit legacy/Phase 7E di
         },
     )
     app.include_router(router)
+    if phase7e_manager is not None:
+        app.router.add_event_handler("startup", phase7e_manager.recover_startup)
+        app.router.add_event_handler("shutdown", phase7e_manager.close)
 
 
 def _unavailable() -> JSONResponse:
@@ -208,12 +286,82 @@ def _unavailable() -> JSONResponse:
     ).response()
 
 
-def _phase7e_cli_only() -> JSONResponse:
-    return ReferenceFrameApiError(
-        status.HTTP_503_SERVICE_UNAVAILABLE,
-        "recording_search_execution_requires_cli",
-        "Recording-search execution is available only through the CLI.",
-    ).response()
+def _phase7e_start_response(receipt: Phase7EStartReceipt) -> Phase7EStartResponse:
+    return Phase7EStartResponse(
+        request_id=receipt.request_id,
+        investigation_id=receipt.investigation_id,
+        run_id=receipt.run_id,
+        status=cast("Phase7EStartStatus", receipt.status),
+        status_url=receipt.status_url,
+    )
+
+
+def _phase7e_error_response(error: Phase7EPublicError) -> JSONResponse:
+    specification = {
+        "invalid_request": (
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "invalid_recording_search_request",
+            "The recording-search request is invalid.",
+        ),
+        "investigation_not_found": (
+            status.HTTP_404_NOT_FOUND,
+            "investigation_not_found",
+            "The confirmed investigation was not found.",
+        ),
+        "reconfirmation_required": (
+            status.HTTP_409_CONFLICT,
+            "reconfirmation_required",
+            "Reconfirm this investigation before recording search.",
+        ),
+        "already_running": (
+            status.HTTP_409_CONFLICT,
+            "already_running",
+            "A recording-search run is already active.",
+        ),
+        "request_conflict": (
+            status.HTTP_409_CONFLICT,
+            "request_conflict",
+            "The request identifier is already bound to different search input.",
+        ),
+        "recording_search_execution_unavailable": (
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "recording_search_unavailable",
+            "Recording search is unavailable.",
+        ),
+        "confirmation_unavailable": (
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "confirmation_unavailable",
+            "The confirmed investigation could not be loaded.",
+        ),
+        "confirmation_corrupt": (
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "confirmation_corrupt",
+            "The confirmed investigation is invalid.",
+        ),
+        "search_run_corrupt": (
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "search_run_corrupt",
+            "The recording-search run is invalid.",
+        ),
+        "recovery_unavailable": (
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "recording_search_unavailable",
+            "Recording-search recovery is unavailable.",
+        ),
+        "recovery_capacity_exceeded": (
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "recording_search_unavailable",
+            "Recording-search recovery capacity was exceeded.",
+        ),
+    }.get(
+        error.code,
+        (
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "The recording-search operation could not be completed safely.",
+        ),
+    )
+    return ReferenceFrameApiError(*specification).response()
 
 
 def _already_running(search_run_id: str) -> JSONResponse:

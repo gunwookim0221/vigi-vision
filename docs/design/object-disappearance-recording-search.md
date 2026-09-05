@@ -1185,12 +1185,44 @@ interval, Phase 7 status/reason, Phase 8 status/reason, and limitations only. It
 never exposes paths, hostnames, credentials, URLs, commands, stderr, claims,
 staging, or exception text.
 
-`POST /api/v1/recording-searches` retains its strict existing request shape:
-`investigation_id`, `search_end_time_text`, and `source_timezone`, with unknown
-fields rejected. Malformed JSON is HTTP 400 `invalid_request`; structural or
-domain validation is HTTP 422 `invalid_recording_search_request`; every valid
-request is HTTP 503 `recording_search_execution_requires_cli` with zero service
-start, directory, manifest, media, lock, handle, or background side effect.
+`POST /api/v1/recording-searches` is the asynchronous browser start boundary.
+Its closed body contains exactly:
+
+```json
+{
+  "investigation_id": "object-disappearance-v3-ch1-20260720T033428Z",
+  "search_end": "2026-07-20T12:34:33",
+  "request_id": "12345678-1234-4234-8234-123456789abc"
+}
+```
+
+`search_end` is a canonical whole-second local timestamp with no offset; the
+server interprets it only through the strictly reopened Phase 6 timezone. The
+request ID is a canonical lowercase UUIDv4 and derives
+`search-run-<32-lowercase-hex>`. ROI, frame, channel, timezone, run, manifest,
+media, classifier, path, and credential fields are forbidden. Strict Phase 6
+reopen and 1–600-second forward-window validation happen before worker
+admission.
+
+New compatible work returns HTTP `202` with exactly `request_id`,
+`investigation_id`, derived `run_id`, `status`, and relative `status_url`.
+An exact request-ID/body retry reuses that receipt or durable run. Reusing a
+request ID with different semantics is HTTP 409 `request_conflict`; other live
+work is HTTP 409 `already_running`. Missing confirmation is 404
+`investigation_not_found`; schema-2 input is 409 `reconfirmation_required`;
+invalid bodies/windows are 422 `invalid_recording_search_request`; unavailable
+composition is 503 `recording_search_unavailable`; corrupt confirmation or run
+state is a fixed safe 500 category. Malformed JSON remains HTTP 400
+`invalid_request`. No response contains native errors, paths, credentials, SDK
+payloads, or internal manifests.
+
+The application owns one fixed one-worker executor and a bounded 64-entry
+request ledger; it has no unbounded queue. The worker calls the same
+`Phase7EPublicService` used by CLI, holds existing invocation ownership across
+1C/1D, and uses the same cumulative deadline and cancellation checks. Shutdown
+cancels and joins the worker. Startup scans at most 1,024 durable run
+directories, interrupts strictly reopened unowned RUNNING schemas, and never
+resumes decode/classification. Durable state wins over process-memory state.
 `GET /api/v1/recording-searches/{investigation_id}/{run_id}` is read-only and
 projects strict schema 1–4 legacy status or schema 5–7 Phase 7 status joined
 with the separate Phase 8 status.
@@ -1203,7 +1235,7 @@ with the separate Phase 8 status.
 | 7E-1B | Schema-5 pre-acquisition publication, schema-5→6 zero-evidence transition, incremental schema-6 manifests/children, strict reopen, staging and interruption handling. No NVR acquisition. |
 | 7E-1C | One replay/remux, `.media` ownership, ffprobe, common session, sparse/adaptive local decoding, the Phase 7E same-session selector (including logical-E strict-before mapping and duplicate/alias rejection), RGB24, persisted-frame A2/B4 adapters, and deadline propagation. |
 | 7E-1D | The Phase 7E C1 planner/composition adapter (`S` inclusion, logical `E`, explicit shared `BACKWARD_FROM_END` support mode, no clamp), C2/D1/D2 composition, complete source reconstruction, schema-7 atomic publication/reopen, and Phase 7 public status. Shared C1/C2 defaults to legacy `FORWARD`, schemas 1–4 remain unchanged, and this slice performs no Phase 8 mutation. |
-| 7E-2 | Synchronous CLI, POST 503, cleanup reserve, separate Phase 8 clip/request/retry repository, status join, and deletion command. |
+| 7E-2 | Synchronous CLI, asynchronous browser HTTP start/status, fixed worker and startup interruption recovery, cleanup reserve, separate Phase 8 clip/request/retry repository, status join, and deletion command. |
 | 7E-3 | Bounded real-NVR acceptance and local fault injection only after 1A–2 approval; Stage 1 acquisition passed, while Stage 2 terminal/human acceptance remains pending. |
 
 Dependency order is 1A → 1B → 1C → 1D → 2 → 3. Persistence precedes
@@ -1406,10 +1438,10 @@ users.
 
 ### Phase 7A-1 HTTP boundary
 
-This records the implemented pre-7E lifecycle boundary. Phase 7E-2 must retain
-GET but replace valid POST start with the fail-closed HTTP 503 contract above;
-after that change, the HTTP 201 behavior below is historical schemas 1-4 context
-and not an authorized production execution path.
+This records the implemented pre-7E lifecycle boundary. Phase 7E retains its
+read-only GET, while the HTTP 201 behavior below is historical schemas 1–4
+context and is not the current browser execution contract. The current strict
+HTTP `202` contract is specified above.
 
 The existing local FastAPI application exposes only the lifecycle boundary in this
 slice:
@@ -4234,13 +4266,14 @@ Phase 7E is split into the ordered 7E-1A, 7E-1B, 7E-1C, 7E-1D, 7E-2, and
 7E-3 gates defined in the normative Phase 7E section above. 7E-3 Stage 1 has
 passed the bounded acquisition/smoke gate against a real NVR; the result is
 limited to one validated recent replay and does not establish terminal search
-accuracy. Stage 2 may start only after the request-relative decoder/persistence
-path, synchronous CLI, and the human-input workflow have passed their reviews.
+accuracy. The request-relative decoder/persistence path, synchronous CLI, and
+human-input browser workflow now exist; Stage 2 remains the next separately
+authorized human-labeled real-NVR acceptance activity.
 Its bounded matrix must exercise the 300- and 600-second windows, one
 segment and touching-segment rejection, end-boundary selection, same-session
 PRESENT→supported-ABSENT, baseline-only lower bound, complete-grid NOT_FOUND,
 gaps/resets/duplicates, every blocking-operation timeout, interruption/crash,
-schema-7 immutability, Phase 8 clip/retry/deletion, disabled POST, legacy reopen,
+schema-7 immutability, Phase 8 clip/retry/deletion, asynchronous POST races, legacy reopen,
 and mixed-family rejection. Each case records public outcome, strict persisted
 evidence, cleanup, and a binary pass rule. A normal run must succeed after each
 controlled failure. Threshold tuning creates a named policy successor and never
