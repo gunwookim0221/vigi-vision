@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Protocol, final
 
 from vigi_vision.recording_search_7e_1d import Phase7EStatus
 from vigi_vision.recording_search_7e_public import (
+    Phase7EFailureDiagnostic,
     Phase7EPreparedRequest,
     Phase7EPublicError,
     Phase7EPublicStatus,
@@ -72,6 +73,7 @@ class _Job:
     cancellation: Event = field(default_factory=Event, repr=False)
     status: str = "ACCEPTED"
     error_code: str | None = None
+    failure_diagnostic: Phase7EFailureDiagnostic | None = None
     future: Future[None] | None = field(default=None, repr=False)
 
     @property
@@ -190,6 +192,23 @@ class Phase7EBackgroundManager:
                 )
             )
 
+    def pre_run_failure_diagnostic(
+        self,
+        investigation_id: str,
+        run_id: str,
+    ) -> Phase7EFailureDiagnostic | None:
+        """Return closed process-local context without changing public JSON."""
+        with self._lock:
+            job = next(
+                (
+                    candidate
+                    for candidate in self._jobs.values()
+                    if candidate.investigation_id == investigation_id and candidate.run_id == run_id
+                ),
+                None,
+            )
+            return None if job is None else job.failure_diagnostic
+
     def close(self) -> None:
         """Cancel the sole live job and wait for its bounded cleanup path."""
         with self._lock:
@@ -216,20 +235,47 @@ class Phase7EBackgroundManager:
             with self._lock:
                 job.status = result.phase7.status
                 job.error_code = result.phase7.reason_code
+                job.failure_diagnostic = None
         except Phase7EPublicError as error:
-            self._record_failure(job, error.code)
+            self._record_failure(
+                job,
+                error.diagnostic or _fallback_public_diagnostic(error.code),
+            )
         except Exception:  # noqa: BLE001 - worker state is a fixed safe projection.
-            self._record_failure(job, "internal_error")
+            self._record_failure(
+                job,
+                Phase7EFailureDiagnostic(
+                    "internal",
+                    "internal_error",
+                    "unexpected_exception",
+                    "unknown",
+                ),
+            )
         finally:
             self._recover_unexpected_running(job)
             with self._lock:
                 if self._active_request_id == job.request_id:
                     self._active_request_id = None
 
-    def _record_failure(self, job: _Job, code: str) -> None:
+    def _record_failure(
+        self,
+        job: _Job,
+        diagnostic: Phase7EFailureDiagnostic,
+    ) -> None:
         with self._lock:
-            job.status = "INTERRUPTED" if job.cancellation.is_set() else "FAILED"
-            job.error_code = code
+            if job.cancellation.is_set():
+                job.status = "INTERRUPTED"
+                job.error_code = "interrupted"
+                job.failure_diagnostic = Phase7EFailureDiagnostic(
+                    "invocation_input",
+                    "interrupted",
+                    "CommonSessionCancelledError",
+                    diagnostic.cleanup_outcome,
+                )
+            else:
+                job.status = "FAILED"
+                job.error_code = diagnostic.category
+                job.failure_diagnostic = diagnostic
 
     def _recover_unexpected_running(self, job: _Job) -> None:
         try:
@@ -241,6 +287,7 @@ class Phase7EBackgroundManager:
         with self._lock:
             job.status = current.phase7.status
             job.error_code = current.phase7.reason_code
+            job.failure_diagnostic = None
 
     def _remember(self, job: _Job) -> None:
         self._jobs[job.request_id] = job
@@ -258,6 +305,23 @@ class Phase7EBackgroundManager:
             if evictable_id is None:
                 break
             del self._jobs[evictable_id]
+
+
+def _fallback_public_diagnostic(code: str) -> Phase7EFailureDiagnostic:
+    """Classify a worker-raised public error that predates diagnostic context."""
+    if code in {_ALREADY_RUNNING, _CONFLICT}:
+        return Phase7EFailureDiagnostic(
+            "invocation_input",
+            code,
+            "Phase7EPublicError",
+            "not_required",
+        )
+    return Phase7EFailureDiagnostic(
+        "internal",
+        "internal_error",
+        "Phase7EPublicError",
+        "unknown",
+    )
 
 
 __all__ = ["Phase7EBackgroundManager", "Phase7EStartReceipt"]

@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from secrets import token_hex
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from pydantic import BaseModel, ConfigDict, StrictStr
 
@@ -23,9 +23,11 @@ from vigi_vision.investigation_confirmation_models import (
     InvestigationConfirmationNotFoundError,
     LegacyInvestigationError,
 )
+from vigi_vision.nvr import NvrRequestError
 from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
 from vigi_vision.recording_search_7e_1c import (
     CommonSessionAcquirer,
+    CommonSessionError,
     CommonSessionPolicy,
     CommonSessionRequest,
     FfmpegLocalDecoder,
@@ -33,7 +35,11 @@ from vigi_vision.recording_search_7e_1c import (
     Phase7E1CExecutor,
 )
 from vigi_vision.recording_search_7e_1d import (
+    Phase7E1DError,
     Phase7E1DService,
+    Phase7EAdapterError,
+    Phase7EIncompleteEvidenceError,
+    Phase7EOperationalEvidenceError,
     Phase7EStatus,
     read_phase7_status,
 )
@@ -48,8 +54,11 @@ from vigi_vision.recording_search_7e_repository import (
     Phase7ECorruptError,
     Phase7EInProgressError,
     Phase7ENotFoundError,
+    Phase7EReadbackError,
+    Phase7ERepositoryError,
     RecordingSearch7ERepository,
 )
+from vigi_vision.recording_search_7e_validation import Phase7EValidationError
 from vigi_vision.recording_search_b3_media import InMemoryRgbDecoder
 from vigi_vision.reference_frame_models import parse_reference_frame_request
 
@@ -58,16 +67,196 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+_FAILURE_BOUNDARY_BY_CATEGORY: Final = {
+    "invalid_request": "invocation_input",
+    "already_running": "invocation_input",
+    "request_conflict": "invocation_input",
+    "interrupted": "invocation_input",
+    "invocation_deadline_exhausted": "invocation_input",
+    "capacity_exhausted": "invocation_input",
+    "acquisition_failed": "recording_discovery",
+    "recording_unavailable": "recording_discovery",
+    "replay_timeout": "replay_acquisition",
+    "replay_authentication_failed": "replay_acquisition",
+    "replay_failed": "replay_acquisition",
+    "cleanup_failed": "replay_acquisition",
+    "media_probe_timeout": "media_validation",
+    "media_probe_failed": "media_validation",
+    "invalid_time_base": "decoder",
+    "missing_pts": "decoder",
+    "nonmonotonic_pts": "decoder",
+    "timestamp_reset": "decoder",
+    "recording_gap": "decoder",
+    "segment_boundary": "decoder",
+    "decoder_timeout": "decoder",
+    "decoder_failed": "decoder",
+    "classifier_timeout": "classifier",
+    "classification_failed": "classifier",
+    "invalid_classifier_result": "classifier",
+    "incomplete_evidence": "classifier",
+    "adapter_unknown_result": "classifier",
+    "publication_failed": "publication",
+    "readback_failed": "publication",
+    "search_run_corrupt": "publication",
+    "internal_error": "internal",
+}
+_SAFE_EXCEPTION_CLASSES: Final = frozenset(
+    {
+        "NvrRequestError",
+        "CommonSessionError",
+        "CommonSessionValidationError",
+        "CommonSessionRecordingUnavailableError",
+        "CommonSessionReplayTimeoutError",
+        "CommonSessionReplayError",
+        "CommonSessionReplayAuthenticationError",
+        "CommonSessionMediaError",
+        "CommonSessionMediaProbeTimeoutError",
+        "CommonSessionMissingPtsError",
+        "CommonSessionInvalidTimeBaseError",
+        "CommonSessionNonmonotonicPtsError",
+        "CommonSessionTimestampResetError",
+        "CommonSessionRecordingGapError",
+        "CommonSessionSegmentBoundaryError",
+        "CommonSessionDecoderTimeoutError",
+        "CommonSessionDecoderError",
+        "CommonSessionDeadlineError",
+        "CommonSessionCapacityError",
+        "CommonSessionCleanupError",
+        "CommonSessionCancelledError",
+        "CommonSessionPublicationError",
+        "CommonSessionReadbackError",
+        "Phase7E1DError",
+        "Phase7EIncompleteEvidenceError",
+        "Phase7EOperationalEvidenceError",
+        "Phase7EAdapterError",
+        "Phase7ERepositoryError",
+        "Phase7EReadbackError",
+        "Phase7ECorruptError",
+        "Phase7EValidationError",
+        "Phase7EPublicError",
+        "unexpected_exception",
+    }
+)
+_CLEANUP_OUTCOMES: Final = frozenset({"not_required", "no_failure_reported", "failed", "unknown"})
+_INVALID_FAILURE_DIAGNOSTIC: Final = "invalid failure diagnostic vocabulary"
+
+
+@dataclass(frozen=True, slots=True)
+class Phase7EFailureDiagnostic:
+    """Closed, credential-free process-local failure context."""
+
+    boundary: str
+    category: str
+    exception_class: str
+    cleanup_outcome: str
+
+    def __post_init__(self) -> None:
+        """Reject any value outside the fixed diagnostic vocabulary."""
+        if (
+            _FAILURE_BOUNDARY_BY_CATEGORY.get(self.category) != self.boundary
+            or self.exception_class not in _SAFE_EXCEPTION_CLASSES
+            or self.cleanup_outcome not in _CLEANUP_OUTCOMES
+        ):
+            raise ValueError(_INVALID_FAILURE_DIAGNOSTIC)
+
+    def as_dict(self) -> dict[str, str]:
+        """Return only the four approved non-secret fields."""
+        return {
+            "boundary": self.boundary,
+            "category": self.category,
+            "exception_class": self.exception_class,
+            "cleanup_outcome": self.cleanup_outcome,
+        }
+
+
 class Phase7EPublicError(RuntimeError):
     """Safe public failure category."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        diagnostic: Phase7EFailureDiagnostic | None = None,
+    ) -> None:
         super().__init__(code)
         self.code = code
+        self.diagnostic = diagnostic
 
 
 _MAX_SEARCH_SECONDS = 600
 _MAX_STARTUP_RECOVERY_RUNS = 1024
+
+
+def _execution_public_error(
+    error: BaseException,
+    *,
+    category: str | None = None,
+) -> Phase7EPublicError:
+    """Map one known execution failure to closed public and diagnostic facts."""
+    safe_category = category or _execution_failure_category(error)
+    diagnostic = Phase7EFailureDiagnostic(
+        _failure_boundary(safe_category),
+        safe_category,
+        _safe_exception_class(error),
+        _cleanup_outcome(error, safe_category),
+    )
+    return Phase7EPublicError(safe_category, diagnostic=diagnostic)
+
+
+def _execution_failure_category(error: BaseException) -> str:
+    if isinstance(error, NvrRequestError):
+        category = "acquisition_failed"
+    elif isinstance(error, CommonSessionError):
+        category = error.code if error.code in _FAILURE_BOUNDARY_BY_CATEGORY else "internal_error"
+    elif isinstance(error, Phase7EIncompleteEvidenceError):
+        category = "incomplete_evidence"
+    elif isinstance(error, Phase7EOperationalEvidenceError):
+        category = "classification_failed"
+    elif isinstance(error, Phase7EAdapterError):
+        category = "adapter_unknown_result"
+    elif isinstance(error, Phase7EReadbackError):
+        category = "readback_failed"
+    elif isinstance(error, (Phase7ERepositoryError, Phase7EValidationError)):
+        category = "publication_failed"
+    else:
+        category = "internal_error"
+    return category
+
+
+def _failure_boundary(category: str) -> str:
+    return _FAILURE_BOUNDARY_BY_CATEGORY.get(category, "internal")
+
+
+def _safe_exception_class(error: BaseException) -> str:
+    candidate = type(error).__name__
+    if candidate in _SAFE_EXCEPTION_CLASSES:
+        return candidate
+    if isinstance(error, CommonSessionError):
+        return "CommonSessionError"
+    if isinstance(error, Phase7E1DError):
+        return "Phase7E1DError"
+    if isinstance(error, Phase7ERepositoryError):
+        return "Phase7ERepositoryError"
+    return "unexpected_exception"
+
+
+def _cleanup_outcome(error: BaseException, category: str) -> str:
+    if isinstance(error, NvrRequestError):
+        return "not_required"
+    if isinstance(error, CommonSessionError):
+        if error.cleanup_failure_code is not None:
+            return "failed"
+        if _failure_boundary(category) in {
+            "replay_acquisition",
+            "media_validation",
+            "decoder",
+            "classifier",
+        }:
+            return "no_failure_reported"
+        return "not_required"
+    if isinstance(error, (Phase7E1DError, Phase7ERepositoryError, Phase7EValidationError)):
+        return "not_required"
+    return "unknown"
 
 
 def _bounded_recovery_candidates(root: Path) -> list[tuple[str, str]]:
@@ -318,24 +507,50 @@ class Phase7EPublicService:
                 request_domain,
                 cancellation=cancellation,
             ) as invocation:
-                admitted = self.executor.execute(
-                    request_domain,
-                    prepared.schema5,
-                    prepared.base_records,
-                    self.classifier_policy,
-                    prepared.coarse_targets,
-                    invocation=invocation,
-                )
-                _ = Phase7E1DService(
-                    self.repository,
-                    local_evidence=self._local_evidence(),
-                ).execute(invocation, admitted.acquisition)
+                try:
+                    admitted = self.executor.execute(
+                        request_domain,
+                        prepared.schema5,
+                        prepared.base_records,
+                        self.classifier_policy,
+                        prepared.coarse_targets,
+                        invocation=invocation,
+                    )
+                    _ = Phase7E1DService(
+                        self.repository,
+                        local_evidence=self._local_evidence(),
+                    ).execute(invocation, admitted.acquisition)
+                except Phase7EInProgressError as error:
+                    raise Phase7EPublicError("already_running") from error
+                except Phase7EConflictError as error:
+                    raise Phase7EPublicError("request_conflict") from error
+                except Phase7ECorruptError as error:
+                    raise _execution_public_error(
+                        error,
+                        category="search_run_corrupt",
+                    ) from error
+                except (
+                    NvrRequestError,
+                    CommonSessionError,
+                    Phase7E1DError,
+                    Phase7ERepositoryError,
+                    Phase7EValidationError,
+                ) as error:
+                    raise _execution_public_error(error) from error
         except Phase7EInProgressError as error:
             raise Phase7EPublicError("already_running") from error
         except Phase7EConflictError as error:
             raise Phase7EPublicError("request_conflict") from error
         except Phase7ECorruptError as error:
-            raise Phase7EPublicError("search_run_corrupt") from error
+            raise _execution_public_error(error, category="search_run_corrupt") from error
+        except (
+            NvrRequestError,
+            CommonSessionError,
+            Phase7E1DError,
+            Phase7ERepositoryError,
+            Phase7EValidationError,
+        ) as error:
+            raise _execution_public_error(error) from error
         phase8_status: tuple[str | None, str | None] = (None, None)
         if create_phase8_handoff:
             self.create_phase8_handoff(

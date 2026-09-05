@@ -13,7 +13,7 @@ from functools import cache
 from pathlib import Path
 from threading import Event, Lock
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -27,6 +27,7 @@ from vigi_vision.investigation_confirmation_repository import (
     InvestigationConfirmationRepository,
 )
 from vigi_vision.investigation_confirmation_service import InvestigationConfirmationService
+from vigi_vision.nvr import NvrErrorKind, NvrRequestError
 from vigi_vision.recording_models import RecordingSegment, RecordingWindow, ReplayRequest
 from vigi_vision.recording_search_7e_1c import (
     CommonSessionAcquirer,
@@ -41,6 +42,7 @@ from vigi_vision.recording_search_7e_background import Phase7EBackgroundManager
 from vigi_vision.recording_search_7e_models import Schema5PhaseState, StrictIdentityEnvelope
 from vigi_vision.recording_search_7e_phase8 import Phase8HandoffRepository
 from vigi_vision.recording_search_7e_public import (
+    Phase7EFailureDiagnostic,
     Phase7EPublicError,
     Phase7EPublicService,
     Phase7EPublicStatus,
@@ -60,6 +62,9 @@ from vigi_vision.reference_frame_models import (
 )
 from vigi_vision.reference_frame_resources import ReferenceFrameResourceStore
 from vigi_vision.replay import ReplayClip
+
+if TYPE_CHECKING:
+    from httpx import Response
 
 _NOW = datetime(2026, 8, 2, 4, 5, 6, tzinfo=timezone.utc)
 _REQUEST_ID = "12345678-1234-4234-8234-123456789abc"
@@ -162,6 +167,14 @@ class _FailingService(_BlockingService):
         raise RuntimeError
 
 
+class _UnannotatedPublicFailingService(_FailingService):
+    def execute_prepared(self, prepared: object, *, cancellation: object) -> Phase7EPublicStatus:
+        _ = (prepared, cancellation)
+        self.execute_failed.set()
+        unsafe_detail = "private.example?token=secret"
+        raise Phase7EPublicError(unsafe_detail)
+
+
 class _DurableRetryDuringActiveService(_BlockingService):
     def resolve_existing(self, prepared: object) -> Phase7EPublicStatus | None:
         request = prepared.request
@@ -248,6 +261,21 @@ def test_background_failures_remain_observable(
     manager.close()
 
 
+def test_background_rejects_unannotated_failure_text_from_public_status() -> None:
+    service = _UnannotatedPublicFailingService(durable_interrupted=False)
+    manager = Phase7EBackgroundManager(cast("Any", service))
+    receipt = manager.start("inv-01", "2026-07-20T12:00:05", _REQUEST_ID)
+    assert service.execute_failed.wait(1)
+    deadline = time.monotonic() + 1
+    projected = manager.status(receipt.investigation_id, receipt.run_id)
+    while projected.phase7.status != "FAILED" and time.monotonic() < deadline:
+        time.sleep(0.01)
+        projected = manager.status(receipt.investigation_id, receipt.run_id)
+    assert projected.phase7.reason_code == "internal_error"
+    assert "private.example" not in json.dumps(projected.as_dict())
+    manager.close()
+
+
 def test_background_shutdown_cancels_and_joins_the_only_worker() -> None:
     service = _BlockingService()
     manager = Phase7EBackgroundManager(cast("Any", service))
@@ -312,6 +340,44 @@ class _Planner:
     def plan_for_segment(self, segment: RecordingSegment, window: RecordingWindow) -> ReplayRequest:
         assert segment == self.segment
         return ReplayRequest(window, "rtsp://redacted.example/replay")
+
+
+class _NvrFailingPlanner:
+    def __init__(self, kind: NvrErrorKind) -> None:
+        self.windows: list[RecordingWindow] = []
+        self.kind = kind
+
+    def find_segments_for_window(self, window: RecordingWindow) -> tuple[RecordingSegment, ...]:
+        self.windows.append(window)
+        raise NvrRequestError(self.kind, "ConnectionError")
+
+    def plan_for_segment(self, segment: RecordingSegment, window: RecordingWindow) -> ReplayRequest:
+        raise AssertionError((segment, window))
+
+
+class _UnavailablePlanner:
+    def __init__(self) -> None:
+        self.windows: list[RecordingWindow] = []
+
+    def find_segments_for_window(self, window: RecordingWindow) -> tuple[RecordingSegment, ...]:
+        self.windows.append(window)
+        return ()
+
+    def plan_for_segment(self, segment: RecordingSegment, window: RecordingWindow) -> ReplayRequest:
+        raise AssertionError((segment, window))
+
+
+class _UnexpectedPlanner:
+    def __init__(self) -> None:
+        self.windows: list[RecordingWindow] = []
+
+    def find_segments_for_window(self, window: RecordingWindow) -> tuple[RecordingSegment, ...]:
+        self.windows.append(window)
+        secret_bearing_message = "rtsp://user:password@private.example/replay?token=secret"  # noqa: S105
+        raise RuntimeError(secret_bearing_message)
+
+    def plan_for_segment(self, segment: RecordingSegment, window: RecordingWindow) -> ReplayRequest:
+        raise AssertionError((segment, window))
 
 
 class _Extractor:
@@ -511,6 +577,55 @@ def _confirmed_phase6(tmp_path: Path) -> tuple[InvestigationConfirmationService,
     return confirmation_service, result.manifest.investigation_id, session.resource_id
 
 
+def _pre_schema5_failure_app(
+    tmp_path: Path,
+    planner: object,
+) -> tuple[Any, Phase7EPublicService, RecordingSearch7ERepository, _Extractor, str]:
+    confirmation_service, investigation_id, _resource_id = _confirmed_phase6(tmp_path)
+    extractor = _Extractor(tmp_path / "must-not-exist.mp4")
+    probe = _Probe()
+    repository = RecordingSearch7ERepository(tmp_path / "phase7e", lock_timeout_seconds=0.1)
+    executor = Phase7E1CExecutor(
+        repository,
+        CommonSessionAcquirer(cast("Any", planner), extractor, probe),
+    )
+    policy, classifier_policy, object_policy = approved_phase7e_policy()
+    service = Phase7EPublicService(
+        repository,
+        executor,
+        confirmation_service,
+        object(),
+        object(),
+        policy,
+        classifier_policy,
+        object_policy,
+        Phase8HandoffRepository(
+            tmp_path / "phase8",
+            tmp_path / "phase7e" / ".media",
+            probe,
+            _UnusedClipGenerator(),
+        ),
+        lambda: _NOW,
+        probe,
+    )
+    app = create_reference_frame_app(
+        _UnusedReferenceFrameService(),
+        _UnusedResources(),
+        confirmation_service=confirmation_service,
+        phase7e_service=service,
+    )
+    return app, service, repository, extractor, investigation_id
+
+
+def _wait_for_phase7e_status(client: TestClient, status_url: str) -> Response:
+    deadline = time.monotonic() + 1
+    projected = client.get(status_url)
+    while projected.json()["status"] in {"ACCEPTED", "RUNNING"} and time.monotonic() < deadline:
+        time.sleep(0.01)
+        projected = client.get(status_url)
+    return projected
+
+
 def test_corrupt_phase6_is_rejected_before_background_admission(tmp_path: Path) -> None:
     confirmation_service, investigation_id, _resource_id = _confirmed_phase6(tmp_path)
     confirmed = confirmation_service.load_confirmed(investigation_id)
@@ -549,6 +664,165 @@ def test_corrupt_phase6_is_rejected_before_background_admission(tmp_path: Path) 
     assert not repository.run_path(
         investigation_id,
         "search-run-12345678123442348234123456789abc",
+    ).exists()
+
+
+@pytest.mark.parametrize(
+    ("nvr_kind", "expected_reason", "expected_exception"),
+    [
+        (NvrErrorKind.SDK_REQUEST, "acquisition_failed", "NvrRequestError"),
+        (NvrErrorKind.TIMEOUT, "acquisition_failed", "NvrRequestError"),
+        (
+            None,
+            "recording_unavailable",
+            "CommonSessionRecordingUnavailableError",
+        ),
+    ],
+)
+def test_pre_schema5_known_failure_retains_safe_category_without_publication(
+    tmp_path: Path,
+    nvr_kind: NvrErrorKind | None,
+    expected_reason: str,
+    expected_exception: str,
+) -> None:
+    planner = _NvrFailingPlanner(nvr_kind) if nvr_kind is not None else _UnavailablePlanner()
+    app, service, repository, extractor, investigation_id = _pre_schema5_failure_app(
+        tmp_path,
+        planner,
+    )
+    body = {
+        "investigation_id": investigation_id,
+        "search_end": "2026-07-20T12:34:33",
+        "request_id": _REQUEST_ID,
+    }
+    with TestClient(app) as client:
+        accepted = client.post("/api/v1/recording-searches", json=body)
+        assert accepted.status_code == 202
+        status_url = accepted.json()["status_url"]
+        projected = _wait_for_phase7e_status(client, status_url)
+        manager = cast("Phase7EBackgroundManager", app.state.phase7e_background_manager)
+        diagnostic = manager.pre_run_failure_diagnostic(
+            investigation_id,
+            accepted.json()["run_id"],
+        )
+        assert diagnostic is not None
+        assert diagnostic.as_dict() == {
+            "boundary": "recording_discovery",
+            "category": expected_reason,
+            "exception_class": expected_exception,
+            "cleanup_outcome": "not_required",
+        }
+        call_count = len(planner.windows)
+        duplicate = client.post("/api/v1/recording-searches", json=body)
+        assert duplicate.status_code == 202
+        assert duplicate.json()["status"] == "FAILED"
+        assert len(planner.windows) == call_count
+
+        fresh_body = {
+            **body,
+            "request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        }
+        fresh = client.post("/api/v1/recording-searches", json=fresh_body)
+        assert fresh.status_code == 202
+        assert fresh.json()["run_id"] != accepted.json()["run_id"]
+        fresh_run_id = fresh.json()["run_id"]
+        fresh_projected = _wait_for_phase7e_status(client, fresh.json()["status_url"])
+        assert fresh_projected.json()["reason_code"] == expected_reason
+
+    assert projected.status_code == 200
+    assert projected.json() == {
+        "investigation_id": investigation_id,
+        "run_id": "search-run-12345678123442348234123456789abc",
+        "schema_version": 0,
+        "status": "FAILED",
+        "reason_code": expected_reason,
+        "terminal_result_id": None,
+        "phase8_status": None,
+        "phase8_reason": None,
+    }
+    assert len(planner.windows) == 2
+    assert extractor.calls == 0
+    assert not repository.run_path(
+        investigation_id,
+        "search-run-12345678123442348234123456789abc",
+    ).exists()
+    assert not repository.run_path(
+        investigation_id,
+        fresh_run_id,
+    ).exists()
+    with repository.invocation_ownership(
+        investigation_id,
+        "search-run-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        timeout_seconds=0.1,
+    ) as ownership:
+        assert ownership.active
+        assert ownership.lock.held
+
+    restarted = create_reference_frame_app(
+        _UnusedReferenceFrameService(),
+        _UnusedResources(),
+        phase7e_service=service,
+    )
+    with TestClient(restarted) as client:
+        after_restart = client.get(status_url)
+    assert after_restart.status_code == 404
+
+
+def test_pre_schema5_unexpected_failure_stays_internal_and_redacted(tmp_path: Path) -> None:
+    planner = _UnexpectedPlanner()
+    app, _service, repository, extractor, investigation_id = _pre_schema5_failure_app(
+        tmp_path,
+        planner,
+    )
+    body = {
+        "investigation_id": investigation_id,
+        "search_end": "2026-07-20T12:34:33",
+        "request_id": _REQUEST_ID,
+    }
+    with TestClient(app) as client:
+        accepted = client.post("/api/v1/recording-searches", json=body)
+        assert accepted.status_code == 202
+        projected = _wait_for_phase7e_status(client, accepted.json()["status_url"])
+        manager = cast("Phase7EBackgroundManager", app.state.phase7e_background_manager)
+        diagnostic = manager.pre_run_failure_diagnostic(
+            investigation_id,
+            accepted.json()["run_id"],
+        )
+
+    assert projected.status_code == 200
+    assert projected.json()["status"] == "FAILED"
+    assert projected.json()["reason_code"] == "internal_error"
+    assert set(projected.json()) == {
+        "investigation_id",
+        "run_id",
+        "schema_version",
+        "status",
+        "reason_code",
+        "terminal_result_id",
+        "phase8_status",
+        "phase8_reason",
+    }
+    assert "private.example" not in projected.text
+    assert "password" not in projected.text
+    assert "token" not in projected.text
+    assert diagnostic is not None
+    assert diagnostic.as_dict() == {
+        "boundary": "internal",
+        "category": "internal_error",
+        "exception_class": "unexpected_exception",
+        "cleanup_outcome": "unknown",
+    }
+    with pytest.raises(ValueError, match="invalid failure diagnostic vocabulary"):
+        Phase7EFailureDiagnostic(
+            "internal",
+            "internal_error",
+            "RuntimeError: secret-bearing detail",
+            "unknown",
+        )
+    assert extractor.calls == 0
+    assert not repository.run_path(
+        investigation_id,
+        accepted.json()["run_id"],
     ).exists()
 
 
