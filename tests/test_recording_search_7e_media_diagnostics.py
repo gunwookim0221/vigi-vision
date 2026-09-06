@@ -294,12 +294,12 @@ def test_duration_diagnostics_and_capture_failure_keep_primary(tmp_path: Path) -
 
 
 def test_duration_tolerance_boundary_is_preserved(tmp_path: Path) -> None:
-    acquisition = _acquirer(tmp_path, duration_ticks=5).acquire(_request())
+    acquisition = _acquirer(tmp_path, duration_ticks=5).acquire(_request(5))
     acquisition.remove()
     assert not (tmp_path / "replay.mp4").exists()
 
     with pytest.raises(CommonSessionMediaError) as raised:
-        _acquirer(tmp_path, duration_ticks=6).acquire(_request())
+        _acquirer(tmp_path, duration_ticks=6).acquire(_request(5))
     assert raised.value.probe_diagnostic is not None
     assert raised.value.probe_diagnostic.stage == "duration_too_long"
     assert not (tmp_path / "replay.mp4").exists()
@@ -310,10 +310,14 @@ def test_duration_tolerance_boundary_is_preserved(tmp_path: Path) -> None:
     [
         (60_000, None),
         (59_999, None),
+        (59_990, None),
         (59_960, None),
-        (59_959, "duration_too_short"),
-        (60_040, None),
-        (60_041, "duration_too_long"),
+        (59_873, None),
+        (59_750, None),
+        (59_749, "duration_too_short"),
+        (59_000, "duration_too_short"),
+        (60_250, None),
+        (60_251, "duration_too_long"),
     ],
 )
 def test_duration_tolerance_is_symmetric_and_inclusive(
@@ -336,6 +340,24 @@ def test_duration_tolerance_is_symmetric_and_inclusive(
             acquirer.acquire(_request(60))
         assert raised.value.probe_diagnostic is not None
         assert raised.value.probe_diagnostic.stage == expected_stage
+        assert raised.value.probe_diagnostic.duration_tolerance_ms == 250
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"duration_ticks": 0},
+        {"duration_ticks": -1},
+        {"time_base_den": 0},
+        {"rate_num": 0},
+    ],
+)
+def test_invalid_probe_timing_facts_are_rejected(
+    tmp_path: Path,
+    changes: dict[str, int],
+) -> None:
+    with pytest.raises(CommonSessionMediaError):
+        _acquirer(tmp_path, **changes).acquire(_request())
 
 
 def test_stage_one_short_duration_inside_one_frame_is_accepted(tmp_path: Path) -> None:

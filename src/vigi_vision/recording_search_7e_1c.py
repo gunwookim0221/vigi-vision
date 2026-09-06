@@ -113,6 +113,10 @@ MAX_DECODER_PASSES = 11
 DECODER_TIMEOUT_SECONDS = 120
 MEDIA_PROBE_TIMEOUT_SECONDS = 20
 MAX_MEDIA_DIMENSION = 16_384
+# NVR replay containers can end slightly before/after the requested window.
+# Keep this admission tolerance explicit, symmetric, and below the one-second
+# binary-search resolution rather than binding it to a source frame rate.
+MEDIA_DURATION_TOLERANCE_SECONDS = Fraction(250, 1_000)
 
 
 class CommonSessionError(RecordingSearchError):
@@ -1633,10 +1637,7 @@ class CommonSessionAcquirer:
                 media.duration_ticks * media.time_base_num,
                 media.time_base_den,
             )
-            duration_tolerance = Fraction(
-                media.average_frame_rate_den,
-                media.average_frame_rate_num,
-            )
+            duration_tolerance = MEDIA_DURATION_TOLERANCE_SECONDS
             lower_duration = request.duration_seconds - duration_tolerance
             upper_duration = request.duration_seconds + duration_tolerance
             if observed_duration < lower_duration:
@@ -3520,6 +3521,7 @@ __all__ = [
     "MAX_MP4_BYTES",
     "MAX_SELECTED_RGB24_FRAMES",
     "MAX_TARGETS_PER_DECODER_PASS",
+    "MEDIA_DURATION_TOLERANCE_SECONDS",
     "MediaProbe",
     "MediaProbeFacts",
     "Phase7EMediaProbeDiagnostic",

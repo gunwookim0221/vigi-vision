@@ -1904,6 +1904,12 @@ def read_phase7_status(
 ) -> Phase7EStatus:
     """Return a safe status derived only from strict repository reopen."""
     try:
+        # A missing run must remain missing even while another run for the same
+        # investigation holds the lifecycle lock.  Inspecting a missing path
+        # while that lock is held otherwise raises ``InProgress`` and can be
+        # mistaken for the active run's RUNNING state.
+        if not repository.run_path(investigation_id, run_id).exists():
+            return Phase7EStatus(investigation_id, run_id, 0, "UNAVAILABLE", None, None)
         run = repository.inspect_current_read_only(investigation_id, run_id)
     except Phase7EInProgressError:
         return Phase7EStatus(investigation_id, run_id, 0, "RUNNING", None, None)

@@ -381,6 +381,25 @@ def test_phase7e_http_rejects_authoritative_overrides_and_noncanonical_time() ->
     service.release.set()
 
 
+def test_phase7e_http_missing_run_stays_not_found_while_other_run_is_active(
+    tmp_path: Path,
+) -> None:
+    app, _service, repository, _extractor, investigation_id = _pre_schema5_failure_app(
+        tmp_path,
+        _UnavailablePlanner(),
+    )
+    active_run_id = "search-run-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    with (
+        repository.invocation_ownership(investigation_id, active_run_id, timeout_seconds=0),
+        TestClient(app) as client,
+    ):
+        response = client.get(
+            f"/api/v1/recording-searches/{investigation_id}/여기에-새로운-search-run-id"
+        )
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "search_run_not_found"
+
+
 class _Planner:
     def __init__(self, segment: RecordingSegment) -> None:
         self.segment = segment
@@ -452,28 +471,62 @@ class _Extractor:
 
 
 class _Probe:
+    # The probe fixture intentionally exposes each production media fact.
+    def __init__(  # noqa: PLR0913
+        self,
+        *,
+        duration_ticks: int = 5,
+        time_base_num: int = 1,
+        time_base_den: int = 1,
+        codec: str = "h264",
+        profile: str = "High",
+        width: int = 8,
+        height: int = 8,
+        average_frame_rate_num: int = 1,
+        average_frame_rate_den: int = 1,
+        level: int = 41,
+    ) -> None:
+        self.duration_ticks = duration_ticks
+        self.time_base_num = time_base_num
+        self.time_base_den = time_base_den
+        self.codec = codec
+        self.profile = profile
+        self.width = width
+        self.height = height
+        self.average_frame_rate_num = average_frame_rate_num
+        self.average_frame_rate_den = average_frame_rate_den
+        self.level = level
+        self.observed_facts: list[MediaProbeFacts] = []
+
     def probe(self, path: Path, timeout_seconds: float) -> MediaProbeFacts:
         assert path.is_file()
         assert timeout_seconds > 0
-        return MediaProbeFacts(
+        facts = MediaProbeFacts(
             selected_video_stream_index=0,
             video_stream_count=1,
             audio_stream_count=0,
             container_start_pts=0,
-            time_base_num=1,
-            time_base_den=1,
-            duration_ticks=5,
-            codec="h264",
-            profile="High",
+            time_base_num=self.time_base_num,
+            time_base_den=self.time_base_den,
+            duration_ticks=self.duration_ticks,
+            codec=self.codec,
+            profile=self.profile,
             pixel_format="yuv420p",
-            width=8,
-            height=8,
-            average_frame_rate_num=1,
-            average_frame_rate_den=1,
+            width=self.width,
+            height=self.height,
+            average_frame_rate_num=self.average_frame_rate_num,
+            average_frame_rate_den=self.average_frame_rate_den,
+            level=self.level,
         )
+        self.observed_facts.append(facts)
+        return facts
 
 
 class _TimelineDecoder:
+    def __init__(self, *, decoded_dimensions: tuple[int, int] | None = None) -> None:
+        self.decoded_dimensions = decoded_dimensions
+        self.selected_indices: list[int] = []
+
     def decode(
         self,
         session: CommonSessionAcquisition,
@@ -482,17 +535,19 @@ class _TimelineDecoder:
     ) -> tuple[DecodedLocalFrame, ...]:
         assert timeout_seconds > 0
         frames = []
+        width, height = self.decoded_dimensions or (session.media.width, session.media.height)
         for target in targets:
             offset = int((target - session.request.start_utc).total_seconds())
             selected = min(offset, int(session.request.duration_seconds) - 1)
+            self.selected_indices.append(selected)
             frames.append(
                 DecodedLocalFrame(
                     target,
                     selected,
                     selected,
-                    8,
-                    8,
-                    bytes([selected]) * (8 * 8 * 3),
+                    width,
+                    height,
+                    bytes([selected]) * (width * height * 3),
                     decode_session_id=session.common_session_id,
                 )
             )
@@ -500,8 +555,16 @@ class _TimelineDecoder:
 
 
 class _ReconstructingClassifier:
-    def __init__(self, confirmation_service: InvestigationConfirmationService) -> None:
+    def __init__(
+        self,
+        confirmation_service: InvestigationConfirmationService,
+        *,
+        initial_present: bool = True,
+        followup_outcome: str = "ABSENT",
+    ) -> None:
         self.confirmation_service = confirmation_service
+        self.initial_present = initial_present
+        self.followup_outcome = followup_outcome
         self.authoritative_facts: list[tuple[int, str, int, str]] = []
 
     def classify(self, authoritative: Phase7EB4Input) -> object:
@@ -518,7 +581,10 @@ class _ReconstructingClassifier:
             str(authoritative.target_request.payload["requested_time_utc"]).replace("Z", "+00:00")
         )
         outcome = (
-            "PRESENT" if requested <= confirmed.anchor_time_utc + timedelta(seconds=1) else "ABSENT"
+            "PRESENT"
+            if self.initial_present
+            and requested <= confirmed.anchor_time_utc + timedelta(seconds=1)
+            else self.followup_outcome
         )
         template = _classification_template(outcome)
         return StrictIdentityEnvelope.from_payload(
@@ -972,7 +1038,11 @@ def test_actual_phase6_http_background_execution_reaches_strict_schema7(  # noqa
         duplicate = client.post("/api/v1/recording-searches", json=body)
         assert duplicate.status_code == 202
         assert duplicate.json()["run_id"] == receipt["run_id"]
-        deadline = time.monotonic() + 90
+        # The fully production-shaped one-second narrowing plan can require
+        # more than ninety seconds on a loaded CI worker; keep the bound
+        # finite while allowing the authorized chain to reach its terminal
+        # Schema-7 publication.
+        deadline = time.monotonic() + 180
         states: list[str] = []
         while time.monotonic() < deadline:
             projected = client.get(receipt["status_url"])
@@ -1023,3 +1093,99 @@ def test_actual_phase6_http_background_execution_reaches_strict_schema7(  # noqa
         )
     assert recovered.status_code == 200
     assert recovered.json()["status"] == "INTERRUPTED"
+
+
+def test_production_shaped_nvr_duration_jitter_reaches_schema7(
+    tmp_path: Path,
+) -> None:
+    """Exercise the full public/background chain with the observed NVR facts."""
+    confirmation_service, investigation_id, resource_id = _confirmed_phase6(tmp_path)
+    confirmed = confirmation_service.load_confirmed(investigation_id)
+    segment = RecordingSegment(
+        1,
+        confirmed.anchor_time_utc.date(),
+        int((confirmed.anchor_time_utc - timedelta(seconds=30)).timestamp()),
+        int((confirmed.anchor_time_utc + timedelta(seconds=90)).timestamp()),
+        confirmed.anchor_time_utc - timedelta(seconds=30),
+        confirmed.anchor_time_utc + timedelta(seconds=90),
+    )
+    planner = _Planner(segment)
+    extractor = _Extractor(tmp_path / "nvr-jitter.mp4")
+    probe = _Probe(
+        duration_ticks=59_873,
+        time_base_den=1_000,
+        codec="hevc",
+        profile="Main",
+        width=2_560,
+        height=1_440,
+        average_frame_rate_num=25,
+    )
+    repository = RecordingSearch7ERepository(
+        tmp_path / "phase7e",
+        lock_timeout_seconds=0.1,
+        media_probe=probe,
+    )
+    executor = Phase7E1CExecutor(repository, CommonSessionAcquirer(planner, extractor, probe))
+    policy, classifier_policy, object_policy = approved_phase7e_policy()
+    # Keep this exact-duration fixture bounded: the production policy's
+    # one-second narrowing is already exercised by the adjacent full-chain
+    # test; this fixture focuses on the NVR media facts reaching Schema 7.
+    timing_policy = StrictIdentityEnvelope.from_payload(
+        "policy",
+        {**policy.payload, "binary_stop_seconds": 60},
+    )
+    classifier = _ReconstructingClassifier(confirmation_service)
+    decoder = _TimelineDecoder(decoded_dimensions=(8, 8))
+    service = Phase7EPublicService(
+        repository,
+        executor,
+        confirmation_service,
+        classifier,
+        # The fake decoder boundary keeps the deterministic fixture compact;
+        # the retained-media probe still carries the observed HEVC/1440p facts.
+        decoder,
+        timing_policy,
+        classifier_policy,
+        object_policy,
+        Phase8HandoffRepository(
+            tmp_path / "phase8",
+            tmp_path / "phase7e" / ".media",
+            probe,
+            _UnusedClipGenerator(),
+        ),
+        lambda: _NOW,
+        probe,
+    )
+    app = create_reference_frame_app(
+        _UnusedReferenceFrameService(),
+        _UnusedResources(),
+        confirmation_service=confirmation_service,
+        phase7e_service=service,
+    )
+    body = {
+        "investigation_id": investigation_id,
+        "search_end": "2026-07-20T12:35:28",
+        "request_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    }
+    with TestClient(app) as client:
+        accepted = client.post("/api/v1/recording-searches", json=body)
+        assert accepted.status_code == 202, accepted.text
+        deadline = time.monotonic() + 120
+        projected = client.get(accepted.json()["status_url"])
+        while projected.json()["status"] in {"ACCEPTED", "RUNNING"} and time.monotonic() < deadline:
+            time.sleep(1.0)
+            projected = client.get(accepted.json()["status_url"])
+    assert projected.json()["status"] == "FOUND"
+    run = repository.reopen_schema7(investigation_id, accepted.json()["run_id"])
+    session = next(item for item in run.records if item.family == "common-session")
+    facts = probe.observed_facts[-1]
+    assert facts.video_stream_count == 1
+    assert facts.audio_stream_count == 0
+    assert facts.codec == "hevc"
+    assert (facts.width, facts.height) == (2_560, 1_440)
+    assert session.payload["duration_ticks"] == 59_873
+    assert session.payload["time_base_den"] == 1_000
+    assert session.payload["mp4_size_bytes"] == len(b"one-retained-session")
+    assert decoder.selected_indices == sorted(decoder.selected_indices)
+    assert classifier.authoritative_facts
+    assert set(classifier.authoritative_facts) == {(1, "Asia/Seoul", 10, resource_id)}

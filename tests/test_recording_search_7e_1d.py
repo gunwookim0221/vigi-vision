@@ -1767,5 +1767,23 @@ def test_status_and_recovery_dispatch_nonterminal_and_terminal_runs(tmp_path: Pa
     assert recovered.result_kind == "FOUND"
 
 
+def test_status_rejects_malformed_identity_components(tmp_path: Path) -> None:
+    repo = RecordingSearch7ERepository(tmp_path)
+    malformed_investigation = read_phase7_status(repo, "inv/01", "run-01")
+    malformed_run = read_phase7_status(repo, "inv-01", "run/01")
+    assert malformed_investigation.status == "CORRUPT"
+    assert malformed_run.status == "CORRUPT"
+
+
+def test_status_does_not_project_another_run_while_same_investigation_is_locked(
+    tmp_path: Path,
+) -> None:
+    repo = RecordingSearch7ERepository(tmp_path)
+    with repo.invocation_ownership("inv-01", "run-active", timeout_seconds=0) as owner:
+        assert owner.active
+        projected = read_phase7_status(repo, "inv-01", "run-nonexistent")
+    assert projected.status == "UNAVAILABLE"
+
+
 def _utc(value: str) -> datetime:
     return datetime.fromisoformat(value.removesuffix("Z") + "+00:00").astimezone(timezone.utc)

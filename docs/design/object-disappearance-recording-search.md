@@ -899,9 +899,14 @@ media digests are never retained or emitted. Diagnostic capture is best effort
 and cannot replace the primary `media_probe_failed` or `media_probe_timeout`
 failure; cleanup remains unconditional and a cleanup error is recorded only as
 secondary context. A valid observed duration is admitted when it lies in the
-inclusive exact-rational interval `[requested - one source frame, requested +
-one source frame]`; arbitrary programming exceptions from the probe cross the
-internal-error boundary and never become `media_probe_failed` diagnostics.
+inclusive exact-rational interval `[requested - 250ms, requested + 250ms]`.
+This explicit symmetric container-boundary tolerance covers the observed 127ms
+NVR end jitter while remaining below the one-second binary-search resolution;
+a deficit or excess greater than 250ms remains `media_probe_failed` with
+`duration_too_short` or `duration_too_long`. The bound is not a policy identity
+input and cannot extend decoder or support targets beyond the actual retained
+media. Arbitrary programming exceptions from the probe cross the internal-error
+boundary and never become `media_probe_failed` diagnostics.
 
 The adapters must inspect the most specific source result before any outer
 status collapses it. The existing C1/C2/D1 unions map exactly as follows:
@@ -1254,7 +1259,12 @@ directories, interrupts strictly reopened unowned RUNNING schemas, and never
 resumes decode/classification. Durable state wins over process-memory state.
 `GET /api/v1/recording-searches/{investigation_id}/{run_id}` is read-only and
 projects strict schema 1–4 legacy status or schema 5–7 Phase 7 status joined
-with the separate Phase 8 status.
+with the separate Phase 8 status. The lookup is exact on both path components:
+a missing run returns `404 search_run_not_found` even when another run for the
+same investigation is holding its lifecycle lock. A held lock projects
+`RUNNING` only for an existing exact run path; status, reason, terminal, Phase 8,
+and process-local diagnostic fields are never borrowed from a sibling run.
+Malformed path components fail closed without filesystem or native-error detail.
 
 ### Implementation slices and acceptance
 

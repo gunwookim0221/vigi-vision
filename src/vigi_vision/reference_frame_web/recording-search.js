@@ -42,6 +42,7 @@
     confirmation_corrupt: "확인된 조사 기록이 손상되었습니다.",
     search_run_corrupt: "검색 실행 기록이 손상되었습니다.",
     recording_search_unavailable: "녹화 기록 검색을 사용할 수 없습니다.",
+    status_confirmation_failed: "검색 상태를 확인할 수 없습니다.",
     internal_error: "검색 작업을 안전하게 완료할 수 없습니다.",
   });
   let confirmation = null;
@@ -110,11 +111,11 @@
     }
     const remaining = owner.deadlineAt - Date.now();
     if (remaining <= 0) {
-      fail("recording_search_unavailable", owner);
+      fail(kind === "status" ? "status_confirmation_failed" : "recording_search_unavailable", owner);
       return null;
     }
     if (typeof AbortController !== "function") {
-      fail("recording_search_unavailable", owner);
+      fail(kind === "status" ? "status_confirmation_failed" : "recording_search_unavailable", owner);
       return null;
     }
     const requestController = new AbortController();
@@ -125,7 +126,7 @@
       if (!isCurrentLifecycle(owner) || !owner.requestActive || owner.requestController !== requestController) return;
       requestController?.abort();
       clearRequest(owner);
-      fail("recording_search_unavailable", owner);
+      fail(kind === "status" ? "status_confirmation_failed" : "recording_search_unavailable", owner);
     }, Math.max(1, Math.min(REQUEST_TIMEOUT_MS, remaining)));
     return requestController;
   }
@@ -388,12 +389,12 @@
   async function poll(owner) {
     if (!isCurrentLifecycle(owner) || activeRun === null || owner.runId !== activeRun.runId) return;
     if (Date.now() >= owner.deadlineAt) {
-      fail("recording_search_unavailable", owner);
+      fail("status_confirmation_failed", owner);
       return;
     }
     pollCount += 1;
     if (pollCount > 1350) {
-      fail("recording_search_unavailable", owner);
+      fail("status_confirmation_failed", owner);
       return;
     }
     const run = activeRun;
@@ -412,7 +413,7 @@
       if (!isCurrentLifecycle(owner) || activeRun !== run) return;
       completeRequest(owner, requestController);
       if (!response.ok || !validStatus(payload)) {
-        fail(payload?.error?.code, owner);
+        fail("status_confirmation_failed", owner);
         return;
       }
       if (TERMINAL.has(payload.status)) {
@@ -432,7 +433,7 @@
     } catch (_caught) {
       if (!isCurrentLifecycle(owner)) return;
       completeRequest(owner, requestController);
-      fail("recording_search_unavailable", owner);
+      fail("status_confirmation_failed", owner);
     }
   }
 
@@ -441,7 +442,7 @@
     if (owner.pollTimer !== null) window.clearTimeout(owner.pollTimer);
     const remaining = owner.deadlineAt - Date.now();
     if (remaining <= 0) {
-      fail("recording_search_unavailable", owner);
+      fail("status_confirmation_failed", owner);
       return;
     }
     owner.pollTimer = window.setTimeout(() => {

@@ -132,6 +132,51 @@ for (const terminal of ["FOUND", "NOT_FOUND", "INCONCLUSIVE", "FAILED", "INTERRU
   });
 }
 
+test("a missing polled run never renders another run and reports status confirmation failure", async () => {
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    return Promise.resolve({
+      ok: false,
+      status: 404,
+      json: async () => ({ error: { code: "search_run_not_found" } }),
+    });
+  }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+
+  assert.equal(harness.recordingSearchResult.hidden, true);
+  assert.match(harness.recordingSearchStatus.textContent, /검색 상태를 확인할 수 없습니다/);
+  assert.doesNotMatch(harness.recordingSearchStatus.textContent, /검색이 안전하게 실패했습니다/);
+  assert.equal(harness.window.vigiVisionRecordingSearch.getState().polling, false);
+});
+
+test("a transient polling failure is not rendered as a terminal search failure", async () => {
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    return Promise.reject(new Error("temporary status transport failure"));
+  }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+
+  assert.equal(harness.recordingSearchResult.hidden, true);
+  assert.match(harness.recordingSearchStatus.textContent, /검색 상태를 확인할 수 없습니다/);
+  assert.doesNotMatch(harness.recordingSearchStatus.textContent, /검색이 안전하게 실패했습니다/);
+});
+
 test("reload strictly reopens confirmation and resumes status from the server", async () => {
   const requests = [];
   const location = `http://127.0.0.1/?investigation_id=${INVESTIGATION_ID}&run_id=${RUN_ID}`;
@@ -269,7 +314,7 @@ test("never-resolving status request is aborted at its bounded request deadline"
   assert.equal(harness.window.vigiVisionRecordingSearch.getState().polling, false);
   assert.equal(harness.pendingTimerCount(), 0);
   assert.equal(harness.recordingSearchResult.hidden, true);
-  assert.match(harness.recordingSearchStatus.textContent, /녹화 기록 검색을 사용할 수 없습니다/);
+  assert.match(harness.recordingSearchStatus.textContent, /검색 상태를 확인할 수 없습니다/);
   assert.doesNotMatch(harness.recordingSearchStatus.textContent, /rtsp|password|nvr\.example/i);
   assert.doesNotMatch(harness.recordingSearchError.textContent, new RegExp(nativeError));
 });
