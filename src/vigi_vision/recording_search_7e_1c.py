@@ -88,6 +88,11 @@ from vigi_vision.recording_search_b4_service import (
     AuthoritativeClassificationHandle,
     ObservationClassificationService,
 )
+from vigi_vision.recording_search_7e_media_diagnostics import (
+    Phase7EMediaProbeDiagnostic,
+    log_media_probe_diagnostic,
+    safe_probe_codec,
+)
 from vigi_vision.recording_search_models import RecordingSearchError
 from vigi_vision.replay import (
     ReplayAuthenticationError,
@@ -107,6 +112,7 @@ MAX_TARGETS_PER_DECODER_PASS = 32
 MAX_DECODER_PASSES = 11
 DECODER_TIMEOUT_SECONDS = 120
 MEDIA_PROBE_TIMEOUT_SECONDS = 20
+MAX_MEDIA_DIMENSION = 16_384
 
 
 class CommonSessionError(RecordingSearchError):
@@ -114,12 +120,17 @@ class CommonSessionError(RecordingSearchError):
 
     code = "unexpected_error"
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        probe_diagnostic: Phase7EMediaProbeDiagnostic | None = None,
+    ) -> None:
         """Create one safe error with an optional secondary cleanup result."""
         super().__init__(self.code)
         self.cleanup_failure_code: str | None = None
         self.cleanup_failure: CommonSessionCleanupError | None = None
         self.failed_replay_clip: ReplayClip | None = None
+        self.probe_diagnostic = probe_diagnostic
 
     def __str__(self) -> str:
         return self.code
@@ -1045,38 +1056,221 @@ class FfprobeMediaProbe:
                 timeout_seconds,
             )
         except subprocess.TimeoutExpired as exc:
-            raise CommonSessionMediaProbeTimeoutError from exc
+            raise CommonSessionMediaProbeTimeoutError(
+                probe_diagnostic=Phase7EMediaProbeDiagnostic("ffprobe_timeout")
+            ) from exc
         except OSError as exc:
-            raise CommonSessionMediaError from exc
+            raise CommonSessionMediaError(
+                probe_diagnostic=Phase7EMediaProbeDiagnostic("ffprobe_unavailable")
+            ) from exc
         if completed.returncode != 0:
-            raise CommonSessionMediaError
+            raise CommonSessionMediaError(
+                probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                    "ffprobe_nonzero_exit",
+                    ffprobe_exit="nonzero",
+                )
+            )
         try:
             document = json.loads(completed.stdout)
-            streams = document["streams"]
-            format_data = document.get("format", {})
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise CommonSessionMediaError(
+                probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                    "ffprobe_invalid_json",
+                    ffprobe_exit="zero",
+                    json_status="invalid",
+                )
+            ) from exc
+        if not isinstance(document, dict):
+            raise CommonSessionMediaError(
+                probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                    "ffprobe_invalid_shape",
+                    ffprobe_exit="zero",
+                    json_status="shape_invalid",
+                )
+            )
+        streams = document.get("streams")
+        format_data = document.get("format", {})
+        if not isinstance(streams, list) or not isinstance(format_data, dict):
+            raise CommonSessionMediaError(
+                probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                    "ffprobe_invalid_shape",
+                    ffprobe_exit="zero",
+                    json_status="shape_invalid",
+                )
+            )
+        if not all(isinstance(item, dict) for item in streams):
+            raise CommonSessionMediaError(
+                probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                    "ffprobe_invalid_shape",
+                    ffprobe_exit="zero",
+                    json_status="shape_invalid",
+                )
+            )
+        try:
             video = [item for item in streams if item.get("codec_type") == "video"]
             audio = [item for item in streams if item.get("codec_type") == "audio"]
-            if len(video) != 1:
-                raise CommonSessionMediaError
+        except AttributeError as exc:
+            raise CommonSessionMediaError(
+                probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                    "ffprobe_invalid_shape",
+                    ffprobe_exit="zero",
+                    json_status="shape_invalid",
+                )
+            ) from exc
+        if not video:
+            raise CommonSessionMediaError(
+                probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                    "video_stream_missing",
+                    ffprobe_exit="zero",
+                    json_status="valid",
+                    video_stream_count=0,
+                    audio_stream_count=len(audio),
+                )
+            )
+        if len(video) != 1:
+            raise CommonSessionMediaError(
+                probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                    "unexpected_video_stream_count",
+                    ffprobe_exit="zero",
+                    json_status="valid",
+                    video_stream_count=len(video),
+                    audio_stream_count=len(audio),
+                )
+            )
+        if len(audio) != 0:
+            raise CommonSessionMediaError(
+                probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                    "probe_facts_mismatch",
+                    ffprobe_exit="zero",
+                    json_status="valid",
+                    video_stream_count=1,
+                    audio_stream_count=len(audio),
+                )
+            )
+        stream = video[0]
+        codec = safe_probe_codec(stream.get("codec_name"))
+        if codec == "unknown":
+            raise CommonSessionMediaError(
+                probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                    "unsupported_video_codec",
+                    ffprobe_exit="zero",
+                    json_status="valid",
+                    video_stream_count=1,
+                    audio_stream_count=0,
+                    codec=codec,
+                )
+            )
+        try:
+            width = _strict_probe_dimension(stream.get("width"))
+            height = _strict_probe_dimension(stream.get("height"))
+        except (TypeError, ValueError) as exc:
+            raise CommonSessionMediaError(
+                probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                    "invalid_dimensions",
+                    ffprobe_exit="zero",
+                    json_status="valid",
+                    video_stream_count=1,
+                    audio_stream_count=0,
+                    codec=codec,
+                )
+            ) from exc
+        try:
             stream = video[0]
             try:
                 time_base_num, time_base_den = _fraction_text(stream["time_base"])
             except CommonSessionMediaError as exc:
-                raise CommonSessionInvalidTimeBaseError from exc
-            rate_num, rate_den = _fraction_text(stream["avg_frame_rate"])
+                raise CommonSessionMediaError(
+                    probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                        "invalid_time_base",
+                        ffprobe_exit="zero",
+                        json_status="valid",
+                        video_stream_count=1,
+                        audio_stream_count=0,
+                        codec=codec,
+                        width=width,
+                        height=height,
+                    )
+                ) from exc
+            try:
+                rate_num, rate_den = _fraction_text(stream["avg_frame_rate"])
+            except CommonSessionMediaError as exc:
+                raise CommonSessionMediaError(
+                    probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                        "probe_facts_mismatch",
+                        ffprobe_exit="zero",
+                        json_status="valid",
+                        video_stream_count=1,
+                        audio_stream_count=0,
+                        codec=codec,
+                        width=width,
+                        height=height,
+                    )
+                ) from exc
             duration_value = stream.get("duration_ts")
             if duration_value is None:
                 duration_value = format_data.get("duration_ts")
             start_value = stream.get("start_pts")
             if duration_value is None or start_value is None:
-                raise CommonSessionMediaError
-            duration_ticks = _strict_integer_text(duration_value, nonnegative=False)
-            start_pts = _strict_integer_text(start_value, nonnegative=True)
+                raise CommonSessionMediaError(
+                    probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                        "missing_duration",
+                        ffprobe_exit="zero",
+                        json_status="valid",
+                        video_stream_count=1,
+                        audio_stream_count=0,
+                        codec=codec,
+                        width=width,
+                        height=height,
+                    )
+                )
+            try:
+                duration_ticks = _strict_probe_integer(duration_value)
+            except (TypeError, ValueError) as exc:
+                raise CommonSessionMediaError(
+                    probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                        "invalid_duration",
+                        ffprobe_exit="zero",
+                        json_status="valid",
+                        video_stream_count=1,
+                        audio_stream_count=0,
+                        codec=codec,
+                        width=width,
+                        height=height,
+                    )
+                ) from exc
+            if duration_ticks <= 0:
+                raise CommonSessionMediaError(
+                    probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                        "invalid_duration",
+                        ffprobe_exit="zero",
+                        json_status="valid",
+                        video_stream_count=1,
+                        audio_stream_count=0,
+                        codec=codec,
+                        width=width,
+                        height=height,
+                    )
+                )
+            try:
+                start_pts = _strict_probe_nonnegative_integer(start_value)
+            except (TypeError, ValueError) as exc:
+                raise CommonSessionMediaError(
+                    probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                        "probe_facts_mismatch",
+                        ffprobe_exit="zero",
+                        json_status="valid",
+                        video_stream_count=1,
+                        audio_stream_count=0,
+                        codec=codec,
+                        width=width,
+                        height=height,
+                    )
+                ) from exc
             level_value = stream.get("level")
             level = (
                 0
                 if level_value in (None, "", "N/A")
-                else _strict_integer_text(str(level_value), nonnegative=True)
+                else _strict_probe_nonnegative_integer(level_value)
             )
             facts = MediaProbeFacts(
                 selected_video_stream_index=int(stream.get("index", 0)),
@@ -1086,21 +1280,45 @@ class FfprobeMediaProbe:
                 time_base_num=time_base_num,
                 time_base_den=time_base_den,
                 duration_ticks=duration_ticks,
-                codec=str(stream.get("codec_name") or ""),
+                codec=codec,
                 profile=str(stream.get("profile") or ""),
                 pixel_format=str(stream.get("pix_fmt") or ""),
-                width=int(stream["width"]),
-                height=int(stream["height"]),
+                width=width,
+                height=height,
                 average_frame_rate_num=rate_num,
                 average_frame_rate_den=rate_den,
                 level=level,
             )
             facts.validate()
             return facts
-        except (CommonSessionError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        except CommonSessionError as exc:
+            if exc.probe_diagnostic is None:
+                exc.probe_diagnostic = Phase7EMediaProbeDiagnostic(
+                    "probe_facts_mismatch",
+                    ffprobe_exit="zero",
+                    json_status="valid",
+                    video_stream_count=1,
+                    audio_stream_count=0,
+                    codec=codec,
+                    width=width,
+                    height=height,
+                )
             if isinstance(exc, CommonSessionError):
                 raise
-            raise CommonSessionMediaError from exc
+            raise
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CommonSessionMediaError(
+                probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                    "probe_facts_mismatch",
+                    ffprobe_exit="zero",
+                    json_status="valid",
+                    video_stream_count=1,
+                    audio_stream_count=0,
+                    codec=codec,
+                    width=width,
+                    height=height,
+                )
+            ) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -1305,6 +1523,9 @@ class CommonSessionAcquirer:
     media_probe: MediaProbe
     monotonic_clock: Callable[[], float] = monotonic
     cancellation: Callable[[], bool] | None = None
+    diagnostic_sink: Callable[[str, str, Phase7EMediaProbeDiagnostic], None] = (
+        log_media_probe_diagnostic
+    )
 
     def locate(
         self,
@@ -1386,18 +1607,51 @@ class CommonSessionAcquirer:
                 request.policy.ffprobe_timeout_seconds,
                 minimum_start_seconds=1.0,
             )
-            media = self.media_probe.probe(
-                clip.temporary_mp4_path,
-                probe_budget,
-            )
+            try:
+                media = self.media_probe.probe(
+                    clip.temporary_mp4_path,
+                    probe_budget,
+                )
+            except CommonSessionError:
+                raise
+            except Exception as exc:  # native probe failures are redacted.
+                raise CommonSessionMediaError(
+                    probe_diagnostic=Phase7EMediaProbeDiagnostic("unexpected_probe_failure")
+                ) from exc
             active_budget.check()
-            media.validate()
+            try:
+                media.validate()
+            except CommonSessionMediaError as exc:
+                if exc.probe_diagnostic is None:
+                    exc.probe_diagnostic = _probe_facts_diagnostic(media)
+                raise
             observed_duration = Fraction(
                 media.duration_ticks * media.time_base_num,
                 media.time_base_den,
             )
             if observed_duration < request.duration_seconds:
-                raise CommonSessionMediaError
+                raise CommonSessionMediaError(
+                    probe_diagnostic=_duration_diagnostic(
+                        media,
+                        request.duration_seconds,
+                        stage="duration_too_short",
+                        observed_duration=observed_duration,
+                    )
+                )
+            duration_tolerance = Fraction(
+                media.average_frame_rate_den,
+                media.average_frame_rate_num,
+            )
+            if observed_duration > request.duration_seconds + duration_tolerance:
+                raise CommonSessionMediaError(
+                    probe_diagnostic=_duration_diagnostic(
+                        media,
+                        request.duration_seconds,
+                        stage="duration_too_long",
+                        observed_duration=observed_duration,
+                        duration_tolerance=duration_tolerance,
+                    )
+                )
             session_payload = {
                 "investigation_id": request.investigation_id,
                 "run_id": request.run_id,
@@ -1443,26 +1697,75 @@ class CommonSessionAcquirer:
             else:
                 primary = CommonSessionReplayError()
             if clip is not None:
+                _capture_retained_bytes(primary, clip)
                 _remove_clip_preserving_primary(clip, primary)
+            _emit_probe_diagnostic(self, request, primary)
             if primary is exc:
                 raise
             raise primary from exc
         except (OSError, ConfirmationArtifactError, ValueError, TypeError) as exc:
-            primary = CommonSessionMediaError()
+            primary = CommonSessionMediaError(
+                probe_diagnostic=Phase7EMediaProbeDiagnostic("unexpected_probe_failure")
+            )
             if clip is not None:
+                _capture_retained_bytes(primary, clip)
                 _remove_clip_preserving_primary(clip, primary)
+            _emit_probe_diagnostic(self, request, primary)
             raise primary from exc
 
     def _validate_retained_clip(self, clip: ReplayClip, maximum_bytes: int) -> None:
         """Reject symlinks, non-regular files, escapes, and oversized media."""
         path = clip.temporary_mp4_path
         try:
-            if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
-                raise CommonSessionMediaError
-            if path.stat().st_size > maximum_bytes:
-                raise CommonSessionMediaError
-        except (OSError, RuntimeError) as exc:
-            raise CommonSessionMediaError from exc
+            if path.is_symlink():
+                raise CommonSessionMediaError(
+                    probe_diagnostic=Phase7EMediaProbeDiagnostic("extracted_file_not_regular")
+                )
+            if not path.exists():
+                raise CommonSessionMediaError(
+                    probe_diagnostic=Phase7EMediaProbeDiagnostic("extracted_file_missing")
+                )
+            if not path.is_file():
+                raise CommonSessionMediaError(
+                    probe_diagnostic=Phase7EMediaProbeDiagnostic("extracted_file_not_regular")
+                )
+            if _path_outside_local_confinement(path):
+                raise CommonSessionMediaError(
+                    probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                        "extracted_file_outside_confinement"
+                    )
+                )
+            first = path.stat()
+            if first.st_size <= 0:
+                raise CommonSessionMediaError(
+                    probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                        "extracted_file_empty",
+                        retained_bytes=0,
+                    )
+                )
+            if first.st_size > maximum_bytes:
+                raise CommonSessionMediaError(
+                    probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                        "extracted_file_oversized",
+                        retained_bytes=first.st_size,
+                    )
+                )
+            second = path.stat()
+            if (
+                first.st_size != second.st_size
+                or first.st_mtime_ns != second.st_mtime_ns
+                or first.st_nlink != second.st_nlink
+            ):
+                raise CommonSessionMediaError(
+                    probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                        "extracted_file_unstable",
+                        retained_bytes=second.st_size,
+                    )
+                )
+        except OSError as exc:
+            raise CommonSessionMediaError(
+                probe_diagnostic=Phase7EMediaProbeDiagnostic("unexpected_probe_failure")
+            ) from exc
 
 
 def bind_session(
@@ -2479,6 +2782,33 @@ def _strict_integer_text(value: object, *, nonnegative: bool) -> int:
     return result
 
 
+def _strict_probe_integer(value: object) -> int:
+    """Parse one ffprobe integer fact without accepting booleans or floats."""
+    if type(value) is int:
+        return value
+    if (
+        isinstance(value, str)
+        and value
+        and (value.isdigit() or (value.startswith("-") and value[1:].isdigit()))
+    ):
+        return int(value)
+    raise ValueError
+
+
+def _strict_probe_nonnegative_integer(value: object) -> int:
+    result = _strict_probe_integer(value)
+    if result < 0:
+        raise ValueError
+    return result
+
+
+def _strict_probe_dimension(value: object) -> int:
+    result = _strict_probe_integer(value)
+    if result <= 0 or result > MAX_MEDIA_DIMENSION:
+        raise ValueError
+    return result
+
+
 def _translate_repository_failure(exc: BaseException) -> CommonSessionError:
     if isinstance(exc, CommonSessionError):
         return exc
@@ -2505,6 +2835,114 @@ def _remove_clip_preserving_primary(
         primary.cleanup_failure_code = CommonSessionCleanupError.code
         primary.cleanup_failure = CommonSessionCleanupError()
         primary.failed_replay_clip = clip
+
+
+def _capture_retained_bytes(primary: CommonSessionError, clip: ReplayClip) -> None:
+    """Capture only the bounded byte count before invocation-owned cleanup."""
+    diagnostic = primary.probe_diagnostic
+    if diagnostic is None or diagnostic.retained_bytes is not None:
+        return
+    try:
+        retained_bytes = clip.temporary_mp4_path.stat().st_size
+    except (OSError, RuntimeError):
+        return
+    if retained_bytes >= 0:
+        primary.probe_diagnostic = replace(diagnostic, retained_bytes=retained_bytes)
+
+
+def _emit_probe_diagnostic(
+    acquirer: CommonSessionAcquirer,
+    request: CommonSessionRequest,
+    primary: CommonSessionError,
+) -> None:
+    """Emit exactly one safe probe diagnostic without changing failure precedence."""
+    diagnostic = primary.probe_diagnostic
+    if diagnostic is None:
+        return
+    try:
+        primary.probe_diagnostic = diagnostic.with_cleanup(
+            failed=primary.cleanup_failure_code is not None
+        )
+        acquirer.diagnostic_sink(
+            request.investigation_id,
+            request.run_id,
+            primary.probe_diagnostic,
+        )
+    except Exception:  # noqa: BLE001 - diagnostics never replace the primary failure.
+        return
+
+
+def _path_outside_local_confinement(path: Path) -> bool:
+    """Reject relative traversal and symlinked parent directories without logging paths."""
+    if not path.is_absolute() or ".." in path.parts:
+        return True
+    current = path.parent
+    try:
+        while current != current.parent:
+            if current.is_symlink():
+                return True
+            current = current.parent
+    except (OSError, RuntimeError):
+        return True
+    return False
+
+
+def _probe_facts_diagnostic(media: MediaProbeFacts) -> Phase7EMediaProbeDiagnostic:
+    """Classify a returned facts object without retaining native values."""
+    stage = "probe_facts_mismatch"
+    if (
+        type(media.width) is not int
+        or type(media.height) is not int
+        or media.width <= 0
+        or media.height <= 0
+    ):
+        stage = "invalid_dimensions"
+    elif media.time_base_num <= 0 or media.time_base_den <= 0:
+        stage = "invalid_time_base"
+    elif media.duration_ticks <= 0:
+        stage = "invalid_duration"
+    elif media.video_stream_count == 0:
+        stage = "video_stream_missing"
+    elif media.video_stream_count != 1:
+        stage = "unexpected_video_stream_count"
+    elif media.codec and safe_probe_codec(media.codec) == "unknown":
+        stage = "unsupported_video_codec"
+    return Phase7EMediaProbeDiagnostic(
+        stage,
+        video_stream_count=media.video_stream_count
+        if type(media.video_stream_count) is int and media.video_stream_count >= 0
+        else None,
+        audio_stream_count=media.audio_stream_count
+        if type(media.audio_stream_count) is int and media.audio_stream_count >= 0
+        else None,
+        codec=safe_probe_codec(media.codec) if media.codec else "not_observed",
+        width=media.width if type(media.width) is int and media.width >= 0 else None,
+        height=media.height if type(media.height) is int and media.height >= 0 else None,
+    )
+
+
+def _duration_diagnostic(
+    media: MediaProbeFacts,
+    requested_duration_seconds: int,
+    *,
+    stage: str,
+    observed_duration: Fraction,
+    duration_tolerance: Fraction | None = None,
+) -> Phase7EMediaProbeDiagnostic:
+    """Build safe integer-millisecond duration facts for a rejected clip."""
+    tolerance = duration_tolerance or Fraction(0, 1)
+    return Phase7EMediaProbeDiagnostic(
+        stage,
+        video_stream_count=media.video_stream_count,
+        audio_stream_count=media.audio_stream_count,
+        codec=safe_probe_codec(media.codec) if media.codec else "not_observed",
+        width=media.width,
+        height=media.height,
+        requested_duration_ms=requested_duration_seconds * 1_000,
+        observed_duration_ms=(observed_duration * 1_000).numerator
+        // (observed_duration * 1_000).denominator,
+        duration_tolerance_ms=(tolerance * 1_000).numerator // (tolerance * 1_000).denominator,
+    )
 
 
 def _fraction_text(value: object) -> tuple[int, int]:
@@ -3067,6 +3505,7 @@ __all__ = [
     "MAX_TARGETS_PER_DECODER_PASS",
     "MediaProbe",
     "MediaProbeFacts",
+    "Phase7EMediaProbeDiagnostic",
     "InvocationBudget",
     "Phase7EInvocation",
     "Phase7E1CExecutor",

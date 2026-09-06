@@ -66,6 +66,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from vigi_vision.recording_search_7e_media_diagnostics import Phase7EMediaProbeDiagnostic
+
 
 _FAILURE_BOUNDARY_BY_CATEGORY: Final = {
     "invalid_request": "invocation_input",
@@ -149,6 +151,7 @@ class Phase7EFailureDiagnostic:
     category: str
     exception_class: str
     cleanup_outcome: str
+    media_probe: Phase7EMediaProbeDiagnostic | None = None
 
     def __post_init__(self) -> None:
         """Reject any value outside the fixed diagnostic vocabulary."""
@@ -167,6 +170,13 @@ class Phase7EFailureDiagnostic:
             "exception_class": self.exception_class,
             "cleanup_outcome": self.cleanup_outcome,
         }
+
+    def as_process_dict(self) -> dict[str, object]:
+        """Return the bounded process-local projection, including media facts."""
+        result: dict[str, object] = {**self.as_dict()}
+        if self.media_probe is not None:
+            result["media_probe"] = self.media_probe.as_dict()
+        return result
 
 
 class Phase7EPublicError(RuntimeError):
@@ -199,6 +209,7 @@ def _execution_public_error(
         safe_category,
         _safe_exception_class(error),
         _cleanup_outcome(error, safe_category),
+        getattr(error, "probe_diagnostic", None),
     )
     return Phase7EPublicError(safe_category, diagnostic=diagnostic)
 

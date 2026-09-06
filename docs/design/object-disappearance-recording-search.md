@@ -874,6 +874,31 @@ Resource and deadline failures map to `media_resource_exceeded`,
 `capacity_exhausted`, or `invocation_deadline_exhausted` according to the limit
 that was reached.
 
+### Phase 7E media-probe failure observability
+
+The retained-media boundary keeps the public reason codes unchanged and captures
+one version-1, process-local `phase7e.media_probe_failure` diagnostic before
+its invocation-owned temporary MP4 cleanup, then emits that completed record
+once cleanup outcome is known. The existing bounded browser worker ledger may
+retain the same typed diagnostic while the run remains in process;
+no probe diagnostic is added to Schema 5--7, an identity, a manifest, or the
+browser status JSON. A restart therefore truthfully loses this diagnostic and
+does not alter strict durable reopen behavior.
+
+The diagnostic stage is closed and path-free. It distinguishes extracted-file
+missing, non-regular, outside-confinement, empty, oversized, or unstable media;
+ffprobe timeout, unavailable, nonzero exit, invalid JSON, or invalid shape;
+missing or unexpected video streams; unsupported codec; invalid dimensions or
+time base; missing or invalid duration; duration too short or too long;
+probe-facts mismatch; and an unexpected probe failure. Safe bounded facts are
+limited to byte length, ffprobe/JSON classifications, stream counts, an
+allowlisted codec class, dimensions, millisecond duration facts, and cleanup
+outcome. Raw paths, commands, stderr, exception text, URLs, credentials, and
+media digests are never retained or emitted. Diagnostic capture is best effort
+and cannot replace the primary `media_probe_failed` or `media_probe_timeout`
+failure; cleanup remains unconditional and a cleanup error is recorded only as
+secondary context.
+
 The adapters must inspect the most specific source result before any outer
 status collapses it. The existing C1/C2/D1 unions map exactly as follows:
 
