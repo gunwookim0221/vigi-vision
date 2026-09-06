@@ -23,6 +23,9 @@
   const TERMINAL = new Set(["FOUND", "NOT_FOUND", "INCONCLUSIVE", "FAILED", "INTERRUPTED", "CORRUPT"]);
   const REQUEST_TIMEOUT_MS = 15_000;
   const CLIENT_POLL_DEADLINE_MS = 45 * 60 * 1_000;
+  const STATUS_RETRY_LIMIT = 5;
+  const STATUS_RETRY_INITIAL_MS = 2_000;
+  const STATUS_RETRY_MAX_MS = 15_000;
   const START_KEYS = Object.freeze(["request_id", "investigation_id", "run_id", "status", "status_url"]);
   const STATUS_KEYS = Object.freeze([
     "investigation_id", "run_id", "schema_version", "status", "reason_code",
@@ -43,6 +46,7 @@
     search_run_corrupt: "검색 실행 기록이 손상되었습니다.",
     recording_search_unavailable: "녹화 기록 검색을 사용할 수 없습니다.",
     status_confirmation_failed: "검색 상태를 확인할 수 없습니다.",
+    search_run_not_found: "접수된 검색 실행을 찾을 수 없습니다.",
     internal_error: "검색 작업을 안전하게 완료할 수 없습니다.",
   });
   let confirmation = null;
@@ -96,6 +100,7 @@
       requestTimer: null,
       pollTimer: null,
       requestActive: false,
+      transientFailures: 0,
       closed: false,
     };
     lifecycleGeneration = owner.generation;
@@ -111,7 +116,8 @@
     }
     const remaining = owner.deadlineAt - Date.now();
     if (remaining <= 0) {
-      fail(kind === "status" ? "status_confirmation_failed" : "recording_search_unavailable", owner);
+      if (kind === "status") endStatusObservation(owner);
+      else fail("recording_search_unavailable", owner);
       return null;
     }
     if (typeof AbortController !== "function") {
@@ -126,7 +132,8 @@
       if (!isCurrentLifecycle(owner) || !owner.requestActive || owner.requestController !== requestController) return;
       requestController?.abort();
       clearRequest(owner);
-      fail(kind === "status" ? "status_confirmation_failed" : "recording_search_unavailable", owner);
+      if (kind === "status") retryStatus(owner);
+      else fail("recording_search_unavailable", owner);
     }, Math.max(1, Math.min(REQUEST_TIMEOUT_MS, remaining)));
     return requestController;
   }
@@ -172,6 +179,42 @@
     error.focus?.({ preventScroll: true });
     submitting = false;
     renderInput();
+  }
+
+  function endStatusObservation(owner) {
+    if (!isCurrentLifecycle(owner)) return;
+    invalidateLifecycle(owner);
+    setStatus(
+      "클라이언트의 상태 확인이 종료되었습니다. 서버 작업은 계속될 수 있습니다.",
+      "observation-ended",
+    );
+    error.hidden = true;
+    submitting = false;
+    renderInput();
+  }
+
+  function retryStatus(owner) {
+    if (!isCurrentLifecycle(owner)) return;
+    if (Date.now() >= owner.deadlineAt) {
+      endStatusObservation(owner);
+      return;
+    }
+    owner.transientFailures += 1;
+    if (owner.transientFailures > STATUS_RETRY_LIMIT) {
+      endStatusObservation(owner);
+      return;
+    }
+    setStatus(
+      "검색 상태를 다시 확인하고 있습니다. 서버 작업은 계속될 수 있습니다.",
+      "reconnecting",
+      true,
+    );
+    error.hidden = true;
+    const delay = Math.min(
+      STATUS_RETRY_INITIAL_MS * (2 ** (owner.transientFailures - 1)),
+      STATUS_RETRY_MAX_MS,
+    );
+    schedulePoll(owner, delay);
   }
 
   function localFromUtc(value, zone) {
@@ -340,7 +383,7 @@
       }
       rememberRun(payload);
       owner.runId = payload.run_id;
-      setStatus("검색 요청이 접수되었습니다.", "accepted", true);
+      setStatus("검색 중입니다.", "accepted", true);
       pollCount = 0;
       schedulePoll(owner, 0);
     } catch (_caught) {
@@ -389,12 +432,12 @@
   async function poll(owner) {
     if (!isCurrentLifecycle(owner) || activeRun === null || owner.runId !== activeRun.runId) return;
     if (Date.now() >= owner.deadlineAt) {
-      fail("status_confirmation_failed", owner);
+      endStatusObservation(owner);
       return;
     }
     pollCount += 1;
     if (pollCount > 1350) {
-      fail("status_confirmation_failed", owner);
+      endStatusObservation(owner);
       return;
     }
     const run = activeRun;
@@ -411,8 +454,16 @@
       if (!isCurrentLifecycle(owner) || activeRun !== run) return;
       const payload = await response.json().catch(() => null);
       if (!isCurrentLifecycle(owner) || activeRun !== run) return;
-      completeRequest(owner, requestController);
-      if (!response.ok || !validStatus(payload)) {
+      if (!completeRequest(owner, requestController)) return;
+      if (response.status >= 500 && response.status <= 599) {
+        retryStatus(owner);
+        return;
+      }
+      if (!response.ok) {
+        fail(response.status === 404 ? "search_run_not_found" : payload?.error?.code, owner);
+        return;
+      }
+      if (!validStatus(payload)) {
         fail("status_confirmation_failed", owner);
         return;
       }
@@ -424,6 +475,7 @@
         fail("internal_error", owner);
         return;
       }
+      owner.transientFailures = 0;
       setStatus(
         payload.status === "ACCEPTED" ? "검색 요청이 대기 중입니다." : "녹화 기록을 검색하는 중입니다…",
         "loading",
@@ -432,8 +484,8 @@
       schedulePoll(owner, 2000);
     } catch (_caught) {
       if (!isCurrentLifecycle(owner)) return;
-      completeRequest(owner, requestController);
-      fail("status_confirmation_failed", owner);
+      if (!completeRequest(owner, requestController)) return;
+      retryStatus(owner);
     }
   }
 
@@ -442,7 +494,7 @@
     if (owner.pollTimer !== null) window.clearTimeout(owner.pollTimer);
     const remaining = owner.deadlineAt - Date.now();
     if (remaining <= 0) {
-      fail("status_confirmation_failed", owner);
+      endStatusObservation(owner);
       return;
     }
     owner.pollTimer = window.setTimeout(() => {

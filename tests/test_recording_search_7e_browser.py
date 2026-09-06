@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -32,6 +33,7 @@ from vigi_vision.recording_models import RecordingSegment, RecordingWindow, Repl
 from vigi_vision.recording_search_7e_1c import (
     CommonSessionAcquirer,
     CommonSessionAcquisition,
+    CommonSessionMediaError,
     DecodedLocalFrame,
     MediaProbeFacts,
     Phase7E1CExecutor,
@@ -65,11 +67,14 @@ from vigi_vision.reference_frame_resources import ReferenceFrameResourceStore
 from vigi_vision.replay import ReplayClip
 
 if TYPE_CHECKING:
+    from fastapi import FastAPI
     from httpx import Response
 
 _NOW = datetime(2026, 8, 2, 4, 5, 6, tzinfo=timezone.utc)
 _REQUEST_ID = "12345678-1234-4234-8234-123456789abc"
 _MEDIA_PROBE_FAILED = "media_probe_failed"
+_FIXTURE_CONFIGURATION_ERROR = "invalid deterministic Uvicorn fixture configuration"
+_SECRET_BEARING_ERROR = "password=uvicorn-secret-sentinel"  # noqa: S105
 _JPEG_BYTES = base64.b64decode(
     "/9j/4AAQSkZJRgABAgAAAQABAAD//gAQTGF2YzYyLjI4LjEwMgD/2wBDAAgEBAQEBAUFBQUFBQYGBgYGBgYGBgYHBwcICAgHBwcGBgcHCAgICAkJCQgICAgJCQoKCgwMCwsODg4RERT/xABLAAEBAAAAAAAAAAAAAAAAAAAACAEBAAAAAAAAAAAAAAAAAAAAABABAAAAAAAAAAAAAAAAAAAAABEBAAAAAAAAAAAAAAAAAAAAAP/AABEIAtAFAAMBIgACEQADEQD/2gAMAwEAAhEDEQA/AJ/AB//Z"
 )
@@ -522,6 +527,25 @@ class _Probe:
         return facts
 
 
+class _DelayedProbe(_Probe):
+    def probe(self, path: Path, timeout_seconds: float) -> MediaProbeFacts:
+        time.sleep(0.15)
+        return super().probe(path, timeout_seconds)
+
+
+class _DelayedFailingProbe(_Probe):
+    def probe(self, path: Path, timeout_seconds: float) -> MediaProbeFacts:
+        assert path.is_file()
+        assert timeout_seconds > 0
+        time.sleep(0.15)
+        try:
+            raise RuntimeError(_SECRET_BEARING_ERROR)  # noqa: TRY301
+        except RuntimeError as error:
+            raise CommonSessionMediaError(
+                probe_diagnostic=Phase7EMediaProbeDiagnostic("ffprobe_invalid_json")
+            ) from error
+
+
 class _TimelineDecoder:
     def __init__(self, *, decoded_dimensions: tuple[int, int] | None = None) -> None:
         self.decoded_dimensions = decoded_dimensions
@@ -694,6 +718,97 @@ def _confirmed_phase6(tmp_path: Path) -> tuple[InvestigationConfirmationService,
         )
     )
     return confirmation_service, result.manifest.investigation_id, session.resource_id
+
+
+def create_uvicorn_phase7e_fixture_app() -> FastAPI:
+    """Build a credential-free real-Uvicorn fixture from an isolated test root."""
+    root_text = os.environ.get("VIGI_PHASE7E_UVICORN_TEST_ROOT")
+    scenario = os.environ.get("VIGI_PHASE7E_UVICORN_TEST_SCENARIO")
+    if root_text is None or scenario not in {
+        "duration_too_short",
+        "ffprobe_invalid_json",
+        "schema7_jitter",
+    }:
+        raise RuntimeError(_FIXTURE_CONFIGURATION_ERROR)
+    root = Path(root_text).resolve(strict=True)
+    confirmation_service, _investigation_id, _resource_id = _confirmed_phase6(root)
+    confirmed = confirmation_service.load_confirmed(_investigation_id)
+    segment = RecordingSegment(
+        1,
+        confirmed.anchor_time_utc.date(),
+        int((confirmed.anchor_time_utc - timedelta(seconds=30)).timestamp()),
+        int((confirmed.anchor_time_utc + timedelta(seconds=90)).timestamp()),
+        confirmed.anchor_time_utc - timedelta(seconds=30),
+        confirmed.anchor_time_utc + timedelta(seconds=90),
+    )
+
+    class _SensitivePlanner(_Planner):
+        def plan_for_segment(
+            self,
+            selected: RecordingSegment,
+            window: RecordingWindow,
+        ) -> ReplayRequest:
+            assert selected == self.segment
+            return ReplayRequest(
+                window,
+                "rtsp://operator:uvicorn-secret-sentinel@private.example/replay",
+            )
+
+    if scenario == "duration_too_short":
+        probe = _DelayedProbe(duration_ticks=1)
+    elif scenario == "ffprobe_invalid_json":
+        probe = _DelayedFailingProbe()
+    else:
+        probe = _DelayedProbe(
+            duration_ticks=59_873,
+            time_base_den=1_000,
+            codec="hevc",
+            profile="Main",
+            width=2_560,
+            height=1_440,
+            average_frame_rate_num=25,
+        )
+    planner = _SensitivePlanner(segment)
+    extractor = _Extractor(root / "temporary-replay.mp4")
+    repository = RecordingSearch7ERepository(
+        root / "phase7e",
+        lock_timeout_seconds=0.1,
+        media_probe=probe,
+    )
+    executor = Phase7E1CExecutor(repository, CommonSessionAcquirer(planner, extractor, probe))
+    policy, classifier_policy, object_policy = approved_phase7e_policy()
+    timing_policy = (
+        StrictIdentityEnvelope.from_payload(
+            "policy",
+            {**policy.payload, "binary_stop_seconds": 60},
+        )
+        if scenario == "schema7_jitter"
+        else policy
+    )
+    service = Phase7EPublicService(
+        repository,
+        executor,
+        confirmation_service,
+        _ReconstructingClassifier(confirmation_service),
+        _TimelineDecoder(decoded_dimensions=(8, 8)),
+        timing_policy,
+        classifier_policy,
+        object_policy,
+        Phase8HandoffRepository(
+            root / "phase8",
+            root / "phase7e" / ".media",
+            probe,
+            _UnusedClipGenerator(),
+        ),
+        lambda: _NOW,
+        probe,
+    )
+    return create_reference_frame_app(
+        _UnusedReferenceFrameService(),
+        _UnusedResources(),
+        confirmation_service=confirmation_service,
+        phase7e_service=service,
+    )
 
 
 def _pre_schema5_failure_app(

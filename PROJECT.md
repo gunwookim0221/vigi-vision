@@ -290,6 +290,9 @@ capability.
    Phase 7E browser slice. That slice reloads only a strict schema-3
    confirmation, accepts one bounded search end, starts the shared production
    service asynchronously, and polls the read-only safe status projection.
+   Transient status timeouts, network failures, and 5xx responses retain the
+   exact run identity and recover with a five-attempt bounded 2/4/8/15/15-second
+   backoff; client deadline exhaustion never claims that server work failed.
    Keep physical desktop/mobile acceptance and real-NVR Stage 2 validation as
    the next gate.
 6. Preserve the implemented Phase 7E-1A through 1D, 7E-2, and confirmed
@@ -311,6 +314,8 @@ capability.
    Phase 6 immutability, and the rule that operational failure cannot become
    absence. Stage 1 real-NVR acquisition passed with limitations; Stage 2
    terminal search acceptance remains pending the human-labeled workflow.
+   Media-probe failures emit one closed, path-free structured warning through
+   Uvicorn's configured console logger before temporary-media cleanup.
    Phase 8 processing and Phase 9 judgment remain future work.
 
 ## High-level roadmap

@@ -455,6 +455,7 @@ function createHarness(
     runTimers,
     timerDelays,
     pendingTimerCount: () => timers.size,
+    pendingTimerDelays: () => Array.from(timers.values()).map(({ delay }) => delay),
   };
 }
 

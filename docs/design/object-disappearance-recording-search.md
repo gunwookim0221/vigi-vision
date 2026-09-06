@@ -886,6 +886,13 @@ no probe diagnostic is added to Schema 5--7, an identity, a manifest, or the
 browser status JSON. A restart therefore truthfully loses this diagnostic and
 does not alter strict durable reopen behavior.
 
+The warning is emitted through a child of Uvicorn's established
+`uvicorn.error` logger. Under the documented `python -m uvicorn ... --factory`
+startup, it therefore reaches the configured stderr console handler and
+formatter instead of relying on Python's optional root-logger fallback. Each
+terminal media-probe failure emits exactly one parseable JSON event; status
+reads and reconciliation do not re-emit it.
+
 The diagnostic stage is closed and path-free. It distinguishes extracted-file
 missing, non-regular, outside-confinement, empty, oversized, or unstable media;
 ffprobe timeout, unavailable, nonzero exit, invalid JSON, or invalid shape;
@@ -1265,6 +1272,18 @@ same investigation is holding its lifecycle lock. A held lock projects
 `RUNNING` only for an existing exact run path; status, reason, terminal, Phase 8,
 and process-local diagnostic fields are never borrowed from a sibling run.
 Malformed path components fail closed without filesystem or native-error detail.
+
+After an accepted browser POST, the client displays an active search state and
+keeps the exact investigation/run pair while polling. A status timeout, network
+failure, or HTTP 5xx response is observational rather than terminal: the client
+announces that it is reconnecting and retries serially up to five times with
+2, 4, 8, 15, and 15 second delays. Any successful `ACCEPTED` or `RUNNING`
+response resets that consecutive-failure budget. The existing 45-minute client
+deadline remains authoritative; deadline or retry-budget exhaustion says only
+that client-side observation ended and that server work may continue. Exact
+404 and other permanent contract responses stop polling without inheriting a
+sibling run. Page teardown aborts an in-flight request, cancels pending retry,
+and invalidates stale completions.
 
 ### Implementation slices and acceptance
 

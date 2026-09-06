@@ -98,6 +98,7 @@ test("confirmed workflow submits only the closed start body and blocks a double 
   await settle();
   assert.equal(harness.window.vigiVisionRecordingSearch.getState().runId, RUN_ID);
   assert.match(harness.window.location.href, /run_id=search-run-/);
+  assert.equal(harness.recordingSearchStatus.textContent, "검색 중입니다.");
 });
 
 for (const terminal of ["FOUND", "NOT_FOUND", "INCONCLUSIVE", "FAILED", "INTERRUPTED", "CORRUPT"]) {
@@ -132,7 +133,7 @@ for (const terminal of ["FOUND", "NOT_FOUND", "INCONCLUSIVE", "FAILED", "INTERRU
   });
 }
 
-test("a missing polled run never renders another run and reports status confirmation failure", async () => {
+test("an exact missing polled run never inherits another run and is permanent", async () => {
   const harness = createHarness((url) => {
     if (url === "/api/v1/recording-searches") {
       return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
@@ -152,17 +153,21 @@ test("a missing polled run never renders another run and reports status confirma
   await settle();
 
   assert.equal(harness.recordingSearchResult.hidden, true);
-  assert.match(harness.recordingSearchStatus.textContent, /검색 상태를 확인할 수 없습니다/);
+  assert.match(harness.recordingSearchStatus.textContent, /접수된 검색 실행을 찾을 수 없습니다/);
   assert.doesNotMatch(harness.recordingSearchStatus.textContent, /검색이 안전하게 실패했습니다/);
   assert.equal(harness.window.vigiVisionRecordingSearch.getState().polling, false);
 });
 
-test("a transient polling failure is not rendered as a terminal search failure", async () => {
+test("a transient polling failure reconnects and reaches the exact terminal run", async () => {
+  let statusCalls = 0;
   const harness = createHarness((url) => {
     if (url === "/api/v1/recording-searches") {
       return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
     }
-    return Promise.reject(new Error("temporary status transport failure"));
+    statusCalls += 1;
+    return statusCalls === 1
+      ? Promise.reject(new Error("temporary status transport failure"))
+      : Promise.resolve({ ok: true, status: 200, json: async () => status("FOUND") });
   }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
   dispatchConfirmed(harness);
   harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
@@ -173,8 +178,102 @@ test("a transient polling failure is not rendered as a terminal search failure",
   await settle();
 
   assert.equal(harness.recordingSearchResult.hidden, true);
-  assert.match(harness.recordingSearchStatus.textContent, /검색 상태를 확인할 수 없습니다/);
+  assert.match(harness.recordingSearchStatus.textContent, /검색 상태를 다시 확인하고 있습니다/);
   assert.doesNotMatch(harness.recordingSearchStatus.textContent, /검색이 안전하게 실패했습니다/);
+  assert.equal(harness.window.vigiVisionRecordingSearch.getState().polling, true);
+  harness.runTimers();
+  await settle();
+  assert.equal(statusCalls, 2);
+  assert.equal(harness.recordingSearchResult.hidden, false);
+  assert.equal(harness.pendingTimerCount(), 0);
+});
+
+test("bounded exponential polling failures recover without overlapping requests", async () => {
+  let statusCalls = 0;
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    statusCalls += 1;
+    if (statusCalls === 2) {
+      return Promise.resolve({ ok: false, status: 503, json: async () => ({}) });
+    }
+    if (statusCalls < 4) return Promise.reject(new Error("transient"));
+    return Promise.resolve({ ok: true, status: 200, json: async () => status("FOUND") });
+  }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+
+  for (const delay of [2_000, 4_000, 8_000]) {
+    harness.runTimers();
+    await settle();
+    assert.deepEqual(harness.pendingTimerDelays(), [delay]);
+    assert.match(harness.recordingSearchStatus.textContent, /서버 작업은 계속될 수 있습니다/);
+  }
+  harness.runTimers();
+  await settle();
+  assert.equal(statusCalls, 4);
+  assert.equal(harness.recordingSearchResult.hidden, false);
+  assert.equal(harness.pendingTimerCount(), 0);
+});
+
+test("polling retry budget ends only client observation after five retries", async () => {
+  let statusCalls = 0;
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    statusCalls += 1;
+    return Promise.reject(new Error("still transient"));
+  }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+
+  for (const delay of [2_000, 4_000, 8_000, 15_000, 15_000]) {
+    harness.runTimers();
+    await settle();
+    assert.deepEqual(harness.pendingTimerDelays(), [delay]);
+  }
+  harness.runTimers();
+  await settle();
+  assert.equal(statusCalls, 6);
+  assert.equal(harness.window.vigiVisionRecordingSearch.getState().polling, false);
+  assert.equal(harness.pendingTimerCount(), 0);
+  assert.match(harness.recordingSearchStatus.textContent, /클라이언트의 상태 확인이 종료되었습니다/);
+  assert.doesNotMatch(harness.recordingSearchStatus.textContent, /검색이 안전하게 실패했습니다/);
+});
+
+test("pagehide during a pending reconnect permanently cancels the lifecycle", async () => {
+  let statusCalls = 0;
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    statusCalls += 1;
+    return Promise.reject(new Error("transient"));
+  }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  assert.equal(harness.pendingTimerCount(), 1);
+  const reconnecting = harness.recordingSearchStatus.textContent;
+  harness.window.dispatchEvent({ type: "pagehide" });
+  harness.runTimers();
+  await settle();
+  assert.equal(statusCalls, 1);
+  assert.equal(harness.pendingTimerCount(), 0);
+  assert.equal(harness.recordingSearchStatus.textContent, reconnecting);
+  assert.equal(harness.window.vigiVisionRecordingSearch.getState().polling, false);
 });
 
 test("reload strictly reopens confirmation and resumes status from the server", async () => {
@@ -289,16 +388,21 @@ test("deferred status completion after pagehide cannot render stale terminal evi
   assert.equal(harness.window.vigiVisionRecordingSearch.getState().polling, false);
 });
 
-test("never-resolving status request is aborted at its bounded request deadline", async () => {
+test("a timed-out status request is aborted, retried, and reaches terminal", async () => {
   const statusResponse = new Promise(() => {});
+  let statusCalls = 0;
   let statusOptions;
   const nativeError = "rtsp://user:password@nvr.example/private";
   const harness = createHarness((url, options) => {
     if (url === "/api/v1/recording-searches") {
       return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
     }
-    statusOptions = options;
-    return statusResponse;
+    statusCalls += 1;
+    if (statusCalls === 1) {
+      statusOptions = options;
+      return statusResponse;
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => status("NOT_FOUND") });
   }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
   dispatchConfirmed(harness);
   harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
@@ -311,12 +415,16 @@ test("never-resolving status request is aborted at its bounded request deadline"
   await settle();
 
   assert.equal(statusOptions.signal.aborted, true);
-  assert.equal(harness.window.vigiVisionRecordingSearch.getState().polling, false);
-  assert.equal(harness.pendingTimerCount(), 0);
+  assert.equal(harness.window.vigiVisionRecordingSearch.getState().polling, true);
   assert.equal(harness.recordingSearchResult.hidden, true);
-  assert.match(harness.recordingSearchStatus.textContent, /검색 상태를 확인할 수 없습니다/);
+  assert.match(harness.recordingSearchStatus.textContent, /검색 상태를 다시 확인하고 있습니다/);
   assert.doesNotMatch(harness.recordingSearchStatus.textContent, /rtsp|password|nvr\.example/i);
   assert.doesNotMatch(harness.recordingSearchError.textContent, new RegExp(nativeError));
+  harness.runTimers();
+  await settle();
+  assert.equal(statusCalls, 2);
+  assert.equal(harness.recordingSearchResult.hidden, false);
+  assert.equal(harness.pendingTimerCount(), 0);
 });
 
 test("overall client deadline bounds an in-flight status request", async () => {
@@ -340,11 +448,14 @@ test("overall client deadline bounds an in-flight status request", async () => {
   harness.runTimers();
   await settle();
   assert.equal(harness.timerDelays.at(-1), 5_000);
+  now = baseNow + (45 * 60 * 1_000);
   harness.runTimers();
   await settle();
   assert.equal(statusOptions.signal.aborted, true);
   assert.equal(harness.window.vigiVisionRecordingSearch.getState().polling, false);
   assert.equal(harness.pendingTimerCount(), 0);
+  assert.match(harness.recordingSearchStatus.textContent, /클라이언트의 상태 확인이 종료되었습니다/);
+  assert.doesNotMatch(harness.recordingSearchStatus.textContent, /검색이 안전하게 실패했습니다/);
 });
 
 test("intentional status abort after teardown does not announce a failure", async () => {

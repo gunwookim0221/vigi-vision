@@ -8,7 +8,11 @@ import re
 from dataclasses import dataclass, replace
 from typing import Final
 
-_LOGGER = logging.getLogger(__name__)
+# Uvicorn's documented default configuration owns the ``uvicorn`` handler and
+# does not configure the process root logger. A child of ``uvicorn.error``
+# therefore reaches the established stderr formatter instead of depending on
+# Python's environment-sensitive ``lastResort`` fallback.
+_LOGGER = logging.getLogger("uvicorn.error.vigi_vision.phase7e")
 
 MEDIA_PROBE_DIAGNOSTIC_VERSION: Final = 1
 MEDIA_PROBE_STAGES: Final = frozenset(

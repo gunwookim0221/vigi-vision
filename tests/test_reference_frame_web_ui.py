@@ -230,6 +230,7 @@ def test_web_ui_exposes_the_phase7e_search_surface_safely() -> None:
     assert 'id="recording-search-end"' in page.text
     assert 'id="recording-search-start"' in page.text
     assert 'id="recording-search-status"' in page.text
+    assert 'role="status" aria-live="polite" aria-busy="false" tabindex="-1"' in page.text
     assert 'aria-live="polite"' in page.text
     assert script.status_code == 200
     assert 'fetch("/api/v1/recording-searches"' in script.text
