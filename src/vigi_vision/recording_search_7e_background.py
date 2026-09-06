@@ -285,9 +285,15 @@ class Phase7EBackgroundManager:
         if current is None:
             return
         with self._lock:
+            existing_diagnostic = job.failure_diagnostic
             job.status = current.phase7.status
             job.error_code = current.phase7.reason_code
-            job.failure_diagnostic = None
+            if not (
+                current.phase7.status == "FAILED"
+                and existing_diagnostic is not None
+                and existing_diagnostic.category == current.phase7.reason_code
+            ):
+                job.failure_diagnostic = None
 
     def _remember(self, job: _Job) -> None:
         self._jobs[job.request_id] = job

@@ -136,6 +136,12 @@ class CommonSessionError(RecordingSearchError):
         return self.code
 
 
+class CommonSessionInternalError(CommonSessionError):
+    """An unexpected application failure at the internal execution boundary."""
+
+    code = "internal_error"
+
+
 class CommonSessionValidationError(CommonSessionError):
     """The request or observed media is outside the approved contract."""
 
@@ -1615,9 +1621,7 @@ class CommonSessionAcquirer:
             except CommonSessionError:
                 raise
             except Exception as exc:  # native probe failures are redacted.
-                raise CommonSessionMediaError(
-                    probe_diagnostic=Phase7EMediaProbeDiagnostic("unexpected_probe_failure")
-                ) from exc
+                raise CommonSessionInternalError from exc
             active_budget.check()
             try:
                 media.validate()
@@ -1629,20 +1633,23 @@ class CommonSessionAcquirer:
                 media.duration_ticks * media.time_base_num,
                 media.time_base_den,
             )
-            if observed_duration < request.duration_seconds:
+            duration_tolerance = Fraction(
+                media.average_frame_rate_den,
+                media.average_frame_rate_num,
+            )
+            lower_duration = request.duration_seconds - duration_tolerance
+            upper_duration = request.duration_seconds + duration_tolerance
+            if observed_duration < lower_duration:
                 raise CommonSessionMediaError(
                     probe_diagnostic=_duration_diagnostic(
                         media,
                         request.duration_seconds,
                         stage="duration_too_short",
                         observed_duration=observed_duration,
+                        duration_tolerance=duration_tolerance,
                     )
                 )
-            duration_tolerance = Fraction(
-                media.average_frame_rate_den,
-                media.average_frame_rate_num,
-            )
-            if observed_duration > request.duration_seconds + duration_tolerance:
+            if observed_duration > upper_duration:
                 raise CommonSessionMediaError(
                     probe_diagnostic=_duration_diagnostic(
                         media,
@@ -1698,8 +1705,9 @@ class CommonSessionAcquirer:
                 primary = CommonSessionReplayError()
             if clip is not None:
                 _capture_retained_bytes(primary, clip)
+                _emit_probe_diagnostic(self, request, primary)
                 _remove_clip_preserving_primary(clip, primary)
-            _emit_probe_diagnostic(self, request, primary)
+            _finalize_probe_diagnostic(primary)
             if primary is exc:
                 raise
             raise primary from exc
@@ -1709,8 +1717,9 @@ class CommonSessionAcquirer:
             )
             if clip is not None:
                 _capture_retained_bytes(primary, clip)
+                _emit_probe_diagnostic(self, request, primary)
                 _remove_clip_preserving_primary(clip, primary)
-            _emit_probe_diagnostic(self, request, primary)
+            _finalize_probe_diagnostic(primary)
             raise primary from exc
 
     def _validate_retained_clip(self, clip: ReplayClip, maximum_bytes: int) -> None:
@@ -2860,16 +2869,23 @@ def _emit_probe_diagnostic(
     if diagnostic is None:
         return
     try:
-        primary.probe_diagnostic = diagnostic.with_cleanup(
-            failed=primary.cleanup_failure_code is not None
-        )
         acquirer.diagnostic_sink(
             request.investigation_id,
             request.run_id,
-            primary.probe_diagnostic,
+            diagnostic,
         )
     except Exception:  # noqa: BLE001 - diagnostics never replace the primary failure.
         return
+
+
+def _finalize_probe_diagnostic(primary: CommonSessionError) -> None:
+    """Attach the post-cleanup outcome after the authoritative warning is emitted."""
+    diagnostic = primary.probe_diagnostic
+    if diagnostic is None:
+        return
+    primary.probe_diagnostic = diagnostic.with_cleanup(
+        failed=primary.cleanup_failure_code is not None
+    )
 
 
 def _path_outside_local_confinement(path: Path) -> bool:
@@ -3480,6 +3496,7 @@ __all__ = [
     "CommonSessionDecoderTimeoutError",
     "CommonSessionDeadlineError",
     "CommonSessionError",
+    "CommonSessionInternalError",
     "CommonSessionMediaError",
     "CommonSessionMediaProbeTimeoutError",
     "CommonSessionMissingPtsError",

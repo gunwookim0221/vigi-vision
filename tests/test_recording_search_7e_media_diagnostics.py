@@ -15,6 +15,8 @@ import pytest
 from vigi_vision.recording import RecordingSegment, RecordingWindow, ReplayRequest
 from vigi_vision.recording_search_7e_1c import (
     CommonSessionAcquirer,
+    CommonSessionError,
+    CommonSessionInternalError,
     CommonSessionMediaError,
     CommonSessionMediaProbeTimeoutError,
     CommonSessionRequest,
@@ -124,15 +126,15 @@ def test_ffprobe_timeout_has_distinct_stage() -> None:
 
 
 class _Planner:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, segment_seconds: int = 30) -> None:
         start = datetime(2026, 7, 20, 3, 0, tzinfo=timezone.utc)
         self.segment = RecordingSegment(
             1,
             start.date(),
             int(start.timestamp()),
-            int((start + timedelta(seconds=30)).timestamp()),
+            int((start + timedelta(seconds=segment_seconds)).timestamp()),
             start,
-            start + timedelta(seconds=30),
+            start + timedelta(seconds=segment_seconds),
         )
         self.root = root
 
@@ -162,48 +164,77 @@ class _Extractor:
 
 
 class _ProbeFacts:
-    def __init__(self, *, duration_ticks: int = 4) -> None:
+    def __init__(  # noqa: PLR0913
+        self,
+        *,
+        duration_ticks: int = 4,
+        time_base_num: int = 1,
+        time_base_den: int = 1,
+        rate_num: int = 1,
+        rate_den: int = 1,
+        failure: BaseException | None = None,
+    ) -> None:
         self.duration_ticks = duration_ticks
+        self.time_base_num = time_base_num
+        self.time_base_den = time_base_den
+        self.rate_num = rate_num
+        self.rate_den = rate_den
+        self.failure = failure
 
     def probe(self, _path: Path, _timeout: float) -> MediaProbeFacts:
+        if self.failure is not None:
+            raise self.failure
         return MediaProbeFacts(
             0,
             1,
             0,
             0,
-            1,
-            1,
+            self.time_base_num,
+            self.time_base_den,
             self.duration_ticks,
             "h264",
             "High",
             "yuv420p",
             8,
             8,
-            1,
-            1,
+            self.rate_num,
+            self.rate_den,
             41,
         )
 
 
-def _request() -> CommonSessionRequest:
+def _request(duration: int = 4) -> CommonSessionRequest:
     return CommonSessionRequest.from_start_and_duration(
-        "inv-safe", "run-safe", 1, datetime(2026, 7, 20, 3, 0, tzinfo=timezone.utc), 4
+        "inv-safe", "run-safe", 1, datetime(2026, 7, 20, 3, 0, tzinfo=timezone.utc), duration
     )
 
 
-def _acquirer(
+def _acquirer(  # noqa: PLR0913
     tmp_path: Path,
     path: object | None = None,
     *,
     duration_ticks: int = 4,
     sink: object | None = None,
+    time_base_num: int = 1,
+    time_base_den: int = 1,
+    rate_num: int = 1,
+    rate_den: int = 1,
+    failure: BaseException | None = None,
+    segment_seconds: int = 30,
 ) -> CommonSessionAcquirer:
     output = tmp_path / "replay.mp4" if path is None else path
     kwargs = {} if sink is None else {"diagnostic_sink": sink}
     return CommonSessionAcquirer(
-        _Planner(tmp_path),
+        _Planner(tmp_path, segment_seconds=segment_seconds),
         _Extractor(output),
-        _ProbeFacts(duration_ticks=duration_ticks),
+        _ProbeFacts(
+            duration_ticks=duration_ticks,
+            time_base_num=time_base_num,
+            time_base_den=time_base_den,
+            rate_num=rate_num,
+            rate_den=rate_den,
+            failure=failure,
+        ),
         **kwargs,
     )  # type: ignore[arg-type]
 
@@ -244,9 +275,11 @@ def test_retained_file_failure_is_diagnosed_and_cleaned(
 
 def test_duration_diagnostics_and_capture_failure_keep_primary(tmp_path: Path) -> None:
     captured: list[Phase7EMediaProbeDiagnostic] = []
+    observed_before_cleanup: list[bool] = []
 
     def sink(_investigation: str, _run: str, diagnostic: Phase7EMediaProbeDiagnostic) -> None:
         captured.append(diagnostic)
+        observed_before_cleanup.append((tmp_path / "replay.mp4").exists())
         failure = "path=C:/secret token=password"
         raise RuntimeError(failure)
 
@@ -255,7 +288,8 @@ def test_duration_diagnostics_and_capture_failure_keep_primary(tmp_path: Path) -
     assert raised.value.code == "media_probe_failed"
     assert raised.value.probe_diagnostic is not None
     assert raised.value.probe_diagnostic.stage == "duration_too_short"
-    assert captured[0].cleanup_outcome == "succeeded"
+    assert captured[0].cleanup_outcome == "not_required"
+    assert observed_before_cleanup == [True]
     assert not (tmp_path / "replay.mp4").exists()
 
 
@@ -269,6 +303,87 @@ def test_duration_tolerance_boundary_is_preserved(tmp_path: Path) -> None:
     assert raised.value.probe_diagnostic is not None
     assert raised.value.probe_diagnostic.stage == "duration_too_long"
     assert not (tmp_path / "replay.mp4").exists()
+
+
+@pytest.mark.parametrize(
+    ("duration_ticks", "expected_stage"),
+    [
+        (60_000, None),
+        (59_999, None),
+        (59_960, None),
+        (59_959, "duration_too_short"),
+        (60_040, None),
+        (60_041, "duration_too_long"),
+    ],
+)
+def test_duration_tolerance_is_symmetric_and_inclusive(
+    tmp_path: Path,
+    duration_ticks: int,
+    expected_stage: str | None,
+) -> None:
+    acquirer = _acquirer(
+        tmp_path,
+        duration_ticks=duration_ticks,
+        time_base_den=1_000,
+        rate_num=25,
+        segment_seconds=900,
+    )
+    if expected_stage is None:
+        acquisition = acquirer.acquire(_request(60))
+        acquisition.remove()
+    else:
+        with pytest.raises(CommonSessionMediaError) as raised:
+            acquirer.acquire(_request(60))
+        assert raised.value.probe_diagnostic is not None
+        assert raised.value.probe_diagnostic.stage == expected_stage
+
+
+def test_stage_one_short_duration_inside_one_frame_is_accepted(tmp_path: Path) -> None:
+    acquisition = _acquirer(
+        tmp_path,
+        duration_ticks=19_990,
+        time_base_den=1_000,
+        rate_num=25,
+        segment_seconds=900,
+    ).acquire(_request(20))
+    acquisition.remove()
+
+
+class _CustomProbeFailureError(Exception):
+    pass
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [RuntimeError("private.example?token=secret"), _CustomProbeFailureError("password=secret")],
+)
+def test_unexpected_probe_exceptions_cross_internal_boundary(
+    tmp_path: Path,
+    failure: BaseException,
+) -> None:
+    with pytest.raises(CommonSessionError) as raised:
+        _acquirer(tmp_path, failure=failure).acquire(_request())
+    assert type(raised.value).__name__ == "CommonSessionInternalError"
+    assert str(raised.value) == "internal_error"
+    assert raised.value.probe_diagnostic is None
+    assert raised.value.cleanup_failure_code is None
+    assert not (tmp_path / "replay.mp4").exists()
+
+
+def test_unexpected_probe_exception_cleanup_failure_stays_internal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    safe_cleanup_error = "C:/private/password"
+
+    def fail_remove(_self: ReplayClip) -> None:
+        raise OSError(safe_cleanup_error)
+
+    monkeypatch.setattr(ReplayClip, "remove", fail_remove)
+    with pytest.raises(CommonSessionError) as raised:
+        _acquirer(tmp_path, failure=RuntimeError("token=secret")).acquire(_request())
+    assert type(raised.value).__name__ == "CommonSessionInternalError"
+    assert raised.value.cleanup_failure_code == "cleanup_failed"
 
 
 def test_nonregular_outside_and_unstable_files_have_closed_stages(
@@ -391,3 +506,13 @@ def test_process_projection_retains_media_facts_without_public_shape_change() ->
         "cleanup_outcome",
     }
     assert public.diagnostic.as_process_dict()["media_probe"] == error.probe_diagnostic.as_dict()
+
+
+def test_unexpected_probe_internal_error_projection_is_closed() -> None:
+    public = _execution_public_error(CommonSessionInternalError())
+    assert public.code == "internal_error"
+    assert public.diagnostic is not None
+    assert public.diagnostic.boundary == "internal"
+    assert public.diagnostic.category == "internal_error"
+    assert public.diagnostic.exception_class == "CommonSessionInternalError"
+    assert public.diagnostic.media_probe is None

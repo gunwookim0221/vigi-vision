@@ -39,6 +39,7 @@ from vigi_vision.recording_search_7e_1c import (
 )
 from vigi_vision.recording_search_7e_1d import Phase7EStatus
 from vigi_vision.recording_search_7e_background import Phase7EBackgroundManager
+from vigi_vision.recording_search_7e_media_diagnostics import Phase7EMediaProbeDiagnostic
 from vigi_vision.recording_search_7e_models import Schema5PhaseState, StrictIdentityEnvelope
 from vigi_vision.recording_search_7e_phase8 import Phase8HandoffRepository
 from vigi_vision.recording_search_7e_public import (
@@ -68,6 +69,7 @@ if TYPE_CHECKING:
 
 _NOW = datetime(2026, 8, 2, 4, 5, 6, tzinfo=timezone.utc)
 _REQUEST_ID = "12345678-1234-4234-8234-123456789abc"
+_MEDIA_PROBE_FAILED = "media_probe_failed"
 _JPEG_BYTES = base64.b64decode(
     "/9j/4AAQSkZJRgABAgAAAQABAAD//gAQTGF2YzYyLjI4LjEwMgD/2wBDAAgEBAQEBAUFBQUFBQYGBgYGBgYGBgYHBwcICAgHBwcGBgcHCAgICAkJCQgICAgJCQoKCgwMCwsODg4RERT/xABLAAEBAAAAAAAAAAAAAAAAAAAACAEBAAAAAAAAAAAAAAAAAAAAABABAAAAAAAAAAAAAAAAAAAAABEBAAAAAAAAAAAAAAAAAAAAAP/AABEIAtAFAAMBIgACEQADEQD/2gAMAwEAAhEDEQA/AJ/AB//Z"
 )
@@ -175,6 +177,35 @@ class _UnannotatedPublicFailingService(_FailingService):
         raise Phase7EPublicError(unsafe_detail)
 
 
+class _DurableMediaFailureService(_FailingService):
+    def resolve_existing(self, prepared: object) -> Phase7EPublicStatus | None:
+        if not self.execute_failed.is_set():
+            return None
+        request = prepared.request
+        return Phase7EPublicStatus(
+            Phase7EStatus(
+                request.investigation_id,
+                request.run_id,
+                5,
+                "FAILED",
+                _MEDIA_PROBE_FAILED,
+                None,
+            )
+        )
+
+    def execute_prepared(self, prepared: object, *, cancellation: object) -> Phase7EPublicStatus:
+        _ = (prepared, cancellation)
+        self.execute_failed.set()
+        diagnostic = Phase7EFailureDiagnostic(
+            "media_validation",
+            _MEDIA_PROBE_FAILED,
+            "CommonSessionMediaError",
+            "no_failure_reported",
+            media_probe=Phase7EMediaProbeDiagnostic("ffprobe_invalid_json"),
+        )
+        raise Phase7EPublicError(_MEDIA_PROBE_FAILED, diagnostic=diagnostic)
+
+
 class _DurableRetryDuringActiveService(_BlockingService):
     def resolve_existing(self, prepared: object) -> Phase7EPublicStatus | None:
         request = prepared.request
@@ -259,6 +290,28 @@ def test_background_failures_remain_observable(
     assert projected.phase7.status == expected
     assert service.resolve_calls >= 2
     manager.close()
+
+
+def test_background_keeps_media_diagnostic_after_durable_schema5_failure() -> None:
+    service = _DurableMediaFailureService(durable_interrupted=False)
+    manager = Phase7EBackgroundManager(cast("Any", service))
+    receipt = manager.start("inv-01", "2026-07-20T12:00:05", _REQUEST_ID)
+    assert service.execute_failed.wait(1)
+    deadline = time.monotonic() + 1
+    job = cast("Any", manager)._jobs[receipt.request_id]
+    while job.failure_diagnostic is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert job.failure_diagnostic is not None
+    assert job.failure_diagnostic.category == _MEDIA_PROBE_FAILED
+    assert job.failure_diagnostic.media_probe is not None
+    assert job.failure_diagnostic.media_probe.stage == "ffprobe_invalid_json"
+    first = manager.pre_run_failure_diagnostic(receipt.investigation_id, receipt.run_id)
+    second = manager.pre_run_failure_diagnostic(receipt.investigation_id, receipt.run_id)
+    assert first == second == job.failure_diagnostic
+    manager.close()
+    restarted = Phase7EBackgroundManager(cast("Any", service))
+    assert restarted.pre_run_failure_diagnostic(receipt.investigation_id, receipt.run_id) is None
+    restarted.close()
 
 
 def test_background_rejects_unannotated_failure_text_from_public_status() -> None:

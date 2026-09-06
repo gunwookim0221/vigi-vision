@@ -106,6 +106,7 @@ _SAFE_EXCEPTION_CLASSES: Final = frozenset(
     {
         "NvrRequestError",
         "CommonSessionError",
+        "CommonSessionInternalError",
         "CommonSessionValidationError",
         "CommonSessionRecordingUnavailableError",
         "CommonSessionReplayTimeoutError",
