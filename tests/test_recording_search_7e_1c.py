@@ -225,11 +225,11 @@ def test_replay_timeout_is_safe_and_partial_path_is_removed(tmp_path: Path) -> N
 def test_primary_media_failure_survives_successful_temp_cleanup(tmp_path: Path) -> None:
     acquirer, extractor, planner = _acquirer(tmp_path)
 
-    class ShortProbe(_Probe):
+    class InvalidProbe(_Probe):
         def probe(self, path: Path, timeout_seconds: float) -> MediaProbeFacts:
-            return replace(super().probe(path, timeout_seconds), duration_ticks=1)
+            return replace(super().probe(path, timeout_seconds), duration_ticks=0)
 
-    acquirer = CommonSessionAcquirer(planner, extractor, ShortProbe())
+    acquirer = CommonSessionAcquirer(planner, extractor, InvalidProbe())
     with pytest.raises(CommonSessionMediaError) as exception_info:
         acquirer.acquire(_request())
 
@@ -246,9 +246,9 @@ def test_primary_media_failure_retains_failed_clip_when_temp_cleanup_fails(
 ) -> None:
     acquirer, extractor, planner = _acquirer(tmp_path)
 
-    class ShortProbe(_Probe):
+    class InvalidProbe(_Probe):
         def probe(self, path: Path, timeout_seconds: float) -> MediaProbeFacts:
-            return replace(super().probe(path, timeout_seconds), duration_ticks=1)
+            return replace(super().probe(path, timeout_seconds), duration_ticks=0)
 
     remove_calls = [0]
 
@@ -257,7 +257,7 @@ def test_primary_media_failure_retains_failed_clip_when_temp_cleanup_fails(
         raise OSError from None
 
     monkeypatch.setattr(ReplayClip, "remove", fail_remove)
-    acquirer = CommonSessionAcquirer(planner, extractor, ShortProbe())
+    acquirer = CommonSessionAcquirer(planner, extractor, InvalidProbe())
     with pytest.raises(CommonSessionMediaError) as exception_info:
         acquirer.acquire(_request())
 
@@ -665,9 +665,9 @@ def test_executor_publishes_primary_failure_when_temp_cleanup_fails(
     base = (policy, _env(by_family["coarse-plan"]), *targets)
     _unused_acquirer, extractor, planner = _acquirer(tmp_path)
 
-    class ShortProbe(_Probe):
+    class InvalidProbe(_Probe):
         def probe(self, path: Path, timeout_seconds: float) -> MediaProbeFacts:
-            return replace(super().probe(path, timeout_seconds), duration_ticks=1)
+            return replace(super().probe(path, timeout_seconds), duration_ticks=0)
 
     remove_calls = [0]
 
@@ -677,7 +677,7 @@ def test_executor_publishes_primary_failure_when_temp_cleanup_fails(
 
     monkeypatch.setattr(ReplayClip, "remove", fail_remove)
     repository = RecordingSearch7ERepository(tmp_path / "runs", lock_timeout_seconds=0)
-    acquirer = CommonSessionAcquirer(planner, extractor, ShortProbe())
+    acquirer = CommonSessionAcquirer(planner, extractor, InvalidProbe())
     executor = Phase7E1CExecutor(repository, acquirer)
     with pytest.raises(CommonSessionMediaError) as exception_info:
         executor.execute(
@@ -1106,6 +1106,48 @@ def test_nonzero_start_pts_is_subtracted_once(
     )[0]
     assert frame.raw_pts == 1100
     assert frame.decoded_offset == Fraction(1, 1)
+
+
+def test_decoder_uses_actual_pts_range_for_a_59873ms_clip(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    acquirer, _, _ = _acquirer(tmp_path)
+    acquisition = acquirer.acquire(_request())
+    start = acquisition.request.start_utc
+    request = CommonSessionRequest.from_start_and_duration("inv-01", "run-01", 1, start, 60)
+    media = MediaProbeFacts(
+        selected_video_stream_index=0,
+        video_stream_count=1,
+        audio_stream_count=0,
+        container_start_pts=0,
+        time_base_num=1,
+        time_base_den=1_000,
+        duration_ticks=59_873,
+        codec="hevc",
+        profile="Main",
+        pixel_format="yuv420p",
+        width=1,
+        height=1,
+        average_frame_rate_num=25,
+        average_frame_rate_den=1,
+    )
+    acquisition = replace(acquisition, request=request, media=media)
+    probe = subprocess.CompletedProcess(
+        (),
+        0,
+        json.dumps(
+            {"frames": [{"best_effort_timestamp": str(value)} for value in range(0, 59_841, 40)]}
+        ),
+        "",
+    )
+    monkeypatch.setattr(
+        "vigi_vision.recording_search_7e_1c.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess((), 0, b"\x01\x02\x03", b""),
+    )
+    decoder = FfmpegLocalDecoder(Path("ffmpeg"), Path("ffprobe"), lambda _args, _timeout: probe)
+    frame = decoder.decode(acquisition, (request.end_utc,), 10)[0]
+    assert frame.raw_pts == 59_840
+    assert frame.decoded_offset == Fraction(1_496, 25)
 
 
 def test_timing_rejects_backward_pts_and_cross_pass_redefinition() -> None:

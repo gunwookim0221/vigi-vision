@@ -14,6 +14,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from fractions import Fraction
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from vigi_vision.object_presence_values import ClassificationOutcome, VisualReason
@@ -147,6 +148,7 @@ class Phase7ETerminalReason(str, Enum):
     BASELINE_ONLY_LOWER_BOUND = "BASELINE_ONLY_LOWER_BOUND"
     VISUAL_INDETERMINATE = "VISUAL_INDETERMINATE"
     INCOMPLETE_VISUAL_EVIDENCE = "INCOMPLETE_VISUAL_EVIDENCE"
+    INCOMPLETE_MEDIA_COVERAGE = "INCOMPLETE_MEDIA_COVERAGE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -455,7 +457,7 @@ class Phase7EAdaptiveOrchestrator:
     repository: RecordingSearch7ERepository
     local_evidence: Phase7ELocalEvidenceAdapter
 
-    def execute(  # noqa: PLR0915 - explicit composition of approved boundaries.
+    def execute(  # noqa: PLR0912, PLR0915 - explicit composition of approved boundaries.
         self,
         invocation: Phase7EInvocation,
         acquisition: CommonSessionAcquisition,
@@ -480,7 +482,23 @@ class Phase7EAdaptiveOrchestrator:
             schema5.payload["coarse_target_request_ids"]
         ) != tuple(item.identity for item in bundle.coarse_targets):
             raise Phase7ECorruptError
-        coarse = bundle.coarse_targets
+        execution_request = _available_media_request(invocation.request, acquisition)
+        coverage_complete = execution_request.end_utc == invocation.request.end_utc
+        if coverage_complete:
+            execution_bundle = bundle
+        else:
+            execution_bundle = _available_media_bundle(
+                invocation.request,
+                execution_request,
+                policy_record,
+                bundle,
+            )
+            policy = _legacy_policy(execution_request, policy_record)
+            plan = build_coarse_sampling_plan(
+                policy,
+                support_direction=SupportDirection.BACKWARD_FROM_END,
+            )
+        coarse = execution_bundle.coarse_targets
         logical_end = next(
             item for item in coarse if item.payload["selection_rule"] == "FINAL_STRICTLY_BEFORE_END"
         )
@@ -492,11 +510,11 @@ class Phase7EAdaptiveOrchestrator:
         run = self.local_evidence.execute(
             invocation,
             acquisition,
-            (*bundle.final_support_targets, logical_end),
+            (*execution_bundle.final_support_targets, logical_end),
         )
         if _target_outcome(run, logical_end.identity) == ClassificationOutcome.ABSENT.value:
-            support = bundle.final_support_targets
-            expected = support_target_times(plan, invocation.request.end_utc)
+            support = execution_bundle.final_support_targets
+            expected = support_target_times(plan, execution_request.end_utc)
             if (
                 tuple(
                     _parse_whole_text(str(item.payload["requested_time_utc"])) for item in support
@@ -506,7 +524,14 @@ class Phase7EAdaptiveOrchestrator:
                 raise Phase7EIncompleteEvidenceError
             if any(not _target_is_admitted(run, item.identity) for item in support):
                 raise Phase7EIncompleteEvidenceError
-        c2_snapshot = _build_c2_snapshot(run, invocation.request, policy, plan)
+        # A container may advertise the complete request while its decodable
+        # video PTS ends earlier.  Requests beyond that observed frame boundary
+        # resolve to the last real frame, so their requested timestamps cannot
+        # safely establish a disappearance bracket.  Preserve the observations
+        # and let D2 publish the explicit incomplete-coverage outcome.
+        if coverage_complete and _run_has_incomplete_media_coverage(run):
+            return run
+        c2_snapshot = _build_c2_snapshot(run, execution_request, policy, plan)
         c2 = interpret_coarse_evidence(c2_snapshot)
         if c2.status is CoarseInterpretationStatus.BRACKET_READY:
             if c2.bracket is None:
@@ -568,6 +593,8 @@ class Phase7EAdaptiveOrchestrator:
             narrowed_record = next(item for item in run.records if item.identity == narrowed_id)
             if narrowed_record.payload["upper_support_group_id"] != phase7_support_id:
                 raise Phase7EAdapterError
+            return run
+        if not coverage_complete:
             return run
         d2_snapshot = _build_d2_snapshot(run, c2_snapshot, c2, None, policy)
         d2 = interpret_terminal(
@@ -843,6 +870,19 @@ class Phase7ED2DecisionAdapter:
                 narrowed.payload["interval_start_requested_time_utc"],
                 narrowed.payload["interval_end_requested_time_utc"],
             )
+        if _run_has_incomplete_media_coverage(run):
+            selected = tuple(dict.fromkeys(item.identity for item in observations.values()))
+            if not selected:
+                raise Phase7EIncompleteEvidenceError
+            return Phase7ETerminalDecision(
+                TerminalResultKind.INCONCLUSIVE,
+                Phase7ETerminalReason.INCOMPLETE_MEDIA_COVERAGE,
+                selected,
+                (),
+                None,
+                None,
+                None,
+            )
         schema5 = next(
             (record for record in run.records if record.family == "schema5-manifest"), None
         )
@@ -942,6 +982,109 @@ def _legacy_policy(
             ),
         }
     )
+
+
+def _available_media_request(
+    request: CommonSessionRequest,
+    acquisition: CommonSessionAcquisition,
+) -> CommonSessionRequest:
+    """Bound planning to the whole requested second containing observable media."""
+    observed = acquisition.usable_duration
+    observable_seconds = (observed.numerator + observed.denominator - 1) // observed.denominator
+    duration = min(request.duration_seconds, observable_seconds)
+    if duration <= 0:
+        raise Phase7EIncompleteEvidenceError
+    return CommonSessionRequest(
+        request.investigation_id,
+        request.run_id,
+        request.channel_id,
+        request.start_utc,
+        request.start_utc + timedelta(seconds=duration),
+        request.policy,
+    )
+
+
+def _available_media_bundle(
+    request: CommonSessionRequest,
+    execution_request: CommonSessionRequest,
+    policy_record: StrictIdentityEnvelope,
+    authoritative: Phase7ECoarsePlanBundle,
+) -> Phase7ECoarsePlanBundle:
+    """Create request-bound targets over the observable portion of one clip."""
+    policy = _legacy_policy(execution_request, policy_record)
+    plan = build_coarse_sampling_plan(
+        policy,
+        support_direction=SupportDirection.BACKWARD_FROM_END,
+    )
+    existing_by_time = {
+        _parse_whole_text(str(item.payload["requested_time_utc"])): item
+        for item in authoritative.coarse_targets
+    }
+    sequence = max(int(item.payload["sequence"]) for item in authoritative.coarse_targets) + 1
+    coarse: list[StrictIdentityEnvelope] = []
+    for target in (execution_request.start_utc, *plan.target_times):
+        existing = existing_by_time.get(target)
+        if existing is not None:
+            coarse.append(existing)
+            continue
+        coarse.append(
+            make_target_envelope(
+                request,
+                authoritative.plan.identity,
+                sequence,
+                target,
+                kind="COARSE",
+                selection_rule=(
+                    "FINAL_STRICTLY_BEFORE_END"
+                    if target == execution_request.end_utc
+                    else "NEAREST_IN_HALF_OPEN_SESSION"
+                ),
+            )
+        )
+        sequence += 1
+    endpoint = coarse[-1]
+    support = tuple(
+        make_target_envelope(
+            request,
+            authoritative.plan.identity,
+            sequence + index,
+            target,
+            kind="SUPPORT",
+            selection_rule="NEAREST_IN_HALF_OPEN_SESSION",
+            origin_target_request_id=endpoint.identity,
+        )
+        for index, target in enumerate(support_target_times(plan, execution_request.end_utc))
+    )
+    return Phase7ECoarsePlanBundle(authoritative.plan, tuple(coarse), support)
+
+
+def _run_has_incomplete_media_coverage(run: Phase7ERun) -> bool:
+    """Return whether the common session ends before the final requested second."""
+    session = _one_family(run, "common-session")
+    start = _parse_whole_text(str(session.payload["replay_start_requested_time_utc"]))
+    end = _parse_whole_text(str(session.payload["replay_end_requested_time_utc"]))
+    requested_seconds = int((end - start).total_seconds())
+    container_observed = Fraction(
+        int(session.payload["duration_ticks"]) * int(session.payload["time_base_num"]),
+        int(session.payload["time_base_den"]),
+    )
+    frames = tuple(item for item in run.records if item.family == "frame")
+    if not frames:
+        raise Phase7EIncompleteEvidenceError
+    maximum_frame_offset = max(
+        Fraction(
+            (int(item.payload["raw_pts"]) - int(item.payload["container_start_pts"]))
+            * int(item.payload["time_base_num"]),
+            int(item.payload["time_base_den"]),
+        )
+        for item in frames
+    )
+    frame_observed = Fraction(
+        maximum_frame_offset.numerator // maximum_frame_offset.denominator + 1
+    )
+    observed = min(container_observed, frame_observed)
+    observable_seconds = (observed.numerator + observed.denominator - 1) // observed.denominator
+    return observable_seconds < requested_seconds
 
 
 def _target_at(run: Phase7ERun, requested: datetime) -> StrictIdentityEnvelope | None:
@@ -1984,7 +2127,7 @@ def _validate_target_for_session(
         raise Phase7EAdapterError
     if requested == request.end_utc and not logical_end:
         raise Phase7EAdapterError
-    if requested < request.end_utc and logical_end:
+    if logical_end and target.payload.get("kind") not in {"COARSE", "BINARY"}:
         raise Phase7EAdapterError
 
 

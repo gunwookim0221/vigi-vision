@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO, cast
 from urllib.error import HTTPError, URLError
@@ -167,7 +168,10 @@ def _start_and_wait(
         response_status, projected = _request_json(base_url, cast("str", accepted["status_url"]))
         assert response_status == 200, projected
         saw_running = saw_running or projected["status"] in {"ACCEPTED", "RUNNING"}
-        if projected["status"] not in {"ACCEPTED", "RUNNING"}:
+        if projected["status"] not in {"ACCEPTED", "RUNNING"} and not (
+            projected["status"] in {"FOUND", "NOT_FOUND", "INCONCLUSIVE"}
+            and projected.get("terminal_details") is None
+        ):
             return projected, saw_running
         time.sleep(0.03)
     pytest.fail("Phase 7E fixture did not reach a terminal status")
@@ -192,9 +196,13 @@ def _event_lines(output: str) -> list[str]:
     return [line for line in output.splitlines() if '"event":"phase7e.media_probe_failure"' in line]
 
 
+def _parse_utc(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 @pytest.mark.parametrize(
     "uvicorn_process",
-    ["duration_too_short", "ffprobe_invalid_json"],
+    ["invalid_duration", "ffprobe_invalid_json"],
     indirect=True,
 )
 def test_real_uvicorn_console_exposes_one_safe_media_failure_event(
@@ -202,9 +210,7 @@ def test_real_uvicorn_console_exposes_one_safe_media_failure_event(
 ) -> None:
     base_url, root, process, stdout_stream, stderr_stream = uvicorn_process
     stage = (
-        "ffprobe_invalid_json"
-        if "ffprobe_invalid_json" in os.fspath(root)
-        else "duration_too_short"
+        "ffprobe_invalid_json" if "ffprobe_invalid_json" in os.fspath(root) else "invalid_duration"
     )
     suffix = "2" if stage == "ffprobe_invalid_json" else "1"
     request_id = f"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa{suffix}"
@@ -247,6 +253,72 @@ def test_real_uvicorn_production_jitter_reaches_schema7(
     assert projected["status"] == "FOUND"
     assert projected["schema_version"] == 7
     assert projected["run_id"] == f"search-run-{request_id.replace('-', '')}"
+    assert projected["terminal_details"]["observed_end_time_utc"].endswith("27.833Z")
+    assert projected["terminal_details"]["coverage_complete"] is True
+    assert not (root / "temporary-replay.mp4").exists()
+    stdout, stderr = _stop_server(process, stdout_stream, stderr_stream)
+    assert _events(f"{stdout}\n{stderr}") == []
+
+
+@pytest.mark.parametrize(
+    ("uvicorn_process", "expected_status", "observed_suffix"),
+    [
+        ("available_found", "FOUND", "23.160Z"),
+        ("available_inconclusive", "INCONCLUSIVE", "23.160Z"),
+        ("available_pts_tail_missing", "INCONCLUSIVE", "18.000Z"),
+    ],
+    indirect=["uvicorn_process"],
+)
+def test_real_uvicorn_uses_available_media_to_reach_schema7(
+    uvicorn_process: tuple[str, Path, subprocess.Popen[str], TextIO, TextIO],
+    expected_status: str,
+    observed_suffix: str,
+) -> None:
+    base_url, root, process, stdout_stream, stderr_stream = uvicorn_process
+    request_id = (
+        "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        if expected_status == "FOUND"
+        else "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    )
+    projected, saw_running = _start_and_wait(
+        base_url,
+        request_id=request_id,
+        search_end="2026-07-20T12:35:28",
+    )
+    assert saw_running
+    assert projected["status"] == expected_status
+    assert projected["schema_version"] == 7
+    details = projected["terminal_details"]
+    assert details["observed_end_time_utc"].endswith(observed_suffix)
+    assert details["coverage_complete"] is False
+    if expected_status == "FOUND":
+        assert details["last_present_time_utc"] is not None
+        assert details["first_absent_time_utc"] is not None
+        assert _parse_utc(details["observed_start_time_utc"]) <= _parse_utc(
+            details["last_present_time_utc"]
+        )
+        assert _parse_utc(details["last_present_time_utc"]) < _parse_utc(
+            details["first_absent_time_utc"]
+        )
+        assert _parse_utc(details["first_absent_time_utc"]) <= _parse_utc(
+            details["observed_end_time_utc"]
+        )
+    else:
+        assert projected["reason_code"] == "INCOMPLETE_MEDIA_COVERAGE"
+        assert details["last_present_time_utc"] is None
+        assert details["first_absent_time_utc"] is None
+    restored_status, restored = _request_json(
+        base_url,
+        f"/api/v1/recording-searches/{_INVESTIGATION_ID}/{projected['run_id']}",
+    )
+    assert restored_status == 200
+    assert restored == projected
+    unrelated_run = "search-run-eeeeeeeeeeee4eee8eeeeeeeeeeeeeee"
+    unrelated_status, _unrelated = _request_json(
+        base_url,
+        f"/api/v1/recording-searches/{_INVESTIGATION_ID}/{unrelated_run}",
+    )
+    assert unrelated_status == 404
     assert not (root / "temporary-replay.mp4").exists()
     stdout, stderr = _stop_server(process, stdout_stream, stderr_stream)
     assert _events(f"{stdout}\n{stderr}") == []

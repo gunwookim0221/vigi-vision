@@ -10,6 +10,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from fractions import Fraction
 from functools import cache
 from pathlib import Path
 from threading import Event, Lock
@@ -547,8 +548,14 @@ class _DelayedFailingProbe(_Probe):
 
 
 class _TimelineDecoder:
-    def __init__(self, *, decoded_dimensions: tuple[int, int] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        decoded_dimensions: tuple[int, int] | None = None,
+        maximum_offset: Fraction | None = None,
+    ) -> None:
         self.decoded_dimensions = decoded_dimensions
+        self.maximum_offset = maximum_offset
         self.selected_indices: list[int] = []
 
     def decode(
@@ -562,17 +569,32 @@ class _TimelineDecoder:
         width, height = self.decoded_dimensions or (session.media.width, session.media.height)
         for target in targets:
             offset = int((target - session.request.start_utc).total_seconds())
-            selected = min(offset, int(session.request.duration_seconds) - 1)
+            frame_period = Fraction(
+                session.media.average_frame_rate_den,
+                session.media.average_frame_rate_num,
+            )
+            observed_last = session.usable_duration - frame_period
+            if self.maximum_offset is not None:
+                observed_last = min(observed_last, self.maximum_offset)
+            selected_offset = min(Fraction(offset), observed_last)
+            raw_pts = (
+                selected_offset * session.media.time_base_den // session.media.time_base_num
+                + session.media.container_start_pts
+            )
+            selected = int(raw_pts - session.media.container_start_pts)
             self.selected_indices.append(selected)
             frames.append(
                 DecodedLocalFrame(
                     target,
-                    selected,
+                    int(raw_pts),
                     selected,
                     width,
                     height,
-                    bytes([selected]) * (width * height * 3),
+                    bytes([selected % 256]) * (width * height * 3),
                     decode_session_id=session.common_session_id,
+                    container_start_pts=session.media.container_start_pts,
+                    time_base_num=session.media.time_base_num,
+                    time_base_den=session.media.time_base_den,
                 )
             )
         return tuple(frames)
@@ -725,9 +747,12 @@ def create_uvicorn_phase7e_fixture_app() -> FastAPI:
     root_text = os.environ.get("VIGI_PHASE7E_UVICORN_TEST_ROOT")
     scenario = os.environ.get("VIGI_PHASE7E_UVICORN_TEST_SCENARIO")
     if root_text is None or scenario not in {
-        "duration_too_short",
+        "invalid_duration",
         "ffprobe_invalid_json",
         "schema7_jitter",
+        "available_found",
+        "available_inconclusive",
+        "available_pts_tail_missing",
     }:
         raise RuntimeError(_FIXTURE_CONFIGURATION_ERROR)
     root = Path(root_text).resolve(strict=True)
@@ -754,13 +779,33 @@ def create_uvicorn_phase7e_fixture_app() -> FastAPI:
                 "rtsp://operator:uvicorn-secret-sentinel@private.example/replay",
             )
 
-    if scenario == "duration_too_short":
-        probe = _DelayedProbe(duration_ticks=1)
+    if scenario == "invalid_duration":
+        probe = _DelayedProbe(duration_ticks=0)
     elif scenario == "ffprobe_invalid_json":
         probe = _DelayedFailingProbe()
-    else:
-        probe = _DelayedProbe(
+    elif scenario == "schema7_jitter":
+        probe = _Probe(
             duration_ticks=59_873,
+            time_base_den=1_000,
+            codec="hevc",
+            profile="Main",
+            width=2_560,
+            height=1_440,
+            average_frame_rate_num=25,
+        )
+    elif scenario in {"available_found", "available_inconclusive"}:
+        probe = _Probe(
+            duration_ticks=55_200,
+            time_base_den=1_000,
+            codec="hevc",
+            profile="Main",
+            width=2_560,
+            height=1_440,
+            average_frame_rate_num=25,
+        )
+    else:
+        probe = _Probe(
+            duration_ticks=60_000,
             time_base_den=1_000,
             codec="hevc",
             profile="Main",
@@ -782,15 +827,27 @@ def create_uvicorn_phase7e_fixture_app() -> FastAPI:
             "policy",
             {**policy.payload, "binary_stop_seconds": 60},
         )
-        if scenario == "schema7_jitter"
+        if scenario
+        in {
+            "schema7_jitter",
+            "available_found",
+            "available_inconclusive",
+            "available_pts_tail_missing",
+        }
         else policy
     )
     service = Phase7EPublicService(
         repository,
         executor,
         confirmation_service,
-        _ReconstructingClassifier(confirmation_service),
-        _TimelineDecoder(decoded_dimensions=(8, 8)),
+        _ReconstructingClassifier(
+            confirmation_service,
+            followup_outcome=("PRESENT" if scenario == "available_inconclusive" else "ABSENT"),
+        ),
+        _TimelineDecoder(
+            decoded_dimensions=(8, 8),
+            maximum_offset=(Fraction(50) if scenario == "available_pts_tail_missing" else None),
+        ),
         timing_policy,
         classifier_policy,
         object_policy,
@@ -973,6 +1030,7 @@ def test_pre_schema5_known_failure_retains_safe_category_without_publication(
         "terminal_result_id": None,
         "phase8_status": None,
         "phase8_reason": None,
+        "terminal_details": None,
     }
     assert len(planner.windows) == 2
     assert extractor.calls == 0
@@ -1035,6 +1093,7 @@ def test_pre_schema5_unexpected_failure_stays_internal_and_redacted(tmp_path: Pa
         "terminal_result_id",
         "phase8_status",
         "phase8_reason",
+        "terminal_details",
     }
     assert "private.example" not in projected.text
     assert "password" not in projected.text

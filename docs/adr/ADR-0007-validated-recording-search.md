@@ -65,6 +65,16 @@ retained MP4, and one common decode session. The five-minute default and exact
 same-session distinct `ABSENT` support. Operational failure cannot become
 visual `INCONCLUSIVE`.
 
+Valid media is not required to match the requested duration within a fixed
+millisecond tolerance. The common-session container duration and decoded frame
+PTS define the observable half-open range, clamped to the authorized request.
+A supported transition wholly inside that range may produce `FOUND`. If a
+genuinely unobserved tail prevents a complete negative conclusion, Schema 7
+produces `INCONCLUSIVE/INCOMPLETE_MEDIA_COVERAGE`; this is an explicit coverage
+limitation over valid evidence, not a fabricated visual observation or an
+operational media failure. Missing video, invalid timing, corruption, and
+decode failure remain closed operational failures.
+
 Schema 5 is the pre-acquisition RUNNING request/policy/plan binding and contains
 no stream, session, frame, or observation facts. After successful replay,
 ffprobe, media publication, and strict readback, one atomic transition creates
@@ -438,6 +448,8 @@ and clean up on one local host.
 - Current VIGI search results are explicitly request-relative intervals with an
   unknown/unbounded physical-origin bias; they are useful for bounded human
   review but cannot establish an exact physical event time.
+- The browser reports the last `PRESENT`, first `ABSENT`, estimated interval,
+  source timezone, and actual observed media range for a valid terminal run.
 - The conservative single-session support rule may withhold FOUND or NOT_FOUND
   from static, aliased, gapped, or poorly aligned recordings. This is an
   intentional false-absence safeguard.

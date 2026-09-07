@@ -68,6 +68,19 @@ class RecordingSearchRequestBody(BaseModel):
         )
 
 
+class Phase7ETerminalDetailsResponse(BaseModel):
+    """Safe terminal timing and available-media projection."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    last_present_time_utc: str | None
+    first_absent_time_utc: str | None
+    observed_start_time_utc: str
+    observed_end_time_utc: str
+    coverage_complete: bool
+    source_timezone: str
+
+
 class Phase7EStatusResponse(BaseModel):
     """Credential-free request-relative status projection."""
 
@@ -81,6 +94,7 @@ class Phase7EStatusResponse(BaseModel):
     terminal_result_id: str | None
     phase8_status: str | None
     phase8_reason: str | None
+    terminal_details: Phase7ETerminalDetailsResponse | None
 
 
 class Phase7EStartRequestBody(BaseModel):

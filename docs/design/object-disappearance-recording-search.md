@@ -114,7 +114,11 @@ The baseline is not common-session evidence. Automatic `FOUND` requires a
 same-session `PRESENT` lower observation and a same-session supported `ABSENT`
 upper group. Baseline plus first recording `ABSENT` is terminal
 `INCONCLUSIVE/BASELINE_ONLY_LOWER_BOUND`, never `FOUND`. Operational failure is
-never visual `INCONCLUSIVE`.
+never visual `INCONCLUSIVE`. A structurally valid, decodable common session that
+ends before the requested final second is different: the observed portion may
+still prove `FOUND`; otherwise Schema 7 records
+`INCONCLUSIVE/INCOMPLETE_MEDIA_COVERAGE` rather than inventing evidence for the
+unobserved tail.
 
 ### Repository roots, staging, and locks
 
@@ -897,7 +901,7 @@ The diagnostic stage is closed and path-free. It distinguishes extracted-file
 missing, non-regular, outside-confinement, empty, oversized, or unstable media;
 ffprobe timeout, unavailable, nonzero exit, invalid JSON, or invalid shape;
 missing or unexpected video streams; unsupported codec; invalid dimensions or
-time base; missing or invalid duration; duration too short or too long;
+time base; missing or invalid duration; legacy duration-bound classifications;
 probe-facts mismatch; and an unexpected native probe failure. Safe bounded facts are
 limited to byte length, ffprobe/JSON classifications, stream counts, an
 allowlisted codec class, dimensions, millisecond duration facts, and cleanup
@@ -905,15 +909,20 @@ outcome. Raw paths, commands, stderr, exception text, URLs, credentials, and
 media digests are never retained or emitted. Diagnostic capture is best effort
 and cannot replace the primary `media_probe_failed` or `media_probe_timeout`
 failure; cleanup remains unconditional and a cleanup error is recorded only as
-secondary context. A valid observed duration is admitted when it lies in the
-inclusive exact-rational interval `[requested - 250ms, requested + 250ms]`.
-This explicit symmetric container-boundary tolerance covers the observed 127ms
-NVR end jitter while remaining below the one-second binary-search resolution;
-a deficit or excess greater than 250ms remains `media_probe_failed` with
-`duration_too_short` or `duration_too_long`. The bound is not a policy identity
-input and cannot extend decoder or support targets beyond the actual retained
-media. Arbitrary programming exceptions from the probe cross the internal-error
-boundary and never become `media_probe_failed` diagnostics.
+secondary context. Any positive structurally valid container duration is
+admitted. Decoder selection derives the usable half-open range from the lesser
+of the authorized request duration, the exact probed duration, and the last
+decoded PTS plus one reported frame period. Planning uses the final whole
+requested second intersected by that observable range and never creates a
+target after the authorized request end. A 59,873ms valid clip for a 60,000ms
+request therefore remains searchable without a millisecond tolerance rule.
+When observable evidence proves a supported transition, the run may publish
+`FOUND` and reports both the transition interval and actual observed range. If
+the missing tail prevents `NOT_FOUND`, the run publishes
+`INCONCLUSIVE/INCOMPLETE_MEDIA_COVERAGE`. Corrupt media, missing video, invalid
+timing, or decode failure still fails closed. Arbitrary programming exceptions
+from the probe cross the internal-error boundary and never become
+`media_probe_failed` diagnostics.
 
 The adapters must inspect the most specific source result before any outer
 status collapses it. The existing C1/C2/D1 unions map exactly as follows:

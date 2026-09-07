@@ -260,6 +260,11 @@ function createHarness(
     ["#recording-search-result", new FakeElement("div")],
     ["#recording-search-result-kind", new FakeElement("p")],
     ["#recording-search-result-reason", new FakeElement("p")],
+    ["#recording-search-result-timing", new FakeElement("dl")],
+    ["#recording-search-last-present", new FakeElement("dd")],
+    ["#recording-search-first-absent", new FakeElement("dd")],
+    ["#recording-search-interval", new FakeElement("dd")],
+    ["#recording-search-observed-range", new FakeElement("dd")],
   ]);
   elements.get("#channel-id").value = "1";
   elements.get("#source-timezone").value = "Asia/Seoul";
@@ -290,6 +295,7 @@ function createHarness(
   elements.get("#confirmation-error").hidden = true;
   elements.get("#recording-search-panel").hidden = true;
   elements.get("#recording-search-result").hidden = true;
+  elements.get("#recording-search-result-timing").hidden = true;
   elements.get("#recording-search-error").hidden = true;
   elements.get("#roi-status").textContent = "Select a candidate first.";
   elements.get("#roi-status").dataset.state = "disabled";
@@ -449,6 +455,10 @@ function createHarness(
     recordingSearchResult: elements.get("#recording-search-result"),
     recordingSearchResultKind: elements.get("#recording-search-result-kind"),
     recordingSearchResultReason: elements.get("#recording-search-result-reason"),
+    recordingSearchLastPresent: elements.get("#recording-search-last-present"),
+    recordingSearchFirstAbsent: elements.get("#recording-search-first-absent"),
+    recordingSearchInterval: elements.get("#recording-search-interval"),
+    recordingSearchObservedRange: elements.get("#recording-search-observed-range"),
     windowListeners,
     window: context.window,
     channelRequests: () => channelRequests,

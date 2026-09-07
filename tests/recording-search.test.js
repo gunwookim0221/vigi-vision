@@ -45,6 +45,28 @@ function status(kind, reason = null) {
       : null,
     phase8_status: null,
     phase8_reason: null,
+    terminal_details: ["FOUND", "NOT_FOUND", "INCONCLUSIVE"].includes(kind) ? {
+      last_present_time_utc: kind === "FOUND" ? "2026-07-20T03:34:40Z" : null,
+      first_absent_time_utc: kind === "FOUND" ? "2026-07-20T03:34:41Z" : null,
+      observed_start_time_utc: "2026-07-20T03:34:28Z",
+      observed_end_time_utc: "2026-07-20T03:35:27.873Z",
+      coverage_complete: true,
+      source_timezone: "Asia/Seoul",
+    } : null,
+  };
+}
+
+function foundStatusWithTiming() {
+  return {
+    ...status("FOUND", "SUPPORTED_TRANSITION"),
+    terminal_details: {
+      last_present_time_utc: "2026-07-20T03:34:40Z",
+      first_absent_time_utc: "2026-07-20T03:34:41Z",
+      observed_start_time_utc: "2026-07-20T03:34:28Z",
+      observed_end_time_utc: "2026-07-20T03:35:27.873Z",
+      coverage_complete: true,
+      source_timezone: "Asia/Seoul",
+    },
   };
 }
 
@@ -132,6 +154,27 @@ for (const terminal of ["FOUND", "NOT_FOUND", "INCONCLUSIVE", "FAILED", "INTERRU
     assert.doesNotMatch(harness.recordingSearchResultKind.textContent, /theft|identity|intent|UTC/i);
   });
 }
+
+test("FOUND renders the honest localized disappearance interval and observed range", async () => {
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => foundStatusWithTiming() });
+  }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+
+  assert.match(harness.recordingSearchLastPresent.textContent, /2026-07-20T12:34:40.*Asia\/Seoul/);
+  assert.match(harness.recordingSearchFirstAbsent.textContent, /2026-07-20T12:34:41.*Asia\/Seoul/);
+  assert.match(harness.recordingSearchInterval.textContent, /12:34:40.*12:34:41/);
+  assert.match(harness.recordingSearchObservedRange.textContent, /12:34:28.*12:35:27/);
+});
 
 test("an exact missing polled run never inherits another run and is permanent", async () => {
   const harness = createHarness((url) => {

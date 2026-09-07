@@ -247,7 +247,13 @@ identity families with full B4 classifier-policy/evidence binding, a binary-
 complete strict-reopen fixture, and a separate closed-state Phase 8
 media/handoff repository. Source-clip identity is semantic; encoded-byte digest
 and observed stream facts are separate integrity data. The exact synchronous invocation ceiling is 2,520
-seconds. Existing schemas 1–4 remain readable under their original strict
+seconds. Structurally valid decodable media is admitted independently of exact
+request-duration equality: container timing and decoded PTS bound the observed
+range, supported disappearance inside that range may reach `FOUND`, and a
+missing tail that prevents a complete negative result reaches
+`INCONCLUSIVE/INCOMPLETE_MEDIA_COVERAGE`. The browser projects the localized
+last-present/first-absent interval and observed range without changing schemas
+5–7. Existing schemas 1–4 remain readable under their original strict
 semantics and are not migrated. The approved 7E-1A pure contract increment,
 7E-1B persistence increment, 7E-1C common-session increment, and 7E-1D
 orchestration increment are implemented

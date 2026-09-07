@@ -1589,6 +1589,8 @@ class RecordingSearch7ERepository:
             if publication_check is not None:
                 publication_check()
             self._copy_tree(current.root, staging)
+            for directory in _SCHEMA6_DIRECTORIES:
+                (staging / directory).mkdir(exist_ok=True)
             if publication_check is not None:
                 publication_check()
             terminal_dir = staging / "terminal"
@@ -1639,6 +1641,11 @@ class RecordingSearch7ERepository:
                     }
                 ).encode(),
             )
+            for name in _SCHEMA6_DIRECTORIES:
+                directory = current.root / name
+                if not directory.exists():
+                    directory.mkdir()
+                    created_directories.append(name)
             for relative in created:
                 if publication_check is not None:
                     publication_check()
@@ -2156,6 +2163,7 @@ def _validate_schema7_terminal_matrix(
                 "BASELINE_ONLY_LOWER_BOUND",
                 "VISUAL_INDETERMINATE",
                 "INCOMPLETE_VISUAL_EVIDENCE",
+                "INCOMPLETE_MEDIA_COVERAGE",
             }
             or start is not None
             or end is not None

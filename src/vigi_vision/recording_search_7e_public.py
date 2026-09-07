@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from secrets import token_hex
 from typing import TYPE_CHECKING, Final
 
@@ -56,6 +56,7 @@ from vigi_vision.recording_search_7e_repository import (
     Phase7ENotFoundError,
     Phase7EReadbackError,
     Phase7ERepositoryError,
+    Phase7ERun,
     RecordingSearch7ERepository,
 )
 from vigi_vision.recording_search_7e_validation import Phase7EValidationError
@@ -271,6 +272,39 @@ def _cleanup_outcome(error: BaseException, category: str) -> str:
     return "unknown"
 
 
+def _selected_transition_times(
+    records: tuple[StrictIdentityEnvelope, ...],
+    terminal: StrictIdentityEnvelope,
+    session_start: datetime,
+) -> tuple[str | None, str | None]:
+    """Resolve a FOUND interval from the selected frames' actual PTS."""
+    if terminal.payload["result_kind"] != "FOUND":
+        return None, None
+    by_identity = {item.identity: item for item in records}
+    snapshot = by_identity[str(terminal.payload["evidence_snapshot_id"])]
+    narrowed = by_identity[str(snapshot.payload["narrowed_bracket_id"])]
+
+    def observed_time(observation_id: object) -> str:
+        observation = by_identity[str(observation_id)]
+        frame = by_identity[str(observation.payload["frame_id"])]
+        microseconds = (
+            (int(frame.payload["raw_pts"]) - int(frame.payload["container_start_pts"]))
+            * int(frame.payload["time_base_num"])
+            * 1_000_000
+            // int(frame.payload["time_base_den"])
+        )
+        return (
+            (session_start + timedelta(microseconds=microseconds))
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
+
+    return (
+        observed_time(narrowed.payload["lower_observation_id"]),
+        observed_time(narrowed.payload["upper_observation_id"]),
+    )
+
+
 def _bounded_recovery_candidates(root: Path) -> list[tuple[str, str]]:
     """Collect run identities without allowing an unbounded startup walk."""
     candidates: list[tuple[str, str]] = []
@@ -320,12 +354,35 @@ class Phase7EPreparedRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class Phase7ETerminalDetails:
+    """Safe user-facing timing facts reconstructed from immutable evidence."""
+
+    last_present_time_utc: str | None
+    first_absent_time_utc: str | None
+    observed_start_time_utc: str
+    observed_end_time_utc: str
+    coverage_complete: bool
+    source_timezone: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "last_present_time_utc": self.last_present_time_utc,
+            "first_absent_time_utc": self.first_absent_time_utc,
+            "observed_start_time_utc": self.observed_start_time_utc,
+            "observed_end_time_utc": self.observed_end_time_utc,
+            "coverage_complete": self.coverage_complete,
+            "source_timezone": self.source_timezone,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class Phase7EPublicStatus:
     """Credential-free status projection used by CLI and HTTP."""
 
     phase7: Phase7EStatus
     phase8_status: str | None = None
     phase8_reason: str | None = None
+    terminal_details: Phase7ETerminalDetails | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -337,6 +394,9 @@ class Phase7EPublicStatus:
             "terminal_result_id": self.phase7.terminal_result_id,
             "phase8_status": self.phase8_status,
             "phase8_reason": self.phase8_reason,
+            "terminal_details": (
+                None if self.terminal_details is None else self.terminal_details.as_dict()
+            ),
         }
 
 
@@ -563,33 +623,72 @@ class Phase7EPublicService:
             Phase7EValidationError,
         ) as error:
             raise _execution_public_error(error) from error
-        phase8_status: tuple[str | None, str | None] = (None, None)
         if create_phase8_handoff:
             self.create_phase8_handoff(
                 request_domain.investigation_id,
                 request_domain.run_id,
             )
-            phase8_status = ("READY", None)
-        return Phase7EPublicStatus(
-            read_phase7_status(
-                self.repository,
-                request_domain.investigation_id,
-                request_domain.run_id,
-            ),
-            phase8_status[0],
-            phase8_status[1],
-        )
+        return self.status(request_domain.investigation_id, request_domain.run_id)
 
     def status(self, investigation_id: str, run_id: str) -> Phase7EPublicStatus:
         phase7 = read_phase7_status(self.repository, investigation_id, run_id)
-        run: object | None = None
+        run: Phase7ERun | None = None
         if phase7.schema_version == 7:
             try:
                 run = self.repository.inspect_current_read_only(investigation_id, run_id)
             except (Phase7EInProgressError, Phase7ENotFoundError, Phase7ECorruptError):
                 run = None
         phase8, reason = self.phase8_repository.status(run, investigation_id, run_id)
-        return Phase7EPublicStatus(phase7, phase8, reason)
+        details = None if run is None else self._terminal_details(run)
+        return Phase7EPublicStatus(phase7, phase8, reason, details)
+
+    def _terminal_details(self, run: Phase7ERun) -> Phase7ETerminalDetails:
+        records = tuple(run.records)
+        terminal = next(item for item in records if item.family == "terminal-result")
+        session = next(item for item in records if item.family == "common-session")
+        start_text = str(session.payload["replay_start_requested_time_utc"])
+        end_text = str(session.payload["replay_end_requested_time_utc"])
+        start = datetime.strptime(start_text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        requested_end = datetime.strptime(end_text, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+        ticks = int(session.payload["duration_ticks"])
+        numerator = ticks * int(session.payload["time_base_num"])
+        denominator = int(session.payload["time_base_den"])
+        requested_microseconds = int((requested_end - start).total_seconds()) * 1_000_000
+        frames = tuple(item for item in records if item.family == "frame")
+        maximum_frame_microseconds = max(
+            (
+                (int(item.payload["raw_pts"]) - int(item.payload["container_start_pts"]))
+                * int(item.payload["time_base_num"])
+                * 1_000_000
+                // int(item.payload["time_base_den"])
+            )
+            for item in frames
+        )
+        frame_observed_microseconds = (maximum_frame_microseconds // 1_000_000 + 1) * 1_000_000
+        decision_observed_microseconds = min(
+            requested_microseconds,
+            numerator * 1_000_000 // denominator,
+            frame_observed_microseconds,
+        )
+        observed_microseconds = min(
+            requested_microseconds,
+            numerator * 1_000_000 // denominator,
+            maximum_frame_microseconds,
+        )
+        observed_end = start + timedelta(microseconds=observed_microseconds)
+        observable_seconds = (decision_observed_microseconds + 999_999) // 1_000_000
+        confirmation = self.confirmation_service.load_confirmed(run.investigation_id)
+        last_present, first_absent = _selected_transition_times(records, terminal, start)
+        return Phase7ETerminalDetails(
+            last_present,
+            first_absent,
+            start_text,
+            observed_end.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            observable_seconds >= int((requested_end - start).total_seconds()),
+            confirmation.source_timezone,
+        )
 
     def recover_abandoned(self) -> int:
         """Interrupt bounded, strictly reopened active runs left by a prior process."""
@@ -879,6 +978,7 @@ __all__ = [
     "Phase7EPublicRequest",
     "Phase7EPublicService",
     "Phase7EPublicStatus",
+    "Phase7ETerminalDetails",
     "Phase8HandoffRepository",
     "approved_phase7e_policy",
     "approved_phase8_media_policy",

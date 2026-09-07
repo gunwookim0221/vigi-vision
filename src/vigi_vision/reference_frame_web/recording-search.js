@@ -9,6 +9,11 @@
   const result = document.querySelector("#recording-search-result");
   const resultKind = document.querySelector("#recording-search-result-kind");
   const resultReason = document.querySelector("#recording-search-result-reason");
+  const resultTiming = document.querySelector("#recording-search-result-timing");
+  const lastPresent = document.querySelector("#recording-search-last-present");
+  const firstAbsent = document.querySelector("#recording-search-first-absent");
+  const disappearanceInterval = document.querySelector("#recording-search-interval");
+  const observedRange = document.querySelector("#recording-search-observed-range");
   const candidateWorkflow = [
     "#candidate-intro",
     "#candidate-request-panel",
@@ -29,7 +34,11 @@
   const START_KEYS = Object.freeze(["request_id", "investigation_id", "run_id", "status", "status_url"]);
   const STATUS_KEYS = Object.freeze([
     "investigation_id", "run_id", "schema_version", "status", "reason_code",
-    "terminal_result_id", "phase8_status", "phase8_reason",
+    "terminal_result_id", "phase8_status", "phase8_reason", "terminal_details",
+  ]);
+  const TERMINAL_DETAIL_KEYS = Object.freeze([
+    "last_present_time_utc", "first_absent_time_utc", "observed_start_time_utc",
+    "observed_end_time_utc", "coverage_complete", "source_timezone",
   ]);
   const CONFIRMATION_KEYS = Object.freeze([
     "channel_id", "candidate_offset_seconds", "reference_frame_resource_id",
@@ -156,7 +165,7 @@
 
   function validUtc(value) {
     return typeof value === "string"
-      && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|\+00:00)$/.test(value)
+      && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)$/.test(value)
       && !Number.isNaN(new Date(value).getTime());
   }
 
@@ -395,6 +404,17 @@
   }
 
   function validStatus(payload) {
+    const details = payload?.terminal_details;
+    const validDetails = details === null || (
+      hasExactKeys(details, TERMINAL_DETAIL_KEYS)
+      && (details.last_present_time_utc === null || validUtc(details.last_present_time_utc))
+      && (details.first_absent_time_utc === null || validUtc(details.first_absent_time_utc))
+      && validUtc(details.observed_start_time_utc)
+      && validUtc(details.observed_end_time_utc)
+      && typeof details.coverage_complete === "boolean"
+      && ["Asia/Seoul", "UTC"].includes(details.source_timezone)
+    );
+    const terminalNeedsDetails = ["FOUND", "NOT_FOUND", "INCONCLUSIVE"].includes(payload?.status);
     return hasExactKeys(payload, STATUS_KEYS)
       && payload.investigation_id === activeRun?.investigationId
       && payload.run_id === activeRun?.runId
@@ -402,7 +422,9 @@
       && typeof payload.status === "string"
       && (payload.reason_code === null || typeof payload.reason_code === "string")
       && (payload.terminal_result_id === null || typeof payload.terminal_result_id === "string")
-      && payload.phase8_status === null && payload.phase8_reason === null;
+      && payload.phase8_status === null && payload.phase8_reason === null
+      && validDetails
+      && (!terminalNeedsDetails || details !== null);
   }
 
   function terminalText(kind) {
@@ -421,9 +443,33 @@
     invalidateLifecycle(owner);
     setStatus("녹화 기록 검색이 종료되었습니다.", "complete");
     resultKind.textContent = terminalText(payload.status);
-    resultReason.textContent = payload.reason_code === null
-      ? "서버가 추가 사유를 제공하지 않았습니다."
-      : `결과 사유: ${payload.reason_code}`;
+    const reasons = {
+      INCOMPLETE_MEDIA_COVERAGE: "사용 가능한 녹화가 요청 종료 전 끝나 전체 구간을 판단할 수 없습니다.",
+      VISUAL_INDETERMINATE: "사용 가능한 화면만으로 대상의 존재 여부를 신뢰성 있게 판단할 수 없습니다.",
+      INCOMPLETE_VISUAL_EVIDENCE: "판정에 필요한 화면 증거가 충분하지 않습니다.",
+      BASELINE_ONLY_LOWER_BOUND: "기준 화면 이후의 존재 증거가 충분하지 않습니다.",
+    };
+    resultReason.textContent = reasons[payload.reason_code]
+      ?? (payload.reason_code === null ? "서버가 추가 사유를 제공하지 않았습니다." : `결과 사유: ${payload.reason_code}`);
+    const details = payload.terminal_details;
+    resultTiming.hidden = details === null;
+    if (details !== null) {
+      const zone = details.source_timezone;
+      const observedStart = localFromUtc(details.observed_start_time_utc, zone);
+      const observedEnd = localFromUtc(details.observed_end_time_utc, zone);
+      observedRange.textContent = `${observedStart} ~ ${observedEnd} (${zone})${details.coverage_complete ? "" : " — 요청 종료 전 녹화 종료"}`;
+      if (payload.status === "FOUND" && details.last_present_time_utc !== null && details.first_absent_time_utc !== null) {
+        const present = localFromUtc(details.last_present_time_utc, zone);
+        const absent = localFromUtc(details.first_absent_time_utc, zone);
+        lastPresent.textContent = `${present} (${zone})`;
+        firstAbsent.textContent = `${absent} (${zone})`;
+        disappearanceInterval.textContent = `${present} ~ ${absent} (${zone})`;
+      } else {
+        lastPresent.textContent = "해당 없음";
+        firstAbsent.textContent = "해당 없음";
+        disappearanceInterval.textContent = "확정되지 않음";
+      }
+    }
     result.hidden = false;
     renderInput();
     result.focus?.({ preventScroll: true });
@@ -464,7 +510,7 @@
         return;
       }
       if (!validStatus(payload)) {
-        fail("status_confirmation_failed", owner);
+        retryStatus(owner);
         return;
       }
       if (TERMINAL.has(payload.status)) {

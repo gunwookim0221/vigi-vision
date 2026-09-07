@@ -7,6 +7,7 @@ import json
 import stat
 import subprocess
 from datetime import datetime, timedelta, timezone
+from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -273,7 +274,7 @@ def test_retained_file_failure_is_diagnosed_and_cleaned(
     assert not path.exists()
 
 
-def test_duration_diagnostics_and_capture_failure_keep_primary(tmp_path: Path) -> None:
+def test_invalid_duration_diagnostics_and_capture_failure_keep_primary(tmp_path: Path) -> None:
     captured: list[Phase7EMediaProbeDiagnostic] = []
     observed_before_cleanup: list[bool] = []
 
@@ -284,46 +285,44 @@ def test_duration_diagnostics_and_capture_failure_keep_primary(tmp_path: Path) -
         raise RuntimeError(failure)
 
     with pytest.raises(CommonSessionMediaError) as raised:
-        _acquirer(tmp_path, duration_ticks=1, sink=sink).acquire(_request())
+        _acquirer(tmp_path, duration_ticks=0, sink=sink).acquire(_request())
     assert raised.value.code == "media_probe_failed"
     assert raised.value.probe_diagnostic is not None
-    assert raised.value.probe_diagnostic.stage == "duration_too_short"
+    assert raised.value.probe_diagnostic.stage == "invalid_duration"
     assert captured[0].cleanup_outcome == "not_required"
     assert observed_before_cleanup == [True]
     assert not (tmp_path / "replay.mp4").exists()
 
 
-def test_duration_tolerance_boundary_is_preserved(tmp_path: Path) -> None:
+def test_valid_media_duration_is_clamped_to_the_authorized_request(tmp_path: Path) -> None:
     acquisition = _acquirer(tmp_path, duration_ticks=5).acquire(_request(5))
     acquisition.remove()
     assert not (tmp_path / "replay.mp4").exists()
 
-    with pytest.raises(CommonSessionMediaError) as raised:
-        _acquirer(tmp_path, duration_ticks=6).acquire(_request(5))
-    assert raised.value.probe_diagnostic is not None
-    assert raised.value.probe_diagnostic.stage == "duration_too_long"
+    acquisition = _acquirer(tmp_path, duration_ticks=6).acquire(_request(5))
+    assert acquisition.usable_duration == 5
+    acquisition.remove()
     assert not (tmp_path / "replay.mp4").exists()
 
 
 @pytest.mark.parametrize(
-    ("duration_ticks", "expected_stage"),
+    "duration_ticks",
     [
-        (60_000, None),
-        (59_999, None),
-        (59_990, None),
-        (59_960, None),
-        (59_873, None),
-        (59_750, None),
-        (59_749, "duration_too_short"),
-        (59_000, "duration_too_short"),
-        (60_250, None),
-        (60_251, "duration_too_long"),
+        60_000,
+        59_999,
+        59_990,
+        59_960,
+        59_873,
+        59_750,
+        59_749,
+        59_000,
+        60_250,
+        60_251,
     ],
 )
-def test_duration_tolerance_is_symmetric_and_inclusive(
+def test_valid_duration_mismatch_is_available_media_not_probe_failure(
     tmp_path: Path,
     duration_ticks: int,
-    expected_stage: str | None,
 ) -> None:
     acquirer = _acquirer(
         tmp_path,
@@ -332,15 +331,10 @@ def test_duration_tolerance_is_symmetric_and_inclusive(
         rate_num=25,
         segment_seconds=900,
     )
-    if expected_stage is None:
-        acquisition = acquirer.acquire(_request(60))
-        acquisition.remove()
-    else:
-        with pytest.raises(CommonSessionMediaError) as raised:
-            acquirer.acquire(_request(60))
-        assert raised.value.probe_diagnostic is not None
-        assert raised.value.probe_diagnostic.stage == expected_stage
-        assert raised.value.probe_diagnostic.duration_tolerance_ms == 250
+    acquisition = acquirer.acquire(_request(60))
+    assert acquisition.observed_duration == Fraction(duration_ticks, 1_000)
+    assert acquisition.usable_duration <= 60
+    acquisition.remove()
 
 
 @pytest.mark.parametrize(
@@ -471,7 +465,7 @@ def test_nonregular_outside_and_unstable_files_have_closed_stages(
 def test_cleanup_failure_is_secondary_and_diagnostic_is_safe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    acquirer = _acquirer(tmp_path, duration_ticks=1)
+    acquirer = _acquirer(tmp_path, duration_ticks=0)
 
     def fail_remove(self: ReplayClip) -> None:
         failure = "C:/secret/password"
@@ -484,7 +478,7 @@ def test_cleanup_failure_is_secondary_and_diagnostic_is_safe(
     assert error.code == "media_probe_failed"
     assert error.cleanup_failure_code == "cleanup_failed"
     assert error.probe_diagnostic is not None
-    assert error.probe_diagnostic.stage == "duration_too_short"
+    assert error.probe_diagnostic.stage == "invalid_duration"
     assert error.probe_diagnostic.secondary_stage == "cleanup_failed"
     assert error.probe_diagnostic.cleanup_outcome == "failed"
 

@@ -113,10 +113,6 @@ MAX_DECODER_PASSES = 11
 DECODER_TIMEOUT_SECONDS = 120
 MEDIA_PROBE_TIMEOUT_SECONDS = 20
 MAX_MEDIA_DIMENSION = 16_384
-# NVR replay containers can end slightly before/after the requested window.
-# Keep this admission tolerance explicit, symmetric, and below the one-second
-# binary-search resolution rather than binding it to a source frame rate.
-MEDIA_DURATION_TOLERANCE_SECONDS = Fraction(250, 1_000)
 
 
 class CommonSessionError(RecordingSearchError):
@@ -856,6 +852,19 @@ class CommonSessionAcquisition:
         """Return the immutable common-session identity."""
         return self.session.identity
 
+    @property
+    def observed_duration(self) -> Fraction:
+        """Return the exact positive container duration reported by ffprobe."""
+        return Fraction(
+            self.media.duration_ticks * self.media.time_base_num,
+            self.media.time_base_den,
+        )
+
+    @property
+    def usable_duration(self) -> Fraction:
+        """Clamp valid media to the caller-authorized half-open request window."""
+        return min(self.observed_duration, Fraction(self.request.duration_seconds, 1))
+
     def remove(self) -> None:
         """Remove the invocation-owned retained MP4."""
         try:
@@ -1448,17 +1457,30 @@ class FfmpegLocalDecoder:
         ]
         if any(offset < 0 for offset in offsets):
             raise CommonSessionTimestampResetError
-        session_end = Fraction(session.request.duration_seconds, 1)
-        if any(offset >= session_end for offset in offsets):
+        request_end = Fraction(session.request.duration_seconds, 1)
+        if any(offset >= request_end for offset in offsets):
             raise CommonSessionSegmentBoundaryError
+        frame_period = Fraction(
+            session.media.average_frame_rate_den,
+            session.media.average_frame_rate_num,
+        )
+        # The last decoded PTS represents a frame, not an empty point.  Extend
+        # its observable range by one reported frame period, while never
+        # exceeding either the probed container or authorized request window.
+        observed_end = min(session.usable_duration, offsets[-1] + frame_period)
+        if observed_end <= 0:
+            raise CommonSessionDecoderError
         results: list[DecodedLocalFrame] = []
         for target in targets:
             target_offset = Fraction(int((target - session.request.start_utc).total_seconds()), 1)
+            use_observed_endpoint = (
+                target == session.request.end_utc or target_offset >= observed_end
+            )
             index = select_target_index(
                 offsets,
                 target_offset,
-                Fraction(session.request.duration_seconds, 1),
-                logical_end=target == session.request.end_utc,
+                observed_end,
+                logical_end=use_observed_endpoint,
                 tolerance=Fraction(session.request.policy.support_cadence_seconds, 1),
             )
             remaining = deadline - self.monotonic_clock()
@@ -1633,33 +1655,6 @@ class CommonSessionAcquirer:
                 if exc.probe_diagnostic is None:
                     exc.probe_diagnostic = _probe_facts_diagnostic(media)
                 raise
-            observed_duration = Fraction(
-                media.duration_ticks * media.time_base_num,
-                media.time_base_den,
-            )
-            duration_tolerance = MEDIA_DURATION_TOLERANCE_SECONDS
-            lower_duration = request.duration_seconds - duration_tolerance
-            upper_duration = request.duration_seconds + duration_tolerance
-            if observed_duration < lower_duration:
-                raise CommonSessionMediaError(
-                    probe_diagnostic=_duration_diagnostic(
-                        media,
-                        request.duration_seconds,
-                        stage="duration_too_short",
-                        observed_duration=observed_duration,
-                        duration_tolerance=duration_tolerance,
-                    )
-                )
-            if observed_duration > upper_duration:
-                raise CommonSessionMediaError(
-                    probe_diagnostic=_duration_diagnostic(
-                        media,
-                        request.duration_seconds,
-                        stage="duration_too_long",
-                        observed_duration=observed_duration,
-                        duration_tolerance=duration_tolerance,
-                    )
-                )
             session_payload = {
                 "investigation_id": request.investigation_id,
                 "run_id": request.run_id,
@@ -2938,30 +2933,6 @@ def _probe_facts_diagnostic(media: MediaProbeFacts) -> Phase7EMediaProbeDiagnost
     )
 
 
-def _duration_diagnostic(
-    media: MediaProbeFacts,
-    requested_duration_seconds: int,
-    *,
-    stage: str,
-    observed_duration: Fraction,
-    duration_tolerance: Fraction | None = None,
-) -> Phase7EMediaProbeDiagnostic:
-    """Build safe integer-millisecond duration facts for a rejected clip."""
-    tolerance = duration_tolerance or Fraction(0, 1)
-    return Phase7EMediaProbeDiagnostic(
-        stage,
-        video_stream_count=media.video_stream_count,
-        audio_stream_count=media.audio_stream_count,
-        codec=safe_probe_codec(media.codec) if media.codec else "not_observed",
-        width=media.width,
-        height=media.height,
-        requested_duration_ms=requested_duration_seconds * 1_000,
-        observed_duration_ms=(observed_duration * 1_000).numerator
-        // (observed_duration * 1_000).denominator,
-        duration_tolerance_ms=(tolerance * 1_000).numerator // (tolerance * 1_000).denominator,
-    )
-
-
 def _fraction_text(value: object) -> tuple[int, int]:
     if not isinstance(value, str) or "/" not in value:
         raise CommonSessionMediaError
@@ -3521,7 +3492,6 @@ __all__ = [
     "MAX_MP4_BYTES",
     "MAX_SELECTED_RGB24_FRAMES",
     "MAX_TARGETS_PER_DECODER_PASS",
-    "MEDIA_DURATION_TOLERANCE_SECONDS",
     "MediaProbe",
     "MediaProbeFacts",
     "Phase7EMediaProbeDiagnostic",
