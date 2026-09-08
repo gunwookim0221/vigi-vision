@@ -7,6 +7,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -36,6 +37,8 @@ from vigi_vision.recording_search_7e_1c import (
     CommonSessionAcquisition,
     CommonSessionMediaError,
     DecodedLocalFrame,
+    FfmpegLocalDecoder,
+    FfprobeMediaProbe,
     MediaProbeFacts,
     Phase7E1CExecutor,
     Phase7EB4Input,
@@ -476,6 +479,26 @@ class _Extractor:
         )
 
 
+class _ExistingMediaExtractor:
+    """Return a copied real replay without replacing its bytes with a fixture."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.calls = 0
+
+    def extract(self, request: ReplayRequest) -> ReplayClip:
+        self.calls += 1
+        assert self.path.is_file()
+        return ReplayClip(
+            request.window.channel_id,
+            request.window.start_utc,
+            request.window.end_utc,
+            request.replay_url,
+            self.path,
+            request.window.duration_seconds,
+        )
+
+
 class _Probe:
     # The probe fixture intentionally exposes each production media fact.
     def __init__(  # noqa: PLR0913
@@ -753,6 +776,7 @@ def create_uvicorn_phase7e_fixture_app() -> FastAPI:
         "available_found",
         "available_inconclusive",
         "available_pts_tail_missing",
+        "real_hevc",
     }:
         raise RuntimeError(_FIXTURE_CONFIGURATION_ERROR)
     root = Path(root_text).resolve(strict=True)
@@ -779,10 +803,31 @@ def create_uvicorn_phase7e_fixture_app() -> FastAPI:
                 "rtsp://operator:uvicorn-secret-sentinel@private.example/replay",
             )
 
-    if scenario == "invalid_duration":
+    if scenario == "real_hevc":
+        source = (
+            Path(__file__).parents[1]
+            / "artifacts/investigation-searches/.media/"
+            / "object-disappearance-v3-ch1-20260904T051732Z/"
+            / "search-run-bee8920323d442d0b05ba4cf87075aa2/"
+            / (
+                "rr-common-session-v1-3684126fcd6718fb6859b14bb95a53629cfafe30e075df8ab9aad6a73997a3a3"
+                ".mp4"
+            )
+        )
+        if not source.is_file():
+            detail = "preserved real HEVC fixture is unavailable"
+            raise RuntimeError(detail)
+        _ = shutil.copyfile(source, root / "temporary-replay.mp4")
+        ffmpeg = Path(shutil.which("ffmpeg") or "ffmpeg")
+        ffprobe = Path(shutil.which("ffprobe") or "ffprobe")
+        probe = FfprobeMediaProbe(ffprobe)
+        decoder: object = FfmpegLocalDecoder(ffmpeg, ffprobe)
+    elif scenario == "invalid_duration":
         probe = _DelayedProbe(duration_ticks=0)
+        decoder = _TimelineDecoder()
     elif scenario == "ffprobe_invalid_json":
         probe = _DelayedFailingProbe()
+        decoder = _TimelineDecoder()
     elif scenario == "schema7_jitter":
         probe = _Probe(
             duration_ticks=59_873,
@@ -793,6 +838,7 @@ def create_uvicorn_phase7e_fixture_app() -> FastAPI:
             height=1_440,
             average_frame_rate_num=25,
         )
+        decoder = _TimelineDecoder()
     elif scenario in {"available_found", "available_inconclusive"}:
         probe = _Probe(
             duration_ticks=55_200,
@@ -803,6 +849,7 @@ def create_uvicorn_phase7e_fixture_app() -> FastAPI:
             height=1_440,
             average_frame_rate_num=25,
         )
+        decoder = _TimelineDecoder()
     else:
         probe = _Probe(
             duration_ticks=60_000,
@@ -813,8 +860,13 @@ def create_uvicorn_phase7e_fixture_app() -> FastAPI:
             height=1_440,
             average_frame_rate_num=25,
         )
+        decoder = _TimelineDecoder()
     planner = _SensitivePlanner(segment)
-    extractor = _Extractor(root / "temporary-replay.mp4")
+    extractor: object = (
+        _ExistingMediaExtractor(root / "temporary-replay.mp4")
+        if scenario == "real_hevc"
+        else _Extractor(root / "temporary-replay.mp4")
+    )
     repository = RecordingSearch7ERepository(
         root / "phase7e",
         lock_timeout_seconds=0.1,
@@ -833,6 +885,7 @@ def create_uvicorn_phase7e_fixture_app() -> FastAPI:
             "available_found",
             "available_inconclusive",
             "available_pts_tail_missing",
+            "real_hevc",
         }
         else policy
     )
@@ -844,7 +897,9 @@ def create_uvicorn_phase7e_fixture_app() -> FastAPI:
             confirmation_service,
             followup_outcome=("PRESENT" if scenario == "available_inconclusive" else "ABSENT"),
         ),
-        _TimelineDecoder(
+        decoder
+        if scenario == "real_hevc"
+        else _TimelineDecoder(
             decoded_dimensions=(8, 8),
             maximum_offset=(Fraction(50) if scenario == "available_pts_tail_missing" else None),
         ),

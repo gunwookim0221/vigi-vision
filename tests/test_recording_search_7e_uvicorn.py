@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -89,8 +90,10 @@ def uvicorn_process(
 ) -> Iterator[tuple[str, Path, subprocess.Popen[str], TextIO, TextIO]]:
     scenario = cast("str", request.param)
     port = _free_port()
-    root = tmp_path / scenario
-    root.mkdir()
+    isolated_short_root = scenario == "real_hevc"
+    root = Path(tempfile.mkdtemp(prefix="v7e-")) if isolated_short_root else tmp_path / scenario
+    if not isolated_short_root:
+        root.mkdir()
     environment = os.environ.copy()
     environment["VIGI_PHASE7E_UVICORN_TEST_ROOT"] = os.fspath(root)
     environment["VIGI_PHASE7E_UVICORN_TEST_SCENARIO"] = scenario
@@ -140,9 +143,13 @@ def uvicorn_process(
     else:
         _ = _stop_server(process, stdout_stream, stderr_stream)
         pytest.fail("Uvicorn did not become ready")
-    yield base_url, root, process, stdout_stream, stderr_stream
-    if not stdout_stream.closed:
-        _ = _stop_server(process, stdout_stream, stderr_stream)
+    try:
+        yield base_url, root, process, stdout_stream, stderr_stream
+    finally:
+        if not stdout_stream.closed:
+            _ = _stop_server(process, stdout_stream, stderr_stream)
+        if isolated_short_root:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 def _start_and_wait(
@@ -258,6 +265,35 @@ def test_real_uvicorn_production_jitter_reaches_schema7(
     assert not (root / "temporary-replay.mp4").exists()
     stdout, stderr = _stop_server(process, stdout_stream, stderr_stream)
     assert _events(f"{stdout}\n{stderr}") == []
+
+
+@pytest.mark.parametrize("uvicorn_process", ["real_hevc"], indirect=True)
+def test_real_uvicorn_copied_hevc_reaches_schema7_with_available_media(
+    uvicorn_process: tuple[str, Path, subprocess.Popen[str], TextIO, TextIO],
+) -> None:
+    """Exercise HTTP/background/publication/ffprobe/ffmpeg with the preserved HEVC MP4."""
+    base_url, root, process, stdout_stream, stderr_stream = uvicorn_process
+    request_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+    projected, saw_running = _start_and_wait(
+        base_url,
+        request_id=request_id,
+        search_end="2026-07-20T12:35:28",
+    )
+    assert saw_running
+    assert projected["status"] == "FOUND", projected
+    assert projected["schema_version"] == 7
+    assert projected["reason_code"] == "SUPPORTED_TRANSITION"
+    details = projected["terminal_details"]
+    assert details["coverage_complete"] is True, details
+    assert details["observed_end_time_utc"].endswith("27.833Z"), details
+    assert details["last_present_time_utc"] is not None
+    assert details["first_absent_time_utc"] is not None
+    assert not (root / "temporary-replay.mp4").exists()
+    stdout, stderr = _stop_server(process, stdout_stream, stderr_stream)
+    output = f"{stdout}\n{stderr}"
+    assert _events(output) == []
+    assert _SECRET_SENTINEL not in output
+    assert "private.example" not in output
 
 
 @pytest.mark.parametrize(

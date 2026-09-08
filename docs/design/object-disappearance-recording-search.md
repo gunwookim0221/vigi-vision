@@ -924,6 +924,23 @@ timing, or decode failure still fails closed. Arbitrary programming exceptions
 from the probe cross the internal-error boundary and never become
 `media_probe_failed` diagnostics.
 
+Retained-media publication is transactional with its operational authority:
+successful publication means that both the final MP4 and its authority record
+have been durably written and strictly validated. A failure after final-file
+creation but before authority admission removes only the invocation-owned final
+object using its held stable filesystem identity; it never path-deletes a
+pre-existing or foreign object. Staging cleanup is bounded and secondary to the
+primary media failure. Publication-boundary failures emit the same single,
+closed `phase7e.media_probe_failure` event before cleanup, without adding
+diagnostics to Schema 5--7 or public status JSON.
+
+The credential-free Phase 7 status projection may carry the Phase 8 status
+vocabulary `NOT_REQUESTED`, `RETRYABLE`, `READY`, `MEDIA_MISSING`,
+`MEDIA_CORRUPT`, `DELETING`, or `DELETED`, with only the documented nullable
+Phase 8 reasons. The browser validates that closed vocabulary and renders a
+matching Phase 7 terminal state immediately; it does not reinterpret a valid
+terminal response as a transient observation failure.
+
 The adapters must inspect the most specific source result before any outer
 status collapses it. The existing C1/C2/D1 unions map exactly as follows:
 

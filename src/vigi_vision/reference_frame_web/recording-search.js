@@ -31,6 +31,13 @@
   const STATUS_RETRY_LIMIT = 5;
   const STATUS_RETRY_INITIAL_MS = 2_000;
   const STATUS_RETRY_MAX_MS = 15_000;
+  const PHASE8_STATUSES = new Set([
+    "NOT_REQUESTED", "RETRYABLE", "READY", "MEDIA_MISSING", "MEDIA_CORRUPT",
+    "DELETING", "DELETED",
+  ]);
+  const PHASE8_REASONS = new Set([
+    "phase8_media_unavailable", "phase8_media_corrupt", "phase8_clip_failed", "phase8_corrupt",
+  ]);
   const START_KEYS = Object.freeze(["request_id", "investigation_id", "run_id", "status", "status_url"]);
   const STATUS_KEYS = Object.freeze([
     "investigation_id", "run_id", "schema_version", "status", "reason_code",
@@ -415,6 +422,9 @@
       && ["Asia/Seoul", "UTC"].includes(details.source_timezone)
     );
     const terminalNeedsDetails = ["FOUND", "NOT_FOUND", "INCONCLUSIVE"].includes(payload?.status);
+    const phase8Valid = (payload.phase8_status === null && payload.phase8_reason === null)
+      || (PHASE8_STATUSES.has(payload.phase8_status)
+        && (payload.phase8_reason === null || PHASE8_REASONS.has(payload.phase8_reason)));
     return hasExactKeys(payload, STATUS_KEYS)
       && payload.investigation_id === activeRun?.investigationId
       && payload.run_id === activeRun?.runId
@@ -422,7 +432,7 @@
       && typeof payload.status === "string"
       && (payload.reason_code === null || typeof payload.reason_code === "string")
       && (payload.terminal_result_id === null || typeof payload.terminal_result_id === "string")
-      && payload.phase8_status === null && payload.phase8_reason === null
+      && phase8Valid
       && validDetails
       && (!terminalNeedsDetails || details !== null);
   }

@@ -155,6 +155,33 @@ for (const terminal of ["FOUND", "NOT_FOUND", "INCONCLUSIVE", "FAILED", "INTERRU
   });
 }
 
+for (const terminal of ["FOUND", "NOT_FOUND", "INCONCLUSIVE", "FAILED", "INTERRUPTED", "CORRUPT"]) {
+  test(`accepts ${terminal} with the documented NOT_REQUESTED Phase 8 status`, async () => {
+    let statusCalls = 0;
+    const harness = createHarness((url) => {
+      if (url === "/api/v1/recording-searches") {
+        return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+      }
+      statusCalls += 1;
+      const payload = status(terminal, terminal === "FAILED" ? "media_probe_failed" : null);
+      payload.phase8_status = "NOT_REQUESTED";
+      return Promise.resolve({ ok: true, status: 200, json: async () => payload });
+    }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
+    dispatchConfirmed(harness);
+    harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+    harness.recordingSearchEnd.listeners.input();
+    harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+    await settle();
+    harness.runTimers();
+    await settle();
+    assert.equal(statusCalls, 1);
+    assert.equal(harness.recordingSearchStatus.textContent, "녹화 기록 검색이 종료되었습니다.");
+    assert.equal(harness.recordingSearchStart.disabled, true);
+    assert.equal(harness.pendingTimerCount(), 0);
+    assert.equal(harness.window.vigiVisionRecordingSearch.getState().runId, RUN_ID);
+  });
+}
+
 test("FOUND renders the honest localized disappearance interval and observed range", async () => {
   const harness = createHarness((url) => {
     if (url === "/api/v1/recording-searches") {

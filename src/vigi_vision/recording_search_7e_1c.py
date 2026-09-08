@@ -53,11 +53,13 @@ from vigi_vision.recording_search_7e_media_authority import (
     authority_path,
     create_publication_file,
     descriptor_stamp,
+    filesystem_identity,
     hash_descriptor,
     mark_open_file_for_deletion,
     open_stable_file,
     publish_retained_media_authority,
     read_retained_media_authority,
+    remove_unbound_publication,
     rename_open_file_no_replace,
     stable_source_path,
     verified_retained_media,
@@ -883,6 +885,9 @@ class DurableCommonSessionMedia:
     """Atomically retain one validated MP4 outside the immutable run tree."""
 
     repository: RecordingSearch7ERepository = field(repr=False)
+    diagnostic_sink: Callable[[str, str, Phase7EMediaProbeDiagnostic], None] = (
+        log_media_probe_diagnostic
+    )
 
     @property
     def root(self) -> Path:
@@ -903,8 +908,12 @@ class DurableCommonSessionMedia:
         final = final_directory / f"{acquisition.common_session_id}.mp4"
         staging: Path | None = None
         publication_descriptor: int | None = None
+        publication_identity: dict[str, object] | None = None
         published_by_invocation = False
         authority_published = False
+        publication_stage = "publication_post_copy_validation"
+        primary_error: CommonSessionError | None = None
+        success = False
         source_size = -1
         source_digest = ""
         try:
@@ -961,14 +970,28 @@ class DurableCommonSessionMedia:
                 raise CommonSessionMediaError
             rename_open_file_no_replace(publication_descriptor, temporary, final)
             published_by_invocation = True
+            publication_stage = "publication_post_rename_validation"
             os.fsync(publication_descriptor)
             _fsync_directory(final_directory)
+            publication_identity = filesystem_identity(publication_descriptor)
+            if os.name == "nt":
+                os.close(publication_descriptor)
+                publication_descriptor = None
+                try:
+                    publication_descriptor = open_stable_file(final)
+                except BaseException:
+                    with suppress(OSError):
+                        publication_descriptor = open_stable_file(final)
+                    raise
+                if filesystem_identity(publication_descriptor) != publication_identity:
+                    raise MediaFilesystemAuthorityError
             if (
                 not _is_safe_child(self.root, final)
                 or descriptor_stamp(publication_descriptor)["link_count"] != 1
                 or hash_descriptor(publication_descriptor) != (source_digest, source_size)
             ):
                 raise CommonSessionMediaError
+            publication_stage = "publication_final_probe"
             if self.repository.media_probe is None:
                 raise CommonSessionMediaError
             media_probe = cast("MediaProbe", self.repository.media_probe)
@@ -978,7 +1001,9 @@ class DurableCommonSessionMedia:
             )
             final_facts.validate()
             if final_facts != acquisition.media:
+                publication_stage = "publication_fact_mismatch"
                 raise CommonSessionMediaError
+            publication_stage = "publication_authority"
             authority_session = {
                 **acquisition.session.payload,
                 "common_session_id": acquisition.session.identity,
@@ -990,7 +1015,7 @@ class DurableCommonSessionMedia:
                 descriptor=publication_descriptor,
             )
             authority_published = True
-            return CommonSessionAcquisition(
+            result = CommonSessionAcquisition(
                 acquisition.request,
                 acquisition.segment,
                 acquisition.replay_request,
@@ -1000,45 +1025,82 @@ class DurableCommonSessionMedia:
                 final,
                 authority,
             )
+            success = True
+            return result
         except (CommonSessionError, MediaFilesystemAuthorityError) as exc:
-            if publication_descriptor is not None:
-                os.close(publication_descriptor)
-                publication_descriptor = None
-            if published_by_invocation:
-                with suppress(CommonSessionCleanupError):
-                    if authority_published:
-                        _remove_bound_retained_media(
-                            self.root,
-                            final,
-                            {
-                                **acquisition.session.payload,
-                                "common_session_id": acquisition.session.identity,
-                            },
-                        )
-            if isinstance(exc, CommonSessionError):
+            primary_error = (
+                exc if isinstance(exc, CommonSessionError) else CommonSessionMediaError()
+            )
+            if primary_error.probe_diagnostic is None:
+                primary_error.probe_diagnostic = Phase7EMediaProbeDiagnostic(
+                    publication_stage,
+                    retained_bytes=source_size if source_size >= 0 else None,
+                )
+            _emit_publication_probe_diagnostic(self, acquisition, primary_error)
+            publication_descriptor = _cleanup_publication_final(
+                self,
+                acquisition,
+                final,
+                publication_descriptor,
+                published_by_invocation,
+                authority_published,
+                primary_error,
+            )
+            if primary_error is exc:
                 raise
-            raise CommonSessionMediaError from exc
+            raise primary_error from exc
         except (OSError, RuntimeError) as exc:
-            if publication_descriptor is not None:
-                os.close(publication_descriptor)
-                publication_descriptor = None
-            if published_by_invocation:
-                with suppress(CommonSessionCleanupError):
-                    if authority_published:
-                        _remove_bound_retained_media(
-                            self.root,
-                            final,
-                            {
-                                **acquisition.session.payload,
-                                "common_session_id": acquisition.session.identity,
-                            },
-                        )
-            raise CommonSessionMediaError from exc
+            primary_error = CommonSessionMediaError(
+                probe_diagnostic=Phase7EMediaProbeDiagnostic(
+                    publication_stage,
+                    retained_bytes=source_size if source_size >= 0 else None,
+                )
+            )
+            _emit_publication_probe_diagnostic(self, acquisition, primary_error)
+            publication_descriptor = _cleanup_publication_final(
+                self,
+                acquisition,
+                final,
+                publication_descriptor,
+                published_by_invocation,
+                authority_published,
+                primary_error,
+            )
+            raise primary_error from exc
+        except (KeyboardInterrupt, SystemExit):
+            publication_descriptor = _cleanup_publication_final(
+                self,
+                acquisition,
+                final,
+                publication_descriptor,
+                published_by_invocation,
+                authority_published,
+                None,
+            )
+            raise
         finally:
             if publication_descriptor is not None:
-                os.close(publication_descriptor)
+                try:
+                    os.close(publication_descriptor)
+                finally:
+                    publication_descriptor = None
+            if (
+                published_by_invocation
+                and not authority_published
+                and primary_error is not None
+                and (final.exists() or final.is_symlink())
+            ):
+                _attach_cleanup_failure(primary_error, CommonSessionCleanupError())
             if staging is not None:
-                _remove_owned_media_directory(self.repository.root, staging)
+                try:
+                    _remove_owned_media_directory(self.repository.root, staging)
+                except CommonSessionCleanupError as cleanup:
+                    if primary_error is not None:
+                        _attach_cleanup_failure(primary_error, cleanup)
+                    elif success:
+                        raise
+            if primary_error is not None:
+                _finalize_probe_diagnostic(primary_error)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2827,6 +2889,78 @@ def _remove_clip_or_raise(clip: ReplayClip) -> None:
         clip.remove()
     except OSError as exc:
         raise CommonSessionCleanupError from exc
+
+
+def _attach_cleanup_failure(
+    primary: CommonSessionError,
+    cleanup: CommonSessionCleanupError,
+) -> None:
+    """Keep publication cleanup failure secondary to the primary error."""
+    if primary.cleanup_failure_code is None:
+        primary.cleanup_failure_code = CommonSessionCleanupError.code
+        primary.cleanup_failure = cleanup
+
+
+def _emit_publication_probe_diagnostic(
+    media: DurableCommonSessionMedia,
+    acquisition: CommonSessionAcquisition,
+    primary: CommonSessionError,
+) -> None:
+    """Emit one closed publication diagnostic before final-media cleanup."""
+    diagnostic = primary.probe_diagnostic
+    if diagnostic is None:
+        return
+    try:
+        media.diagnostic_sink(
+            acquisition.request.investigation_id,
+            acquisition.request.run_id,
+            diagnostic,
+        )
+    except Exception:  # noqa: BLE001 - diagnostics never replace the primary failure.
+        return
+
+
+def _cleanup_publication_final(
+    media: DurableCommonSessionMedia,
+    acquisition: CommonSessionAcquisition,
+    final: Path,
+    publication_descriptor: int | None,
+    published_by_invocation: bool,
+    authority_published: bool,
+    primary: CommonSessionError | None,
+) -> int | None:
+    """Remove only this invocation's final object after failed publication."""
+    if not published_by_invocation:
+        return publication_descriptor
+    try:
+        unbound_cleanup = not authority_published
+        if os.name == "nt" and publication_descriptor is not None:
+            os.close(publication_descriptor)
+            publication_descriptor = None
+        if authority_published:
+            _remove_bound_retained_media(
+                media.root,
+                final,
+                {
+                    **acquisition.session.payload,
+                    "common_session_id": acquisition.session.identity,
+                },
+            )
+        elif publication_descriptor is not None:
+            remove_unbound_publication(publication_descriptor, final)
+        elif unbound_cleanup and os.name == "nt":
+            deletion_descriptor = open_stable_file(final, delete_access=True)
+            try:
+                remove_unbound_publication(deletion_descriptor, final)
+            finally:
+                os.close(deletion_descriptor)
+        else:
+            raise CommonSessionCleanupError
+    except (CommonSessionCleanupError, MediaFilesystemAuthorityError, OSError) as cleanup:
+        if primary is not None:
+            _attach_cleanup_failure(primary, CommonSessionCleanupError())
+        del cleanup
+    return publication_descriptor
 
 
 def _remove_clip_preserving_primary(

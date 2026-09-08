@@ -456,6 +456,36 @@ def mark_open_file_for_deletion(descriptor: int) -> None:
         raise OSError(ctypes.get_last_error(), "SetFileInformationByHandle failed")
 
 
+def remove_unbound_publication(descriptor: int, path: Path) -> None:
+    """Remove one newly published MP4 only while its held identity is unchanged.
+
+    The caller keeps ``descriptor`` open until the surrounding publication
+    transaction closes it.  Windows therefore marks that exact object for
+    deletion; POSIX compares a second stable handle before unlinking the
+    pathname.  No authority record or path-only fallback is used.
+    """
+    if path.is_symlink() or not path.is_file():
+        raise MediaFilesystemAuthorityError
+    _verify_path_names_descriptor(descriptor, path)
+    if descriptor_stamp(descriptor)["link_count"] != 1:
+        raise MediaFilesystemAuthorityError
+    if os.name == "nt":
+        mark_open_file_for_deletion(descriptor)
+        return
+    confirmation = open_stable_file(path)
+    try:
+        if filesystem_identity(confirmation) != filesystem_identity(descriptor):
+            raise MediaFilesystemAuthorityError
+        if descriptor_stamp(confirmation) != descriptor_stamp(descriptor):
+            raise MediaFilesystemAuthorityError
+        path.unlink()
+    finally:
+        os.close(confirmation)
+    if path.exists() or path.is_symlink():
+        raise MediaFilesystemAuthorityError
+    _fsync_directory(path.parent)
+
+
 def stable_source_path(descriptor: int, live_path: Path) -> Path:
     """Return a subprocess-readable path for the exact held file object."""
     if os.name == "nt":
@@ -605,6 +635,7 @@ __all__ = [
     "open_stable_file",
     "publish_retained_media_authority",
     "read_retained_media_authority",
+    "remove_unbound_publication",
     "rename_open_file_no_replace",
     "stable_source_path",
     "verified_retained_media",

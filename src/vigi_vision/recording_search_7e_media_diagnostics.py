@@ -38,6 +38,11 @@ MEDIA_PROBE_STAGES: Final = frozenset(
         "duration_too_short",
         "duration_too_long",
         "probe_facts_mismatch",
+        "publication_post_copy_validation",
+        "publication_post_rename_validation",
+        "publication_final_probe",
+        "publication_fact_mismatch",
+        "publication_authority",
         "cleanup_failed",
         "unexpected_probe_failure",
     }

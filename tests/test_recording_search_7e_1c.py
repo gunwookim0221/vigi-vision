@@ -58,6 +58,7 @@ from vigi_vision.recording_search_7e_media_authority import (
     read_retained_media_authority,
     rename_open_file_no_replace,
 )
+from vigi_vision.recording_search_7e_media_diagnostics import Phase7EMediaProbeDiagnostic
 from vigi_vision.object_presence_evidence import RawComparison
 from vigi_vision.object_presence_values import ClassificationOutcome, VisualStatus
 from vigi_vision.recording_search_b2_identity import observation_id_for
@@ -476,11 +477,11 @@ def test_interruption_before_authority_admission_cannot_leave_eligible_media(
         DurableCommonSessionMedia(repository).publish(acquisition, invocation)
 
     media_root = repository.root / ".media"
-    assert len(tuple(media_root.rglob("*.mp4"))) == 1
+    assert not tuple(media_root.rglob("*.mp4"))
     assert not tuple(media_root.rglob("*.authority.json"))
 
 
-def test_authority_admission_failure_never_path_deletes_unbound_final_media(
+def test_authority_admission_failure_removes_unbound_final_media_and_emits_one_warning(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     acquirer, _, _ = _acquirer(tmp_path)
@@ -496,15 +497,86 @@ def test_authority_admission_failure_never_path_deletes_unbound_final_media(
         "vigi_vision.recording_search_7e_1c.publish_retained_media_authority",
         fail_authority,
     )
+    captured: list[Phase7EMediaProbeDiagnostic] = []
+
+    def sink(_investigation: str, _run: str, diagnostic: Phase7EMediaProbeDiagnostic) -> None:
+        captured.append(diagnostic)
+
     with (
         pytest.raises(CommonSessionMediaError),
         Phase7E1CExecutor(repository, acquirer).invocation(request) as invocation,
     ):
-        DurableCommonSessionMedia(repository).publish(acquisition, invocation)
+        DurableCommonSessionMedia(repository, sink).publish(acquisition, invocation)
 
     media_root = repository.root / ".media"
-    assert len(tuple(media_root.rglob("*.mp4"))) == 1
+    assert not tuple(media_root.rglob("*.mp4"))
     assert not tuple(media_root.rglob("*.authority.json"))
+    assert len(captured) == 1
+    assert captured[0].stage == "publication_authority"
+
+
+def test_final_probe_failure_removes_unbound_final_media_and_keeps_primary_category(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    acquirer, _, _ = _acquirer(tmp_path)
+    request = _request()
+    acquisition = acquirer.acquire(request)
+    repository = RecordingSearch7ERepository(tmp_path / "runs")
+
+    class FailingFinalProbe:
+        def probe(self, path: Path, timeout_seconds: float) -> MediaProbeFacts:
+            _ = (path, timeout_seconds)
+            detail = "private probe detail"
+            raise RuntimeError(detail)
+
+    repository.media_probe = FailingFinalProbe()
+    captured: list[Phase7EMediaProbeDiagnostic] = []
+
+    def sink(_investigation: str, _run: str, diagnostic: Phase7EMediaProbeDiagnostic) -> None:
+        captured.append(diagnostic)
+
+    with (
+        Phase7E1CExecutor(repository, acquirer).invocation(request) as invocation,
+        pytest.raises(CommonSessionMediaError) as raised,
+    ):
+        DurableCommonSessionMedia(repository, sink).publish(acquisition, invocation)
+
+    error = raised.value
+    assert error.code == "media_probe_failed"
+    assert error.probe_diagnostic is not None
+    assert error.probe_diagnostic.stage == "publication_final_probe"
+    assert len(captured) == 1
+    media_root = repository.root / ".media"
+    assert not tuple(media_root.rglob("*.mp4"))
+    assert not tuple(media_root.rglob("*.authority.json"))
+    assert "private probe detail" not in str(error)
+
+
+def test_preexisting_final_media_is_not_deleted_on_publication_rejection(
+    tmp_path: Path,
+) -> None:
+    acquirer, _, _ = _acquirer(tmp_path)
+    request = _request()
+    acquisition = acquirer.acquire(request)
+    repository = RecordingSearch7ERepository(tmp_path / "runs")
+    final = (
+        repository.root
+        / ".media"
+        / request.investigation_id
+        / request.run_id
+        / f"{acquisition.common_session_id}.mp4"
+    )
+    final.parent.mkdir(parents=True)
+    final.write_bytes(b"foreign")
+    repository.media_probe = acquirer.media_probe
+
+    with (
+        Phase7E1CExecutor(repository, acquirer).invocation(request) as invocation,
+        pytest.raises(CommonSessionMediaError),
+    ):
+        DurableCommonSessionMedia(repository).publish(acquisition, invocation)
+
+    assert final.read_bytes() == b"foreign"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows publication-object continuity contract")
