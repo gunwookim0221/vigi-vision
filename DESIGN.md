@@ -208,8 +208,12 @@ or glass effects are used.
   terminal path now reloads the post-D1 manifest under the mutation boundary,
   persists a validated D1 reconstruction envelope for FOUND, and preserves
   schema 4 after any post-commit readback failure.
-  Phase 7E validation and the Phase 8/9 review workflow remain later work.
-  Advanced recovery analysis is retained only as
+  Phase 7E-3 Stage 1 acquisition and the bounded Stage 2 one-minute normal-path
+  real-NVR acceptance are complete. The current 600-second/single-segment
+  execution boundary and the planned two-hour multi-segment successor are
+  recorded in the [Phase 7 recording-search MVP](docs/design/object-disappearance-recording-search.md#phase-7e-mvp-realignment-and-successor-boundary).
+  Phase 8 review-media processing and the Phase 9 review workflow remain later
+  work. Advanced recovery analysis is retained only as
   [non-normative future reference](docs/future/recording-search-resilience.md).
 - Tap-assisted selection and the Phase 5-3C transient silhouette preview are
   implemented but remain acceptance-gated for physical desktop/mobile use; the

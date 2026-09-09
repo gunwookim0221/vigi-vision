@@ -21,21 +21,23 @@ request persistence. The terminal path reloads post-D1 schema-3 evidence under
 the mutation boundary and independently reconstructs persisted FOUND facts on
 reopen. Phase 7E feasibility work proves that current VIGI replay timestamps
  are request-relative and cannot supply authoritative physical frame UTC. The
- implemented Phase 7E-1C boundary now owns one bounded replay/decode session,
+implemented Phase 7E-1C boundary now owns one bounded replay/decode session,
  durable media retention, exact local frame selection, and persisted-frame
  admission. Phase 7E-1D now owns the Phase 7E C1 adapter, adaptive evidence
  composition, schema-7 terminal publication, strict readback, and safe status.
-The single normative Phase 7E contract uses one replay/decode session, one SDK
-segment, a five-minute default, a hard 600-second search maximum, an exact
+The current Phase 7E implementation boundary uses one replay/decode session,
+one SDK segment, a five-minute default, a hard 600-second search maximum, an exact
 2,520-second invocation ceiling, schemas 5→6→7, and a separate FOUND-only Phase
 8 projection repository. The 7E-1C common-session, 7E-1D terminal, and 7E-2
 CLI/projection/retention boundaries are implemented, including continuous
 publication-object authority and crash-safe two-media deletion. Phase 7E-3
 Stage 1 passed a bounded real-NVR acquisition/smoke check with one validated
-recent replay, but no terminal search was run because a human-confirmed
-baseline, ROI, and labeled disappearance interval were unavailable. Stage 2,
-Phase 8 review-media processing, and Phase 9 remain pending; schemas 1–4 retain
-their original strict meaning.**
+recent replay. The bounded Stage 2 normal-path acceptance also passed with a
+schema-7 `NOT_FOUND` result and browser reload restoration. Phase 8 review-media
+processing and Phase 9 remain pending; schemas 1–4 retain their original strict
+meaning. The current 600-second/single-segment boundary is an implementation
+limit, while the planned two-hour multi-segment successor is documented in the
+[normative Phase 7E realignment](object-disappearance-recording-search.md#phase-7e-mvp-realignment-and-successor-boundary).**
 
 This document defines the first bounded use case for VIGI Vision's longer-term
 Event Discovery direction: a user investigates one selected object on one NVR
@@ -226,7 +228,8 @@ nearest-frame selection with earlier-tie preference. A supported
 `PRESENT -> confirmed ABSENT` bracket then narrows at deterministic whole-second
 midpoints until it is one second wide.
 
-The complete half-open search interval must be no longer than 600 seconds and
+For the current implementation, the complete half-open search interval must be
+no longer than 600 seconds and
 must fit entirely inside one indexed SDK recording segment. The complete coarse
 grid, all binary revalidation, support frames, terminal evidence, and the Phase
 7E source clip belong to one immutable common replay/decode session. A request
@@ -403,11 +406,11 @@ version after Phase 7E evidence.
   result separate from the FOUND-only Phase 8 source-clip/handoff repository;
   Phase 8 owns later review-media processing. FOUND terminalization persists a
   validated lossless D1 reconstruction envelope and never downgrades schema 4
-  after its commit point. The Phase 7E contract preserves one common session,
-  one segment, a 600-second search ceiling, and a 2,520-second invocation
+  after its commit point. The current Phase 7E compatibility path preserves one
+  common session, one segment, a 600-second search ceiling, and a 2,520-second invocation
   ceiling. Ordered 7E-1A/1B/1C/1D and 7E-2 are implemented; 7E-3 Stage 1
-  bounded real-NVR acquisition/smoke validation passed with limitations, while
-  Stage 2 terminal search acceptance remains. The common-session publisher retains one exact
+  bounded real-NVR acquisition/smoke validation and the bounded Stage 2
+  one-minute normal-path acceptance passed. The common-session publisher retains one exact
   staged object through authority admission, and the Phase 8 retention boundary
   uses per-object durable move/disposition substates plus terminal
   closed-membership validation. Slice ownership is: 1A
@@ -418,8 +421,9 @@ version after Phase 7E evidence.
   `BACKWARD_FROM_END` support mode with legacy default `FORWARD`), source
   reconstruction, and immutable schema 7; 2 synchronous CLI and separate
   Phase 8 projection/retention; 3
-  bounded real-NVR acceptance and fault injection (Stage 1 acquisition passed;
-  Stage 2 terminal/human acceptance pending).
+  bounded real-NVR acceptance and fault injection (Stage 1 acquisition and the
+  bounded Stage 2 normal path passed; the two-hour successor remains future
+  work).
 4. **Phase 8 (backend handoff only; review processing future):** the strict
    FOUND-only source-clip request, retention lifecycle, and deletion boundary
    exist; boundary images, evidence timeline, and review video are not yet

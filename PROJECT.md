@@ -231,17 +231,20 @@ disposition, restart-safe intended-absence recovery, and a final
 closed-membership proof that prevents reused names from becoming false
 `DELETED`. Older runs without that
 authority remain readable but cannot create or delete Phase 8 media. No second
-replay or re-analysis is performed. Phase 7E-3 Stage 1 now has a bounded
-real-NVR acquisition/smoke result: one recent completed replay was acquired and
+replay or re-analysis is performed. Phase 7E-3 Stage 1 has a bounded real-NVR
+acquisition/smoke result: one recent completed replay was acquired and
 validated as one HEVC stream at `2560x1440` with approximately twenty seconds
-of media and monotonic decoded timestamps. Stage 1 did not execute a terminal
-search because no human-confirmed baseline, ROI, and labeled disappearance
-interval were available; Stage 2 therefore remains the user-workflow gate.
-Later Phase 8 review processing and Phase 9 result UI remain unimplemented. The Phase 7E feasibility work proves that VIGI
+of media and monotonic decoded timestamps. The bounded Stage 2 normal-path
+acceptance is now also complete: investigation
+`object-disappearance-v3-ch1-20260904T051732Z` reached schema-7 `NOT_FOUND`
+(`COMPLETE_PRESENT_GRID`) in run `search-run-b476f378dc89484db6a9bd7353d3a268`,
+and browser reload restored the exact result. Later Phase 8 review processing
+and Phase 9 result UI remain unimplemented. The Phase 7E feasibility work proves that VIGI
 segment metadata supplies coverage only and that current replay exposes
 request-relative timestamps without authoritative frame UTC. The rewritten
-normative contract defines one common replay/decode session, one SDK segment, a
-five-minute default, a hard 600-second maximum, pre-acquisition schema 5,
+normative contract defines the current compatibility boundary of one common
+replay/decode session and one SDK segment, a five-minute default, and a hard
+600-second maximum, alongside pre-acquisition schema 5,
 zero-evidence and incremental schema 6, immutable terminal schema 7, 26 acyclic
 identity families with full B4 classifier-policy/evidence binding, a binary-
 complete strict-reopen fixture, and a separate closed-state Phase 8
@@ -265,9 +268,12 @@ replay/remux with durable `.media` retention, exact local target selection,
 RGB24/JPEG integrity, persisted-frame B4 admission, adaptive same-session
 evidence admission, C2/D1/D2 composition, complete source reconstruction,
 immutable schema 7, and strict terminal readback/status. CLI execution is
-implemented in the 7E-2 boundary; bounded Stage 1 real-NVR acquisition passed
-with the limitation above, while terminal real-NVR search acceptance remains
-pending the Phase 4C-2/5/6 user workflow and a human-labeled scenario.
+implemented in the 7E-2 boundary; bounded Stage 1 acquisition and the one-minute
+Stage 2 normal-path acceptance passed. The current implementation's 600-second,
+single-segment ceiling is a compatibility limit, not the product horizon. The
+planned two-hour multi-segment successor, priority model, history findings, and
+implementation slices are normative in
+[`docs/design/object-disappearance-recording-search.md`](docs/design/object-disappearance-recording-search.md#phase-7e-mvp-realignment-and-successor-boundary).
 Correction B adds a bounded Windows-spawn process boundary around production
 Phase 7E B4 classification; timeout/cancellation terminate and reap the child,
 and late output cannot become evidence. Valid results allow a bounded two-second
@@ -303,11 +309,11 @@ capability.
    Transient status timeouts, network failures, and 5xx responses retain the
    exact run identity and recover with a five-attempt bounded 2/4/8/15/15-second
    backoff; client deadline exhaustion never claims that server work failed.
-   Keep physical desktop/mobile acceptance and real-NVR Stage 2 validation as
-   the next gate.
+   The confirmed browser workflow and bounded real-NVR Stage 2 normal path are
+   accepted; the next product increment is the documented two-hour,
+   multi-segment successor.
 6. Preserve the implemented Phase 7E-1A through 1D, 7E-2, and confirmed
-   browser workflow foundation, then run Phase 7E-3 Stage 2 against a
-   human-labeled real-NVR scenario: 7E-1A owns the 26 request-relative identity families,
+   browser workflow foundation. 7E-1A owns the 26 request-relative identity families,
    search/classifier/media policies, exact
    schema-5/6 matrices, schema dispatch, vectors, and pure validation; 7E-1B owns pre-acquisition schema 5, the zero-evidence
    schema-6 transition, incremental admission, and strict reopen; 7E-1C owns one
@@ -319,11 +325,12 @@ capability.
    status; 7E-2 owns the synchronous CLI, asynchronous browser POST, bounded
    worker/startup recovery, cleanup, and the separate Phase 8
    clip/handoff/retry/deletion repository; 7E-3 owns bounded
-   real-NVR acceptance and fault injection. Preserve the 600-second search
-   ceiling, 2,520-second invocation ceiling, one session/segment, schemas 1–4,
+   real-NVR acceptance and fault injection. Preserve the current 600-second
+   search ceiling, 2,520-second invocation ceiling, and one session/segment as
+   implementation compatibility limits while planning the successor; schemas 1–4,
    Phase 6 immutability, and the rule that operational failure cannot become
-   absence. Stage 1 real-NVR acquisition passed with limitations; Stage 2
-   terminal search acceptance remains pending the human-labeled workflow.
+   absence. Stage 1 acquisition and the bounded one-minute Stage 2 normal-path
+   acceptance passed; the two-hour acceptance remains future work.
    Media-probe failures emit one closed, path-free structured warning through
    Uvicorn's configured console logger before temporary-media cleanup.
    Phase 8 processing and Phase 9 judgment remain future work.

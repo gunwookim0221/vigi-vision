@@ -17,10 +17,13 @@ Windows-spawn child-process boundary: the parent retains authority, timeout,
 cancellation, reaping, and evidence admission, while late child output is
 discarded. The child has no persistence, SDK, or credential capability.
 Phase 7E-3 Stage 1 has passed a bounded real-NVR acquisition/smoke check with
-one validated recent replay, but terminal search acceptance remains pending a
-human-confirmed baseline/ROI and labeled scenario. Phase 8 review-media
-processing remains unimplemented; its strict FOUND-only handoff and retention
-boundaries are implemented.
+one validated recent replay, and the bounded Stage 2 one-minute normal-path
+acceptance has passed with a schema-7 `NOT_FOUND` result and browser reload
+restoration. Phase 8 review-media processing remains unimplemented; its strict
+FOUND-only handoff and retention boundaries are implemented. The current
+600-second, one-segment rule is an implementation compatibility boundary, not
+the product horizon; the planned two-hour multi-segment successor is recorded
+in the linked normative design and is not implemented by this ADR.
 The Phase 7E retained-media publication boundary is transactional: a final MP4
 is not admitted without its operational authority record, invocation-owned
 post-rename failures are identity-bound cleaned up, and publication failures
@@ -65,8 +68,9 @@ frame-to-epoch mapping. New production runs therefore use
 fallback parser.
 
 One synchronous CLI invocation owns one SDK segment, one replay/remux, one
-retained MP4, and one common decode session. The five-minute default and exact
-600-second maximum remain fixed. Baseline confirmation is historical only:
+retained MP4, and one common decode session in the current MVP. The five-minute
+default and exact 600-second maximum remain the compatibility policy for this
+implementation; they are not the desired total product horizon. Baseline confirmation is historical only:
 `FOUND` requires a recording-session `PRESENT` lower observation plus
 same-session distinct `ABSENT` support. Operational failure cannot become
 visual `INCONCLUSIVE`.

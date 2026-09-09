@@ -38,9 +38,10 @@ reconstruction envelope for `FOUND` and independently rebuilds it from the
 publication authority and crash-safe deletion. Phase 7E-3 Stage 1 bounded
 real-NVR acquisition/smoke validation passed with one recent replay, but no
 terminal search was run because a human-confirmed baseline, ROI, and labeled
-disappearance interval were unavailable. Stage 2 terminal acceptance and
-Phase 8 review-media generation remain pending. The required Phase 6C schema 3
-compatibility increment is complete.**
+disappearance interval were unavailable. Stage 2 terminal acceptance is complete
+for the bounded normal path described below; Phase 8 review-media generation
+remains pending. The required Phase 6C schema 3 compatibility increment is
+complete.**
 
 This document is the current implementation and review contract for Phase 7.
 It is intentionally limited to one restaurant, one local application host, one
@@ -52,6 +53,130 @@ full-manifest, and multi-process analysis is preserved only in
 [Recording Search Resilience: Future Reference](../future/recording-search-resilience.md).
 That document is non-normative and is not part of MVP implementation, review,
 or completion criteria.
+
+## Phase 7E MVP realignment and successor boundary
+
+This section records the requirement history and the current product boundary
+so that the implemented MVP is not mistaken for the complete disappearance-search
+product. The current implementation remains deliberately small: it supports a
+positive request duration of at most 600 seconds and exactly one covering SDK
+recording segment. Those are implementation limits of the request-relative
+single-session path, not the user's total search horizon or a claim that a
+disappearance must occur inside ten minutes.
+
+### Completed single-segment real-NVR acceptance
+
+Phase 7E-3 Stage 2's bounded normal-path acceptance is complete and must not be
+re-run as part of documentation or planning work. Investigation
+`object-disappearance-v3-ch1-20260904T051732Z` and run
+`search-run-b476f378dc89484db6a9bd7353d3a268` exercised the real NVR replay,
+EfficientSAM classification, schema-7 terminal publication, browser result
+projection, and reload restoration. The terminal result was `NOT_FOUND` with
+reason `COMPLETE_PRESENT_GRID`; the target remained present throughout the
+observed approximately one-minute range `2026-09-04 14:17:32–14:18:31
+Asia/Seoul`. This proves the ordinary one-segment path, not a two-hour
+multi-segment search and not disappearance accuracy outside the observed range.
+
+### Product goal and review priorities
+
+The product goal is to select an object in a confirmed reference frame and
+report approximately when it disappeared from later recording. A useful result
+contains the last observed `PRESENT` time, first observed `ABSENT` time,
+approximate disappearance interval, supporting frames, and a short review clip
+when practical. It must return `INCONCLUSIVE` when available coverage or visual
+evidence cannot support a decision. Millisecond equality between a requested
+window and an MP4 is not a product requirement; valid decoded media is judged
+by its observable frame/PTS range and honest coverage limits.
+
+Review priority is user impact, not theoretical completeness:
+
+| Priority | Blocks normal-path delivery? | Examples |
+| --- | --- | --- |
+| P0 — MVP blocking | Yes | Wrong object/ROI/channel/time; fabricated visual state or interval; ordinary real-NVR path cannot complete; evidence corruption/deletion; credential exposure; repeatable crash, hang, or unbounded resource use; result from the wrong investigation/run. |
+| P1 — Stabilization | No, unless it fails the tested path | Restart restoration, bounded retries, temporary-file cleanup, safe diagnostics, partial segment availability, and recoverable SDK/network failures. |
+| P2 — Backlog | No, unless it becomes reachable in the tested path | Rare filesystem races, theoretical multi-process collisions, exhaustive crash-point recovery, diagnostic retention across restart, forensic immutability for every intermediate action, and malformed internal-state combinations. |
+
+Review severity follows the same rule: `BLOCKER` is unsafe or fundamentally
+unusable, `MAJOR` breaks the ordinary user path or materially changes its
+answer, `MINOR` is a bounded degradation with a practical workaround, and
+`NOTE` is hardening or backlog. A NOTE or theoretical edge case does not by
+itself block an MVP implementation or user acceptance.
+
+### Requirement-history findings
+
+The committed history was searched with `git log -S`, `git log -G`, `git show`,
+and `git blame` across all local refs. The evidence is:
+
+1. `4edb15d` (2026-08-10, `docs: finalize Phase 7 recording search design`)
+   introduced the Phase 7 coarse policy with a `300`-second interval and a
+   separate `24 hours` maximum requested span (`maximum_requested_span_seconds`
+   `86400`). The committed record describes five-minute sampling as cadence,
+   not as the product horizon.
+2. `a36236f` (2026-08-24, `Design Phase 7E recording search execution`)
+   rewrote the request-relative Phase 7E contract and introduced the current
+   `300`-second default, hard `600`-second maximum, one-covering-segment rule,
+   and `2,520`-second invocation budget. Its stated implementation rationale is
+   one bounded replay/decode session and one SDK segment; it does not state that
+   600 seconds is the desired product horizon.
+3. No local committed ref contains `two hour`, `two-hour`, `120 minutes`, or
+   `7200` as a Phase 7 search horizon. The two-hour requirement is therefore
+   current planning input, not historical Git evidence. The sequence above is
+   consistent with the five-minute coarse cadence being narrowed into a
+   six-hundred-second implementation cap, but that conversion is an inference;
+   the commits do not explicitly say it was accidental.
+
+### Two-hour multi-segment successor (planned, not implemented)
+
+The successor keeps the current schemas and evidence-safety rules while removing
+the one-segment total-horizon assumption. Its explicit initial policy is a
+30-minute default search horizon, a 2-hour maximum horizon, and a 10-minute
+default coarse cadence configurable within the 5–10-minute product range. The
+maximum is a bounded product horizon, not a promise that all media is downloaded
+or that the result is forensic-grade. The implementation must:
+
+- discover every segment overlapping the requested horizon and represent gaps
+  explicitly;
+- retrieve only short frame/clip windows around coarse targets, allowing
+  adjacent segments, different physical segment sizes, target reassignment to a
+  nearby decodable frame, and short recording gaps;
+- stop coarse expansion after the first reliable `PRESENT → ABSENT` bracket,
+  binary-narrow only inside that bracket, and return an approximate interval;
+- include supporting frames and a short review clip around the result when
+  practical, without concatenating the whole hour or two hours; and
+- remain bounded by target count, per-target replay/decode/classifier budgets,
+  total wall time, and cleanup reserves. A two-hour request should usually take
+  roughly 10–20 coarse/fine observations; the exact target is measured during
+  implementation rather than treated as a forensic guarantee.
+
+The planned flow is:
+
+1. Start from the confirmed `PRESENT` baseline.
+2. Discover all segments overlapping the requested horizon.
+3. Schedule chronological coarse targets at the configured 5–10-minute cadence.
+4. Acquire and classify only enough media for each target.
+5. Stop coarse expansion at the first reliable `ABSENT` and retain the last
+   reliable `PRESENT`.
+6. Binary-search between that bracket using short per-target acquisitions.
+7. Return the approximate disappearance interval and supporting evidence.
+8. If gaps or missing coverage prevent a bracket, return `INCONCLUSIVE` with
+   the observed coverage and limitation reason.
+
+The successor is not implemented by this document update. Its implementation is
+split into the following practical slices:
+
+| Slice | User-visible outcome | Minimum tests | Acceptance criterion | Deferred hardening |
+| --- | --- | --- | --- | --- |
+| 1. Segment discovery and target scheduling | A two-hour request exposes ordered targets and honest gaps. | Adjacent/overlapping segments, gaps, boundaries, different segment sizes, deterministic target identities. | Every target is mapped to coverage or an explicit gap without whole-horizon download. | Multi-process discovery races and long-term segment cache. |
+| 2. Per-target short replay/frame acquisition | Each target yields a nearby decodable frame or a safe unavailable reason. | Boundary reassignment, short media, decode failure, cleanup, bounded timeout, credential redaction. | Work scales with requested targets and valid frames retain provenance. | Cross-host replay reuse and forensic timestamp calibration. |
+| 3. Coarse bracket detection | The first reliable `PRESENT → ABSENT` bracket is found or the result is `INCONCLUSIVE`. | 5/10-minute cadence, intermittent gaps, repeated PRESENT, first ABSENT, false/indeterminate observations. | No fabricated absence; gaps and partial coverage remain explicit. | Adaptive cadence and learned sampling. |
+| 4. Binary narrowing | The bracket becomes a useful approximate disappearance interval. | Monotonic interval shrink, segment boundaries, target aliasing, bounded iteration. | Last PRESENT and first ABSENT are both supported and interval is honestly bounded. | Sub-second precision and non-monotonic recovery. |
+| 5. Browser/API horizon and result presentation | The user can request the horizon and see status, interval, coverage, and limitations. | Validation, RUNNING/terminal transitions, reload/run isolation, mobile layout, safe network errors. | The exact investigation/run returns `FOUND`, `NOT_FOUND`, or `INCONCLUSIVE` without stale status. | Phase 8 review controls and Phase 9 judgment UI. |
+| 6. Final real-NVR acceptance | One human-labeled two-hour scenario proves the normal path. | Production-shaped HTTP/background flow, real segments, cleanup, logs, and restart restoration. | User-visible result agrees with labeled evidence and no P0 finding remains. | Broader cameras, object types, and exhaustive fault matrices. |
+
+Until these slices are implemented and accepted, references to two hours or
+multi-segment search are design targets only. The current 600-second,
+single-segment implementation and the completed one-minute `NOT_FOUND`
+acceptance remain the compatibility baseline.
 
 ## Scope and phase boundaries
 
@@ -90,15 +215,16 @@ describe the implemented schemas 1–4 and remain normative only for that legacy
 `AUTHORITATIVE_SOURCE_UTC` family. They must not be used to fill a schema 5–7
 gap.
 
-### Fixed product boundary
+### Current implementation boundary (not the product horizon)
 
 Production VIGI recording search uses `REQUEST_RELATIVE_ESTIMATE` with
-`UNKNOWN_UNBOUNDED` physical-origin bias. One synchronous CLI invocation uses
-one SDK segment, one replay/remux, one retained MP4, and one common decode
+`UNKNOWN_UNBOUNDED` physical-origin bias. The current synchronous MVP invocation
+uses one SDK segment, one replay/remux, one retained MP4, and one common decode
 session. Every C1, C2, D1, D2, support, and terminal frame comes from that
-session. No second replay, cross-session match, migration, fallback parser,
-worker, lease, takeover, resume, frontend, Phase 8 executor, or Phase 9 behavior
-is authorized.
+session. Multi-segment discovery and a longer horizon are successor work, not
+hidden fallback behavior. The 7E-2 browser projection and asynchronous start
+surface are implemented; Phase 8 review-media execution and Phase 9 judgment
+remain outside this contract.
 
 The requested interval is half-open `[S,E)`. The default duration is `300`
 seconds and the exact maximum is `600` seconds. Duration is a positive integer;
@@ -1334,7 +1460,7 @@ and invalidates stale completions.
 | 7E-1C | One replay/remux, `.media` ownership, ffprobe, common session, sparse/adaptive local decoding, the Phase 7E same-session selector (including logical-E strict-before mapping and duplicate/alias rejection), RGB24, persisted-frame A2/B4 adapters, and deadline propagation. |
 | 7E-1D | The Phase 7E C1 planner/composition adapter (`S` inclusion, logical `E`, explicit shared `BACKWARD_FROM_END` support mode, no clamp), C2/D1/D2 composition, complete source reconstruction, schema-7 atomic publication/reopen, and Phase 7 public status. Shared C1/C2 defaults to legacy `FORWARD`, schemas 1–4 remain unchanged, and this slice performs no Phase 8 mutation. |
 | 7E-2 | Synchronous CLI, asynchronous browser HTTP start/status, fixed worker and startup interruption recovery, cleanup reserve, separate Phase 8 clip/request/retry repository, status join, and deletion command. |
-| 7E-3 | Bounded real-NVR acceptance and local fault injection only after 1A–2 approval; Stage 1 acquisition passed, while Stage 2 terminal/human acceptance remains pending. |
+| 7E-3 | Bounded real-NVR acceptance and local fault injection only after 1A–2 approval; Stage 1 acquisition and the bounded Stage 2 one-minute normal-path acceptance passed. The two-hour multi-segment successor is planned separately. |
 
 Dependency order is 1A → 1B → 1C → 1D → 2 → 3. Persistence precedes
 acquisition; media and B4 adapters cannot precede the zero-evidence schema-6
@@ -4426,12 +4552,12 @@ classification, filesystem write, manifest mutation, or schema change. Phase
 ### Phase 7E: request-relative production and real-NVR acceptance
 
 Phase 7E is split into the ordered 7E-1A, 7E-1B, 7E-1C, 7E-1D, 7E-2, and
-7E-3 gates defined in the normative Phase 7E section above. 7E-3 Stage 1 has
-passed the bounded acquisition/smoke gate against a real NVR; the result is
-limited to one validated recent replay and does not establish terminal search
-accuracy. The request-relative decoder/persistence path, synchronous CLI, and
-human-input browser workflow now exist; Stage 2 remains the next separately
-authorized human-labeled real-NVR acceptance activity.
+7E-3 gates defined in the normative Phase 7E section above. 7E-3 Stage 1 passed
+the bounded acquisition/smoke gate against a real NVR, and the bounded Stage 2
+one-minute normal-path acceptance also passed with the `NOT_FOUND` result
+recorded above. The request-relative decoder/persistence path, synchronous CLI,
+and human-input browser workflow are therefore the compatibility baseline. The
+two-hour multi-segment successor remains planned work and is not claimed here.
 Its bounded matrix must exercise the 300- and 600-second windows, one
 segment and touching-segment rejection, end-boundary selection, same-session
 PRESENT→supported-ABSENT, baseline-only lower bound, complete-grid NOT_FOUND,
