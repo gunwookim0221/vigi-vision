@@ -125,7 +125,7 @@ and `git blame` across all local refs. The evidence is:
    six-hundred-second implementation cap, but that conversion is an inference;
    the commits do not explicitly say it was accidental.
 
-### Two-hour multi-segment successor (Slices 1–2 implemented; Slices 3–6 planned)
+### Two-hour multi-segment successor (Slices 1–3 implemented; Slices 4–6 planned)
 
 The successor keeps the current schemas and evidence-safety rules while removing
 the one-segment total-horizon assumption. Its explicit initial policy is a
@@ -164,17 +164,21 @@ The planned flow is:
 Implementation status: Slice 1 is implemented as a planning-only, deterministic
 multi-segment discovery and coarse-target scheduling boundary. Slice 2 now adds
 short per-target replay windows, actual decoded-PTS nearest-frame selection,
-target-level unavailable states, and invocation-owned cleanup. Neither slice
-adds persistence, browser/API work, classification, or real-NVR acceptance; the
-browser and NVR compatibility baseline remains the existing 600-second,
-single-segment path. Slice 3 coarse classification and Slices 4–6 remain not
-implemented and are split into the following practical slices:
+target-level unavailable states, and invocation-owned cleanup. Slice 3 now adds
+serial coarse classification through the existing process-isolated EfficientSAM
+boundary, actual-PTS observation ordering, strict Phase 6 authority/ROI binding,
+and provisional PRESENT → ABSENT candidate-bracket metadata. Gaps and target
+unavailable facts remain unclassified. None of these slices adds persistence,
+browser/API work, or real-NVR acceptance; the browser and NVR compatibility
+baseline remains the existing 600-second, single-segment path. Binary narrowing
+and final terminal classification remain unimplemented and are split into the
+following practical slices:
 
 | Slice | User-visible outcome | Minimum tests | Acceptance criterion | Deferred hardening |
 | --- | --- | --- | --- | --- |
 | 1. Segment discovery and target scheduling | A two-hour request exposes ordered targets and honest gaps. | Adjacent/overlapping segments, gaps, boundaries, different segment sizes, deterministic target identities. | Every target is mapped to coverage or an explicit gap without whole-horizon download. | Multi-process discovery races and long-term segment cache. |
 | 2. Per-target short replay/frame acquisition | Each target yields a nearby decodable frame or a safe unavailable reason. | Boundary reassignment, short media, decode failure, cleanup, bounded timeout, credential redaction. | Work scales with requested targets and valid frames retain provenance. | Cross-host replay reuse and forensic timestamp calibration. |
-| 3. Coarse bracket detection | The first reliable `PRESENT → ABSENT` bracket is found or the result is `INCONCLUSIVE`. | 5/10-minute cadence, intermittent gaps, repeated PRESENT, first ABSENT, false/indeterminate observations. | No fabricated absence; gaps and partial coverage remain explicit. | Adaptive cadence and learned sampling. |
+| 3. Coarse bracket detection | Ordered coarse observations and a provisional first `PRESENT → ABSENT` bracket. | 5/10-minute cadence, intermittent gaps, repeated PRESENT, first ABSENT, false/indeterminate observations. | No fabricated absence; gaps and partial coverage remain explicit. | Adaptive cadence and learned sampling. |
 | 4. Binary narrowing | The bracket becomes a useful approximate disappearance interval. | Monotonic interval shrink, segment boundaries, target aliasing, bounded iteration. | Last PRESENT and first ABSENT are both supported and interval is honestly bounded. | Sub-second precision and non-monotonic recovery. |
 | 5. Browser/API horizon and result presentation | The user can request the horizon and see status, interval, coverage, and limitations. | Validation, RUNNING/terminal transitions, reload/run isolation, mobile layout, safe network errors. | The exact investigation/run returns `FOUND`, `NOT_FOUND`, or `INCONCLUSIVE` without stale status. | Phase 8 review controls and Phase 9 judgment UI. |
 | 6. Final real-NVR acceptance | One human-labeled two-hour scenario proves the normal path. | Production-shaped HTTP/background flow, real segments, cleanup, logs, and restart restoration. | User-visible result agrees with labeled evidence and no P0 finding remains. | Broader cameras, object types, and exhaustive fault matrices. |
