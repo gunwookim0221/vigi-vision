@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
 
@@ -15,7 +15,7 @@ def _request(duration_seconds: int) -> ReplayRequest:
         window=RecordingWindow(
             channel_id=1,
             start_utc=start,
-            end_utc=start.replace(second=start.second + duration_seconds),
+            end_utc=start + timedelta(seconds=duration_seconds),
         ),
         replay_url="rtsp://nvr.example.test/replay",
     )
@@ -23,7 +23,7 @@ def _request(duration_seconds: int) -> ReplayRequest:
 
 @pytest.mark.parametrize(
     ("duration_seconds", "expected_timeout_seconds"),
-    [(10, 50.0), (30, 70.0)],
+    [(10, 50.0), (30, 90.0), (60, 180.0)],
 )
 def test_replay_timeout_budget_includes_startup_and_finalization_margin(
     tmp_path: Path,
@@ -81,8 +81,36 @@ def test_replay_extraction_succeeds_after_observed_startup_latency(
     clip = extractor.extract(_request(30))
 
     # Then
-    assert observed_timeout == [70.0]
+    assert observed_timeout == [90.0]
     assert clip.temporary_mp4_path.is_file()
+    clip.remove()
+
+
+def test_sixty_second_replay_allows_simulated_slow_completion_without_sleep(
+    tmp_path: Path,
+) -> None:
+    simulated_elapsed_seconds = 120.0
+    observed_timeout: list[float] = []
+
+    def slow_but_successful_runner(
+        arguments: tuple[str, ...], timeout_seconds: float
+    ) -> CompletedProcess[str]:
+        observed_timeout.append(timeout_seconds)
+        assert simulated_elapsed_seconds < timeout_seconds
+        _ = Path(arguments[-1]).write_bytes(b"completed-mp4")
+        return CompletedProcess(arguments, 0)
+
+    extractor = ReplayExtractor(
+        executable=Path("ffmpeg.exe"),
+        username="operator",
+        password=SecretStr("password"),
+        temporary_directory=tmp_path,
+        runner=slow_but_successful_runner,
+    )
+
+    clip = extractor.extract(_request(60))
+
+    assert observed_timeout == [180.0]
     clip.remove()
 
 

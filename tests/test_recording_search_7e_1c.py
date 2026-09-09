@@ -148,6 +148,16 @@ class _Extractor:
         )
 
 
+class _BoundedExtractor(_Extractor):
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.timeouts: list[float] = []
+
+    def extract_with_timeout(self, request: ReplayRequest, timeout_seconds: float) -> ReplayClip:
+        self.timeouts.append(timeout_seconds)
+        return self.extract(request)
+
+
 class _Probe:
     def probe(self, path: Path, timeout_seconds: float) -> MediaProbeFacts:
         return MediaProbeFacts(
@@ -173,19 +183,62 @@ def _request(policy: CommonSessionPolicy | None = None) -> CommonSessionRequest:
     return CommonSessionRequest.from_start_and_duration("inv-01", "run-01", 1, start, 4, policy)
 
 
-def _acquirer(tmp_path: Path) -> tuple[CommonSessionAcquirer, _Extractor, _Planner]:
+def _acquirer(
+    tmp_path: Path,
+    *,
+    segment_duration_seconds: int = 30,
+) -> tuple[CommonSessionAcquirer, _Extractor, _Planner]:
     start = datetime(2026, 7, 20, 3, 0, tzinfo=timezone.utc)
     segment = RecordingSegment(
         1,
         date(2026, 7, 20),
         int(start.timestamp()),
-        int((start + timedelta(seconds=30)).timestamp()),
+        int((start + timedelta(seconds=segment_duration_seconds)).timestamp()),
         start,
-        start + timedelta(seconds=30),
+        start + timedelta(seconds=segment_duration_seconds),
     )
     planner = _Planner(segment)
     extractor = _Extractor(tmp_path / "replay.mp4")
     return CommonSessionAcquirer(cast("Any", planner), extractor, _Probe()), extractor, planner
+
+
+def test_duration_aware_replay_deadline_allows_a_slow_sixty_second_window(
+    tmp_path: Path,
+) -> None:
+    start = datetime(2026, 7, 20, 3, 0, tzinfo=timezone.utc)
+    request = CommonSessionRequest.from_start_and_duration("inv-01", "run-01", 1, start, 60)
+    acquirer, _, planner = _acquirer(tmp_path, segment_duration_seconds=120)
+    extractor = _BoundedExtractor(tmp_path / "slow-replay.mp4")
+    acquirer = CommonSessionAcquirer(cast("Any", planner), extractor, _Probe())
+
+    acquisition = acquirer.acquire(request)
+
+    assert extractor.timeouts == [180.0]
+    acquisition.remove()
+
+
+def test_duration_aware_replay_deadline_respects_invocation_cleanup_reserve(
+    tmp_path: Path,
+) -> None:
+    start = datetime(2026, 7, 20, 3, 0, tzinfo=timezone.utc)
+    request = CommonSessionRequest.from_start_and_duration(
+        "inv-01",
+        "run-01",
+        1,
+        start,
+        60,
+        replace(CommonSessionPolicy(), invocation_deadline_seconds=200, cleanup_reserve_seconds=60),
+    )
+    _unused_acquirer, _, planner = _acquirer(tmp_path, segment_duration_seconds=120)
+    extractor = _BoundedExtractor(tmp_path / "clamped-replay.mp4")
+    acquirer = CommonSessionAcquirer(cast("Any", planner), extractor, _Probe())
+    budget = InvocationBudget(request.policy, lambda: 0.0)
+    budget.deadline = 200.0
+
+    acquisition = acquirer.acquire(request, budget=budget)
+
+    assert extractor.timeouts == [140.0]
+    acquisition.remove()
 
 
 def test_one_replay_is_planned_and_cleanup_removes_only_temp_clip(tmp_path: Path) -> None:

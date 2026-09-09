@@ -102,6 +102,7 @@ from vigi_vision.replay import (
     ReplayError,
     ReplayUnavailableError,
     ReplayTimeoutError,
+    effective_replay_timeout_seconds,
 )
 
 DEFAULT_SEARCH_DURATION_SECONDS = 300
@@ -1680,8 +1681,12 @@ class CommonSessionAcquirer:
             raise CommonSessionRecordingUnavailableError from exc
         active_budget.check()
         active_budget.admit_replay()
+        minimum_replay_timeout = request.duration_seconds + request.policy.replay_margin_seconds
         replay_timeout = active_budget.operation_timeout(
-            request.duration_seconds + request.policy.replay_margin_seconds,
+            effective_replay_timeout_seconds(
+                request.duration_seconds,
+                minimum_replay_timeout,
+            ),
             minimum_start_seconds=1.0,
         )
         clip: ReplayClip | None = None
@@ -1690,9 +1695,7 @@ class CommonSessionAcquirer:
             if callable(bounded_extract):
                 clip = cast("ReplayClip", bounded_extract(replay_request, replay_timeout))
             else:
-                if replay_timeout < (
-                    request.duration_seconds + request.policy.replay_margin_seconds
-                ):
+                if replay_timeout < minimum_replay_timeout:
                     raise CommonSessionDeadlineError
                 clip = cast(Any, self.replay_extractor).extract(replay_request)
             active_budget.check()

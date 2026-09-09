@@ -1013,7 +1013,7 @@ result.
 The exact whole-invocation deadline is `2,520` monotonic seconds from preflight:
 
 ```text
-640  = 600-second replay + existing 40-second startup/finalization margin
+640  = baseline 600-second replay + existing 40-second margin
 20   = one strict ffprobe/media inspection
 1320 = 11 local decoder passes × 120 seconds
 320  = cumulative B4 classification budget (up to 30 seconds per call)
@@ -1025,6 +1025,14 @@ The exact whole-invocation deadline is `2,520` monotonic seconds from preflight:
 ----
 2520 seconds
 ```
+
+The replay operation uses the larger of `requested duration + 40 seconds` and
+`requested duration × 3` so a remote NVR may run slower than real time without
+creating an unbounded wait; a 60-second request therefore receives a
+180-second ceiling before the shared invocation-budget clamp. That clamp still
+reserves the fixed cleanup interval above. A timeout-owned partial MP4 is never
+published or consumed; normal replay-process completion remains required before
+media validation.
 
 MP4 is limited to `4,294,967,296` bytes, investigation-owned memory to
 `2,147,483,648` bytes, simultaneously retained RGB24 frames to `12`, targets per

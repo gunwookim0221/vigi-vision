@@ -28,9 +28,22 @@ from vigi_vision.replay_progress import (
 
 _STARTUP_ALLOWANCE_SECONDS = 30.0
 _FINALIZATION_MARGIN_SECONDS = 10.0
+_REPLAY_TIMEOUT_MULTIPLIER = 3.0
 _LOGGER = logging.getLogger(__name__)
 
 ReplayRunner = Callable[[tuple[str, ...], float], subprocess.CompletedProcess[str]]
+
+
+def effective_replay_timeout_seconds(
+    duration_seconds: int,
+    minimum_timeout_seconds: float,
+) -> float:
+    """Return a bounded duration-aware replay ceiling."""
+    if type(duration_seconds) is not int or duration_seconds <= 0:
+        raise ValueError
+    if not math.isfinite(minimum_timeout_seconds) or minimum_timeout_seconds <= 0:
+        raise ValueError
+    return max(float(minimum_timeout_seconds), duration_seconds * _REPLAY_TIMEOUT_MULTIPLIER)
 
 
 class ReplayError(RuntimeError):
@@ -145,10 +158,11 @@ class ReplayExtractor:
         )
         try:
             arguments = self._arguments(request, output_path)
-            normal_timeout = (
+            normal_timeout = effective_replay_timeout_seconds(
+                request.window.duration_seconds,
                 request.window.duration_seconds
                 + _STARTUP_ALLOWANCE_SECONDS
-                + _FINALIZATION_MARGIN_SECONDS
+                + _FINALIZATION_MARGIN_SECONDS,
             )
             effective_timeout = (
                 normal_timeout

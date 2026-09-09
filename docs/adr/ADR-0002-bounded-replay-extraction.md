@@ -20,6 +20,13 @@ We extract NVR replays using an FFmpeg subprocess with a strict output duration 
 
 ## Consequences
 
-- **Reliability:** The media pipeline execution is highly predictable, with explicit timeout limits (`duration + 30s startup allowance + 10s finalization margin`).
+- **Reliability:** The media pipeline remains strictly bounded while allowing a
+  remote NVR to run slower than real time: the replay ceiling is the larger of
+  `duration + 40s` and `duration × 3`, then Phase 7E clamps it to the remaining
+  invocation budget and cleanup reserve. A 60-second request therefore has a
+  180-second ceiling before that clamp.
 - **Clean state:** The filesystem is not polluted with junk files after failures, as partial outputs are reliably cleaned up.
+- **Media trust:** A timeout-owned partial MP4 is never treated as completed
+  media; normal replay-process completion remains required before publication
+  and downstream validation.
 - **Error classification:** The extraction layer can cleanly distinguish between authentication failures, unavailability, and timeouts, returning safe domain errors rather than hanging.

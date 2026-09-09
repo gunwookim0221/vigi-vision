@@ -30,11 +30,15 @@ to UTC before replay planning. Replay URLs use lowercase UTC
 The planner verifies segment overlap before building a replay request. The
 extractor always uses RTSP-over-TCP and applies `-t <window duration>` because
 the NVR replay `endtime` is not a reliable ffmpeg EOF boundary. Its subprocess
-timeout is bounded to `requested duration + 30 seconds startup allowance + 10
-seconds finalization margin`: the startup term covers the observed roughly
-5.56-second RTSP connection latency, while the explicit finalization term gives
-`+faststart` time to finish the MP4 container without allowing an unbounded
-process.
+timeout is bounded to the larger of `requested duration + 40 seconds` and
+`requested duration × 3`. The multiplier allows a remote NVR to deliver a
+normal replay more slowly than real time while remaining strictly bounded; for
+the current 60-second request the ceiling is 180 seconds. Phase 7E then clamps
+that ceiling to the remaining invocation budget and cleanup reserve. The
+40-second minimum covers the observed roughly 5.56-second RTSP connection
+latency and gives `+faststart` time to finish the MP4 container. A timeout-owned
+partial MP4 is never published or consumed; only normally completed replay
+output enters media validation.
 
 ## Security and failure behavior
 
