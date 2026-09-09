@@ -274,12 +274,12 @@ single-segment ceiling is a compatibility limit, not the product horizon. The
 planned two-hour multi-segment successor, priority model, history findings, and
 implementation slices are normative in
 [`docs/design/object-disappearance-recording-search.md`](docs/design/object-disappearance-recording-search.md#phase-7e-mvp-realignment-and-successor-boundary).
-Successor Slices 1–4 are now implemented as an in-memory planning, short-target
-acquisition, coarse-classification, and bounded binary-narrowing chain. Slice 4
-records actual decoded frame times and closes gaps, indeterminate observations,
-and unavailable midpoint work without publishing a terminal Schema 5–7 result;
-Slice 5 publication/API composition and Slice 6 real-NVR acceptance remain
-future work.
+Successor Slices 1–5 are now implemented as a planning, short-target
+acquisition, coarse-classification, bounded binary-narrowing, and durable local
+HTTP/background execution chain. Slice 5 publishes/reopens a versioned
+successor terminal record with explicit interval, coverage, and `NOT_REQUESTED`
+Phase 8 state while preserving the legacy Schema 5–7 path. Slice 6 real-NVR
+acceptance remains future work.
 Correction B adds a bounded Windows-spawn process boundary around production
 Phase 7E B4 classification; timeout/cancellation terminate and reap the child,
 and late output cannot become evidence. Valid results allow a bounded two-second
@@ -316,9 +316,9 @@ capability.
    exact run identity and recover with a five-attempt bounded 2/4/8/15/15-second
    backoff; client deadline exhaustion never claims that server work failed.
    The confirmed browser workflow and bounded real-NVR Stage 2 normal path are
-   accepted; the next product increment is successor Slice 5 terminal
-   publication/API composition after the implemented two-hour planning,
-   acquisition, coarse-classification, and narrowing slices.
+   accepted; the next product increment is successor Slice 6 real-NVR
+   acceptance after the implemented two-hour planning, acquisition,
+   coarse-classification, narrowing, and durable API execution slices.
 6. Preserve the implemented Phase 7E-1A through 1D, 7E-2, and confirmed
    browser workflow foundation. 7E-1A owns the 26 request-relative identity families,
    search/classifier/media policies, exact

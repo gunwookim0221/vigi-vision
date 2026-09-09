@@ -386,7 +386,7 @@ class SuccessorTargetAcquisitionService:
                 except OSError as exc:
                     raise SuccessorAcquisitionCleanupError from exc
 
-    def _decode_target(  # noqa: PLR0911, PLR0913
+    def _decode_target(  # noqa: C901, PLR0911, PLR0913
         self,
         plan: MultiSegmentCoarsePlan,
         target: CoarseTargetAssignment,
@@ -395,6 +395,11 @@ class SuccessorTargetAcquisitionService:
         window: RecordingWindow,
         clip: ReplayClip,
     ) -> SuccessorTargetAcquisitionResult:
+        if self.temporary_directory is not None:
+            try:
+                self.temporary_directory.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise SuccessorAcquisitionCleanupError from exc
         frame_root = Path(
             tempfile.mkdtemp(prefix="vigi-vision-successor-", dir=self.temporary_directory)
         )

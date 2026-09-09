@@ -5,7 +5,7 @@
 # fixed category.  Keep the implementation readable while exempting only
 # complexity/style rules that describe those contract mechanics.
 # ruff: noqa: D102, D107, EM101, PLR0913, PLR2004, PLC0415
-# pyright: reportAny=false, reportArgumentType=false, reportAttributeAccessIssue=false, reportUnannotatedClassAttribute=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnnecessaryIsInstance=false, reportUnusedCallResult=false
+# pyright: reportAny=false, reportArgumentType=false, reportAttributeAccessIssue=false, reportUnannotatedClassAttribute=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnnecessaryIsInstance=false, reportUnusedCallResult=false, reportOptionalMemberAccess=false, reportPrivateUsage=false
 
 from __future__ import annotations
 
@@ -61,6 +61,19 @@ from vigi_vision.recording_search_7e_repository import (
 )
 from vigi_vision.recording_search_7e_validation import Phase7EValidationError
 from vigi_vision.recording_search_b3_media import InMemoryRgbDecoder
+from vigi_vision.recording_search_successor import (
+    SuccessorPlanRequest,
+    SuccessorPlanService,
+)
+from vigi_vision.recording_search_successor_execution import (
+    SuccessorB4Classifier,
+    SuccessorExecutionError,
+    SuccessorExecutionService,
+    SuccessorPreparedExecution,
+    SuccessorRequest,
+    SuccessorTerminalRepository,
+)
+from vigi_vision.reference_frame_decoder import FfmpegReferenceFrameDecoder
 from vigi_vision.reference_frame_models import parse_reference_frame_request
 
 if TYPE_CHECKING:
@@ -347,10 +360,11 @@ class Phase7EPublicRequest(StrictRequestModel):
 class Phase7EPreparedRequest:
     """Server-reconstructed execution facts for one strict public request."""
 
-    request: CommonSessionRequest
-    schema5: StrictIdentityEnvelope
+    request: CommonSessionRequest | SuccessorRequest
+    schema5: StrictIdentityEnvelope | None
     base_records: tuple[StrictIdentityEnvelope, ...]
     coarse_targets: tuple[StrictIdentityEnvelope, ...]
+    successor: SuccessorPreparedExecution | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -415,6 +429,7 @@ class Phase7EPublicService:
     phase8_repository: Phase8HandoffRepository
     now_utc: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     media_probe: object | None = None
+    successor_execution: SuccessorExecutionService | None = None
 
     def execute(
         self,
@@ -458,7 +473,7 @@ class Phase7EPublicService:
             run_id=f"search-run-{request_id.replace('-', '')}",
         )
 
-    def prepare(  # noqa: C901 - strict boundary validation is intentionally explicit.
+    def prepare(  # noqa: C901, PLR0912 - strict boundary validation is intentionally explicit.
         self,
         investigation_id: str,
         search_end_time_text: str,
@@ -467,13 +482,6 @@ class Phase7EPublicService:
         run_id: str,
     ) -> Phase7EPreparedRequest:
         """Strictly reopen Phase 6 and build the deterministic Phase 7E plan."""
-        if self.classifier is None or self.local_decoder is None:
-            raise Phase7EPublicError("recording_search_execution_unavailable")
-        readiness_check = getattr(self.classifier, "readiness_error", None)
-        if callable(readiness_check):
-            readiness_error = readiness_check()
-            if readiness_error is not None:
-                raise Phase7EPublicError(readiness_error)
         try:
             confirmed = self.confirmation_service.load_confirmed(investigation_id)
         except InvestigationConfirmationNotFoundError as error:
@@ -500,12 +508,52 @@ class Phase7EPublicService:
             duration_seconds = (end - confirmed.anchor_time_utc).total_seconds()
         except Exception as error:
             raise Phase7EPublicError("invalid_request") from error
-        if (
-            duration_seconds != int(duration_seconds)
-            or duration_seconds <= 0
-            or duration_seconds > _MAX_SEARCH_SECONDS
-        ):
+        if duration_seconds != int(duration_seconds) or duration_seconds <= 0:
             raise Phase7EPublicError("invalid_request")
+        if duration_seconds > _MAX_SEARCH_SECONDS:
+            if self.successor_execution is None:
+                raise Phase7EPublicError("invalid_request")
+            try:
+                successor_request = SuccessorPlanRequest.from_text(
+                    channel_id=confirmed.channel_id,
+                    anchor_time_utc=confirmed.anchor_time_utc,
+                    search_end_time_text=search_end_time_text,
+                    source_timezone=confirmed.source_timezone,
+                    now_utc=self.now_utc(),
+                )
+                successor = self.successor_execution.prepare(
+                    confirmed,
+                    search_end_time_text=search_end_time_text,
+                    run_id=run_id,
+                    now_utc=self.now_utc(),
+                )
+            except SuccessorExecutionError as error:
+                code = str(error)
+                raise Phase7EPublicError(
+                    code
+                    if code in {"confirmation_corrupt", "internal_error"}
+                    else "recording_search_execution_unavailable"
+                ) from error
+            except NvrRequestError as error:
+                raise Phase7EPublicError("acquisition_failed") from error
+            except Exception as error:
+                raise Phase7EPublicError("invalid_request") from error
+            if successor.plan.search_end_utc != successor_request.search_end_utc:
+                raise Phase7EPublicError("request_conflict")
+            return Phase7EPreparedRequest(
+                successor.request,
+                None,
+                (),
+                (),
+                successor,
+            )
+        if self.classifier is None or self.local_decoder is None:
+            raise Phase7EPublicError("recording_search_execution_unavailable")
+        readiness_check = getattr(self.classifier, "readiness_error", None)
+        if callable(readiness_check):
+            readiness_error = readiness_check()
+            if readiness_error is not None:
+                raise Phase7EPublicError(readiness_error)
         request_domain = CommonSessionRequest(
             investigation_id,
             run_id,
@@ -536,8 +584,27 @@ class Phase7EPublicService:
             tuple(bundle.coarse_targets),
         )
 
-    def resolve_existing(self, prepared: Phase7EPreparedRequest) -> Phase7EPublicStatus | None:
+    def resolve_existing(  # noqa: C901
+        self, prepared: Phase7EPreparedRequest
+    ) -> Phase7EPublicStatus | None:
         """Resolve a durable retry, interrupting only an unowned active predecessor."""
+        if prepared.successor is not None:
+            if self.successor_execution is None:
+                raise Phase7EPublicError("recording_search_execution_unavailable")
+            existing = self.successor_execution.publisher.read(
+                prepared.successor.request.investigation_id,
+                prepared.successor.request.run_id,
+            )
+            if existing is None:
+                return None
+            if existing.get("plan_id") != prepared.successor.plan.plan_id:
+                raise Phase7EPublicError("request_conflict")
+            if existing.get("status") == "RUNNING":
+                raise Phase7EPublicError("already_running")
+            return self.status(
+                prepared.successor.request.investigation_id,
+                prepared.successor.request.run_id,
+            )
         request = prepared.request
         try:
             self.repository.ensure_root()
@@ -559,7 +626,11 @@ class Phase7EPublicService:
                 None,
             )
         )
-        if schema5 is None or schema5.identity != prepared.schema5.identity:
+        if (
+            prepared.schema5 is None
+            or schema5 is None
+            or schema5.identity != prepared.schema5.identity
+        ):
             raise Phase7EPublicError("request_conflict")
         if run.state.run_state == "RUNNING":
             try:
@@ -570,7 +641,7 @@ class Phase7EPublicService:
                 raise Phase7EPublicError("search_run_corrupt") from error
         return self.status(request.investigation_id, request.run_id)
 
-    def execute_prepared(
+    def execute_prepared(  # noqa: C901
         self,
         prepared: Phase7EPreparedRequest,
         *,
@@ -578,6 +649,17 @@ class Phase7EPublicService:
         create_phase8_handoff: bool = False,
     ) -> Phase7EPublicStatus:
         """Execute one already validated request under one cancellable invocation."""
+        if prepared.successor is not None:
+            if self.successor_execution is None:
+                raise Phase7EPublicError("recording_search_execution_unavailable")
+            try:
+                self.successor_execution.execute(prepared.successor, cancellation=cancellation)
+            except SuccessorExecutionError as error:
+                raise Phase7EPublicError(str(error)) from error
+            return self.status(
+                prepared.successor.request.investigation_id,
+                prepared.successor.request.run_id,
+            )
         request_domain = prepared.request
         try:
             with self.executor.invocation(
@@ -636,6 +718,12 @@ class Phase7EPublicService:
         return self.status(request_domain.investigation_id, request_domain.run_id)
 
     def status(self, investigation_id: str, run_id: str) -> Phase7EPublicStatus:
+        if self.successor_execution is not None:
+            successor_record = self.successor_execution.publisher.read(investigation_id, run_id)
+            if successor_record is not None:
+                terminal = _successor_public_status(successor_record)
+                if terminal is not None:
+                    return terminal
         phase7 = read_phase7_status(self.repository, investigation_id, run_id)
         run: Phase7ERun | None = None
         if phase7.schema_version == 7:
@@ -697,12 +785,14 @@ class Phase7EPublicService:
 
     def recover_abandoned(self) -> int:
         """Interrupt bounded, strictly reopened active runs left by a prior process."""
+        recovered = 0
+        if self.successor_execution is not None:
+            recovered += self.successor_execution.publisher.recover_abandoned()
         try:
             self.repository.ensure_root()
             candidates = _bounded_recovery_candidates(self.repository.root)
         except OSError as error:
             raise Phase7EPublicError("recovery_unavailable") from error
-        recovered = 0
         for investigation_id, run_id in candidates:
             try:
                 run = self.repository.inspect_current_read_only(investigation_id, run_id)
@@ -772,6 +862,43 @@ class Phase7EPublicService:
         )
 
 
+def _successor_public_status(record: dict[str, object]) -> Phase7EPublicStatus | None:
+    """Project one successor record through the existing public JSON shape."""
+    from vigi_vision.recording_search_7e_1d import Phase7EStatus
+
+    status = record.get("status")
+    if not isinstance(status, str):
+        return None
+    phase7 = Phase7EStatus(
+        str(record["investigation_id"]),
+        str(record["run_id"]),
+        int(record["schema_version"]),
+        status,
+        str(record["reason_code"]) if record.get("reason_code") is not None else None,
+        str(record["terminal_result_id"]) if record.get("terminal_result_id") is not None else None,
+    )
+    if status == "RUNNING":
+        return Phase7EPublicStatus(phase7)
+    details = Phase7ETerminalDetails(
+        record.get("last_present_time_utc")
+        if isinstance(record.get("last_present_time_utc"), str)
+        else None,
+        record.get("first_absent_time_utc")
+        if isinstance(record.get("first_absent_time_utc"), str)
+        else None,
+        str(record["observed_start_time_utc"]),
+        str(record["observed_end_time_utc"]),
+        bool(record.get("coverage_complete", False)),
+        str(record["source_timezone"]),
+    )
+    return Phase7EPublicStatus(
+        phase7,
+        str(record.get("phase8_status", "NOT_REQUESTED")),
+        str(record.get("phase8_reason", "")),
+        details,
+    )
+
+
 def approved_phase7e_policy() -> tuple[
     StrictIdentityEnvelope, StrictIdentityEnvelope, ObjectPresenceDecisionPolicy
 ]:
@@ -804,6 +931,51 @@ def build_phase7e_service(
         FfprobeMediaProbe(ffprobe),
     )
     executor = Phase7E1CExecutor(repository, acquirer)
+    successor_execution = None
+    try:
+        if mask_predictor is not None:
+            from vigi_vision.recording_search_7e_b4 import _worker_spec
+            from vigi_vision.recording_search_successor_acquisition import (
+                SuccessorTargetAcquisitionService,
+            )
+            from vigi_vision.recording_search_successor_classification import (
+                SuccessorCoarseClassificationService,
+            )
+            from vigi_vision.recording_search_successor_narrowing import (
+                SuccessorBinaryNarrowingService,
+            )
+
+            worker_spec = _worker_spec(mask_predictor)
+            successor_classifier = SuccessorB4Classifier(object_policy, worker_spec)
+            successor_execution = SuccessorExecutionService(
+                SuccessorPlanService(recording_planner),
+                SuccessorTargetAcquisitionService(
+                    recording_planner,
+                    replay_extractor,
+                    FfmpegReferenceFrameDecoder(ffmpeg, ffprobe),
+                    temporary_directory=root / ".successor-tmp",
+                ),
+                SuccessorCoarseClassificationService(
+                    successor_classifier,
+                    InMemoryRgbDecoder(ffmpeg),
+                ),
+                SuccessorBinaryNarrowingService(
+                    SuccessorTargetAcquisitionService(
+                        recording_planner,
+                        replay_extractor,
+                        FfmpegReferenceFrameDecoder(ffmpeg, ffprobe),
+                        temporary_directory=root / ".successor-tmp",
+                    ),
+                    SuccessorCoarseClassificationService(
+                        successor_classifier,
+                        InMemoryRgbDecoder(ffmpeg),
+                    ),
+                ),
+                InMemoryRgbDecoder(ffmpeg),
+                SuccessorTerminalRepository(root / ".successor"),
+            )
+    except (TypeError, ValueError):
+        successor_execution = None
     return Phase7EPublicService(
         repository,
         executor,
@@ -830,6 +1002,7 @@ def build_phase7e_service(
         ),
         now_utc or (lambda: datetime.now(timezone.utc)),
         FfprobeMediaProbe(ffprobe),
+        successor_execution,
     )
 
 

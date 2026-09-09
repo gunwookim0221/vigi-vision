@@ -125,7 +125,7 @@ and `git blame` across all local refs. The evidence is:
    six-hundred-second implementation cap, but that conversion is an inference;
    the commits do not explicitly say it was accidental.
 
-### Two-hour multi-segment successor (Slices 1–4 implemented; Slices 5–6 planned)
+### Two-hour multi-segment successor (Slices 1–5 implemented; Slice 6 planned)
 
 The successor keeps the current schemas and evidence-safety rules while removing
 the one-segment total-horizon assumption. Its explicit initial policy is a
@@ -174,12 +174,12 @@ the actual decoded frame PTS, and the result preserves the last PRESENT/first
 ABSENT observations, bounded interval, policy identity, and target-level
 unavailable/incomplete completion. The MVP stops at 30 seconds or six
 iterations; gaps, indeterminate observations, unavailable acquisition, and
-classifier failures close safely without inventing a boundary. None of these
-slices adds persistence, browser/API work, terminal Schema 5–7 publication, or
-real-NVR acceptance; the browser and NVR compatibility baseline remains the
-existing 600-second, single-segment path. Slice 5 terminal publication/API
-composition and Slice 6 real-NVR acceptance remain unimplemented and are split
-into the following practical slices:
+classifier failures close safely without inventing a boundary. Slice 5 now
+composes this chain behind the existing HTTP/background boundary for requests
+over the legacy 600-second cap, publishes an atomic Schema 8 successor
+terminal record, reopens status after restart, and keeps Phase 8 explicitly
+`NOT_REQUESTED`. The legacy Schema 5–7 path is unchanged. Slice 6 real-NVR
+acceptance remains unimplemented:
 
 | Slice | User-visible outcome | Minimum tests | Acceptance criterion | Deferred hardening |
 | --- | --- | --- | --- | --- |
@@ -187,13 +187,13 @@ into the following practical slices:
 | 2. Per-target short replay/frame acquisition | Each target yields a nearby decodable frame or a safe unavailable reason. | Boundary reassignment, short media, decode failure, cleanup, bounded timeout, credential redaction. | Work scales with requested targets and valid frames retain provenance. | Cross-host replay reuse and forensic timestamp calibration. |
 | 3. Coarse bracket detection | Ordered coarse observations and a provisional first `PRESENT → ABSENT` bracket. | 5/10-minute cadence, intermittent gaps, repeated PRESENT, first ABSENT, false/indeterminate observations. | No fabricated absence; gaps and partial coverage remain explicit. | Adaptive cadence and learned sampling. |
 | 4. Binary narrowing | The bracket becomes a useful approximate disappearance interval. | Monotonic interval shrink, segment boundaries, target aliasing, bounded iteration. | Last PRESENT and first ABSENT are both supported and interval is honestly bounded. | Sub-second precision and non-monotonic recovery. |
-| 5. Browser/API horizon and result presentation | The user can request the horizon and see status, interval, coverage, and limitations. | Validation, RUNNING/terminal transitions, reload/run isolation, mobile layout, safe network errors. | The exact investigation/run returns `FOUND`, `NOT_FOUND`, or `INCONCLUSIVE` without stale status. | Phase 8 review controls and Phase 9 judgment UI. |
+| 5. Browser/API horizon and result presentation | The API/background boundary accepts the successor horizon and exposes durable status, interval, coverage, and limitations. | Validation, RUNNING/terminal transitions, reload/run isolation, atomic reopen, production-shaped local HTTP/background fixtures. | The exact investigation/run returns `FOUND`, `NOT_FOUND`, or `INCONCLUSIVE` without stale status. Browser controls remain the next slice. | Phase 8 review controls, Phase 9 judgment UI, and real-NVR acceptance. |
 | 6. Final real-NVR acceptance | One human-labeled two-hour scenario proves the normal path. | Production-shaped HTTP/background flow, real segments, cleanup, logs, and restart restoration. | User-visible result agrees with labeled evidence and no P0 finding remains. | Broader cameras, object types, and exhaustive fault matrices. |
 
-Until Slices 5–6 are implemented and accepted, references to two hours or
-multi-segment execution remain successor-slice scope rather than browser/NVR
-support. Slices 1–4 provide only bounded planning, per-target acquisition,
-coarse classification, and in-memory narrowing;
+Until Slice 6 is implemented and accepted, references to real two-hour
+multi-segment execution remain successor-slice scope rather than NVR acceptance.
+Slices 1–5 provide bounded planning, per-target acquisition, coarse
+classification, narrowing, and durable local API execution;
 the current 600-second, single-segment implementation and the completed
 one-minute `NOT_FOUND` acceptance remain the browser/NVR compatibility baseline.
 
