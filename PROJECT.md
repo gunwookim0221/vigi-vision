@@ -274,12 +274,14 @@ single-segment ceiling is a compatibility limit, not the product horizon. The
 planned two-hour multi-segment successor, priority model, history findings, and
 implementation slices are normative in
 [`docs/design/object-disappearance-recording-search.md`](docs/design/object-disappearance-recording-search.md#phase-7e-mvp-realignment-and-successor-boundary).
-Successor Slices 1–5 are now implemented as a planning, short-target
-acquisition, coarse-classification, bounded binary-narrowing, and durable local
-HTTP/background execution chain. Slice 5 publishes/reopens a versioned
-successor terminal record with explicit interval, coverage, and `NOT_REQUESTED`
-Phase 8 state while preserving the legacy Schema 5–7 path. Slice 6 real-NVR
-acceptance remains future work.
+Successor Slices 1–6 are now implemented as a planning, short-target
+acquisition, coarse-classification, bounded binary-narrowing, durable local
+HTTP/background execution, and browser integration chain. Slice 5
+publishes/reopens a versioned successor terminal record with explicit interval,
+coverage, and `NOT_REQUESTED` Phase 8 state while preserving the legacy Schema
+5–7 path. Slice 6 exposes the successor range controls, bounded polling, reload
+restoration, and Schema 8 terminal projection in the existing browser shell.
+Only the final human real-NVR acceptance remains future work.
 Correction B adds a bounded Windows-spawn process boundary around production
 Phase 7E B4 classification; timeout/cancellation terminate and reap the child,
 and late output cannot become evidence. Valid results allow a bounded two-second
@@ -310,15 +312,16 @@ capability.
    with keyboard input. Preserve the Phase 5 assisted-ROI boundaries and the
    Phase 6-2/6C durable confirmation/reconfirmation boundary and the first
    Phase 7E browser slice. That slice reloads only a strict schema-3
-   confirmation, accepts one bounded search end, starts the shared production
-   service asynchronously, and polls the read-only safe status projection.
+   confirmation, accepts a default 30-minute (maximum two-hour) search end,
+   starts the shared production service asynchronously, and polls the read-only
+   safe status projection.
    Transient status timeouts, network failures, and 5xx responses retain the
    exact run identity and recover with a five-attempt bounded 2/4/8/15/15-second
    backoff; client deadline exhaustion never claims that server work failed.
    The confirmed browser workflow and bounded real-NVR Stage 2 normal path are
-   accepted; the next product increment is successor Slice 6 real-NVR
-   acceptance after the implemented two-hour planning, acquisition,
-   coarse-classification, narrowing, and durable API execution slices.
+   accepted; successor Slice 6 browser integration now completes the local
+   two-hour planning, acquisition, coarse-classification, narrowing, durable API,
+   and user-visible result chain. One final real-NVR acceptance remains.
 6. Preserve the implemented Phase 7E-1A through 1D, 7E-2, and confirmed
    browser workflow foundation. 7E-1A owns the 26 request-relative identity families,
    search/classifier/media policies, exact
@@ -337,7 +340,8 @@ capability.
    implementation compatibility limits while planning the successor; schemas 1–4,
    Phase 6 immutability, and the rule that operational failure cannot become
    absence. Stage 1 acquisition and the bounded one-minute Stage 2 normal-path
-   acceptance passed; the two-hour acceptance remains future work.
+   successor browser integration passed local production-shaped checks; the
+   final human real-NVR acceptance remains future work.
    Media-probe failures emit one closed, path-free structured warning through
    Uvicorn's configured console logger before temporary-media cleanup.
    Phase 8 processing and Phase 9 judgment remain future work.

@@ -118,14 +118,12 @@ and `git blame` across all local refs. The evidence is:
    and `2,520`-second invocation budget. Its stated implementation rationale is
    one bounded replay/decode session and one SDK segment; it does not state that
    600 seconds is the desired product horizon.
-3. No local committed ref contains `two hour`, `two-hour`, `120 minutes`, or
-   `7200` as a Phase 7 search horizon. The two-hour requirement is therefore
-   current planning input, not historical Git evidence. The sequence above is
-   consistent with the five-minute coarse cadence being narrowed into a
-   six-hundred-second implementation cap, but that conversion is an inference;
-   the commits do not explicitly say it was accidental.
+3. The legacy 600-second cap remains the compatibility boundary for schemas
+   5–7. Successor planning explicitly accepts a 30-minute default and a
+   7,200-second maximum; browser Slice 6 exposes that policy without changing
+   the legacy family.
 
-### Two-hour multi-segment successor (Slices 1–5 implemented; Slice 6 planned)
+### Two-hour multi-segment successor (Slices 1–6 implemented; real-NVR acceptance pending)
 
 The successor keeps the current schemas and evidence-safety rules while removing
 the one-segment total-horizon assumption. Its explicit initial policy is a
@@ -178,8 +176,13 @@ classifier failures close safely without inventing a boundary. Slice 5 now
 composes this chain behind the existing HTTP/background boundary for requests
 over the legacy 600-second cap, publishes an atomic Schema 8 successor
 terminal record, reopens status after restart, and keeps Phase 8 explicitly
-`NOT_REQUESTED`. The legacy Schema 5–7 path is unchanged. Slice 6 real-NVR
-acceptance remains unimplemented:
+`NOT_REQUESTED`. Slice 6 connects the successor horizon to the existing browser
+shell: it provides 10-minute, 30-minute, 1-hour, and 2-hour quick ranges with a
+30-minute default, validates the source-timezone end bound, keeps exact
+investigation/run polling isolated through bounded retries, restores RUNNING and
+Schema 8 terminal states after reload, and renders localized interval and
+coverage facts using text-only DOM updates. The legacy Schema 5–7 path is
+unchanged. Final human real-NVR acceptance remains unimplemented:
 
 | Slice | User-visible outcome | Minimum tests | Acceptance criterion | Deferred hardening |
 | --- | --- | --- | --- | --- |
@@ -187,13 +190,13 @@ acceptance remains unimplemented:
 | 2. Per-target short replay/frame acquisition | Each target yields a nearby decodable frame or a safe unavailable reason. | Boundary reassignment, short media, decode failure, cleanup, bounded timeout, credential redaction. | Work scales with requested targets and valid frames retain provenance. | Cross-host replay reuse and forensic timestamp calibration. |
 | 3. Coarse bracket detection | Ordered coarse observations and a provisional first `PRESENT → ABSENT` bracket. | 5/10-minute cadence, intermittent gaps, repeated PRESENT, first ABSENT, false/indeterminate observations. | No fabricated absence; gaps and partial coverage remain explicit. | Adaptive cadence and learned sampling. |
 | 4. Binary narrowing | The bracket becomes a useful approximate disappearance interval. | Monotonic interval shrink, segment boundaries, target aliasing, bounded iteration. | Last PRESENT and first ABSENT are both supported and interval is honestly bounded. | Sub-second precision and non-monotonic recovery. |
-| 5. Browser/API horizon and result presentation | The API/background boundary accepts the successor horizon and exposes durable status, interval, coverage, and limitations. | Validation, RUNNING/terminal transitions, reload/run isolation, atomic reopen, production-shaped local HTTP/background fixtures. | The exact investigation/run returns `FOUND`, `NOT_FOUND`, or `INCONCLUSIVE` without stale status. Browser controls remain the next slice. | Phase 8 review controls, Phase 9 judgment UI, and real-NVR acceptance. |
-| 6. Final real-NVR acceptance | One human-labeled two-hour scenario proves the normal path. | Production-shaped HTTP/background flow, real segments, cleanup, logs, and restart restoration. | User-visible result agrees with labeled evidence and no P0 finding remains. | Broader cameras, object types, and exhaustive fault matrices. |
+| 5. Browser/API horizon and result presentation | The API/background boundary accepts the successor horizon and exposes durable status, interval, coverage, and limitations. | Validation, RUNNING/terminal transitions, reload/run isolation, atomic reopen, production-shaped local HTTP/background fixtures. | The exact investigation/run returns `FOUND`, `NOT_FOUND`, or `INCONCLUSIVE` without stale status. | Phase 8 review controls, Phase 9 judgment UI, and browser integration. |
+| 6. Browser/API integration | The existing browser accepts the successor horizon and renders Schema 8 progress/results. | Range validation, quick controls, bounded polling, terminal/reload/run isolation, safe DOM projection, and production-shaped local HTTP/background checks. | The exact investigation/run returns `FOUND`, `NOT_FOUND`, or `INCONCLUSIVE` without stale status. | Phase 8 review controls, Phase 9 judgment UI, and real-NVR acceptance. |
 
-Until Slice 6 is implemented and accepted, references to real two-hour
+Until a human real-NVR acceptance is completed, references to real two-hour
 multi-segment execution remain successor-slice scope rather than NVR acceptance.
-Slices 1–5 provide bounded planning, per-target acquisition, coarse
-classification, narrowing, and durable local API execution;
+Slices 1–6 provide bounded planning, per-target acquisition, coarse
+classification, narrowing, durable local API and browser execution;
 the current 600-second, single-segment implementation and the completed
 one-minute `NOT_FOUND` acceptance remain the browser/NVR compatibility baseline.
 
@@ -237,18 +240,21 @@ gap.
 ### Current implementation boundary (not the product horizon)
 
 Production VIGI recording search uses `REQUEST_RELATIVE_ESTIMATE` with
-`UNKNOWN_UNBOUNDED` physical-origin bias. The current synchronous MVP invocation
-uses one SDK segment, one replay/remux, one retained MP4, and one common decode
-session. Every C1, C2, D1, D2, support, and terminal frame comes from that
-session. Multi-segment discovery and a longer horizon are successor work, not
-hidden fallback behavior. The 7E-2 browser projection and asynchronous start
-surface are implemented; Phase 8 review-media execution and Phase 9 judgment
-remain outside this contract.
+`UNKNOWN_UNBOUNDED` physical-origin bias. Legacy schemas 5–7 retain the
+compatibility MVP of one SDK segment, one replay/remux, one retained MP4, and
+one common decode session. Successor requests use the implemented bounded
+multi-segment plan and short per-target windows; they do not silently fall back
+to the legacy path. The 7E-2 browser projection and asynchronous start surface,
+including the Slice 6 successor range/result integration, are implemented.
+Phase 8 review-media execution and Phase 9 judgment remain outside this
+contract.
 
-The requested interval is half-open `[S,E)`. The default duration is `300`
-seconds and the exact maximum is `600` seconds. Duration is a positive integer;
-strings, fractions, alternate units, zero, and values above `600` fail before a
-run directory is created. Exactly one SDK segment must satisfy
+The legacy requested interval is half-open `[S,E)`. Its default duration is
+`300` seconds and its exact maximum is `600` seconds. Duration is a positive
+integer; strings, fractions, alternate units, zero, and values above `600` fail
+before a legacy run directory is created. Successor requests use the same
+half-open interval with a 1,800-second browser default and a 7,200-second
+maximum, represented by the multi-segment planner. Exactly one SDK segment must satisfy
 `segment_start <= S < E <= segment_end`. A touching next segment is never read.
 
 The Phase 6 schema-3 confirmation supplies the historical baseline and
@@ -1427,8 +1433,9 @@ server interprets it only through the strictly reopened Phase 6 timezone. The
 request ID is a canonical lowercase UUIDv4 and derives
 `search-run-<32-lowercase-hex>`. ROI, frame, channel, timezone, run, manifest,
 media, classifier, path, and credential fields are forbidden. Strict Phase 6
-reopen and 1–600-second forward-window validation happen before worker
-admission.
+reopen and legacy 1–600-second or successor 1–7,200-second validation happen
+before worker admission. The browser defaults successor requests to 30 minutes
+and offers 10-minute, 30-minute, 1-hour, and 2-hour quick ranges.
 
 New compatible work returns HTTP `202` with exactly `request_id`,
 `investigation_id`, derived `run_id`, `status`, and relative `status_url`.
@@ -1450,7 +1457,8 @@ cancels and joins the worker. Startup scans at most 1,024 durable run
 directories, interrupts strictly reopened unowned RUNNING schemas, and never
 resumes decode/classification. Durable state wins over process-memory state.
 `GET /api/v1/recording-searches/{investigation_id}/{run_id}` is read-only and
-projects strict schema 1–4 legacy status or schema 5–7 Phase 7 status joined
+projects strict schema 1–4 legacy status, schema 5–7 Phase 7 status, or Schema
+8 successor status joined
 with the separate Phase 8 status. The lookup is exact on both path components:
 a missing run returns `404 search_run_not_found` even when another run for the
 same investigation is holding its lifecycle lock. A held lock projects
@@ -1479,7 +1487,7 @@ and invalidates stale completions.
 | 7E-1C | One replay/remux, `.media` ownership, ffprobe, common session, sparse/adaptive local decoding, the Phase 7E same-session selector (including logical-E strict-before mapping and duplicate/alias rejection), RGB24, persisted-frame A2/B4 adapters, and deadline propagation. |
 | 7E-1D | The Phase 7E C1 planner/composition adapter (`S` inclusion, logical `E`, explicit shared `BACKWARD_FROM_END` support mode, no clamp), C2/D1/D2 composition, complete source reconstruction, schema-7 atomic publication/reopen, and Phase 7 public status. Shared C1/C2 defaults to legacy `FORWARD`, schemas 1–4 remain unchanged, and this slice performs no Phase 8 mutation. |
 | 7E-2 | Synchronous CLI, asynchronous browser HTTP start/status, fixed worker and startup interruption recovery, cleanup reserve, separate Phase 8 clip/request/retry repository, status join, and deletion command. |
-| 7E-3 | Bounded real-NVR acceptance and local fault injection only after 1A–2 approval; Stage 1 acquisition and the bounded Stage 2 one-minute normal-path acceptance passed. The two-hour multi-segment successor is planned separately. |
+| 7E-3 | Bounded real-NVR acceptance and local fault injection only after 1A–2 approval; Stage 1 acquisition and the bounded Stage 2 one-minute normal-path acceptance passed. Successor Slice 6 browser integration is locally verified; one final human real-NVR acceptance remains. |
 
 Dependency order is 1A → 1B → 1C → 1D → 2 → 3. Persistence precedes
 acquisition; media and B4 adapters cannot precede the zero-evidence schema-6
@@ -4576,8 +4584,8 @@ the bounded acquisition/smoke gate against a real NVR, and the bounded Stage 2
 one-minute normal-path acceptance also passed with the `NOT_FOUND` result
 recorded above. The request-relative decoder/persistence path, synchronous CLI,
 and human-input browser workflow are therefore the compatibility baseline. The
-two-hour multi-segment successor remains planned work and is not claimed here.
-Its bounded matrix must exercise the 300- and 600-second windows, one
+successor browser integration is now locally implemented and verified; its
+bounded matrix must exercise the 300- and 600-second legacy windows, one
 segment and touching-segment rejection, end-boundary selection, same-session
 PRESENT→supported-ABSENT, baseline-only lower bound, complete-grid NOT_FOUND,
 gaps/resets/duplicates, every blocking-operation timeout, interruption/crash,

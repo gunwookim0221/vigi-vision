@@ -76,6 +76,7 @@ def test_web_ui_serves_its_static_assets() -> None:
     candidate_stylesheet = client.get("/static/reference-frame-candidates.css")
     form_stylesheet = client.get("/static/reference-frame-form.css")
     roi_stylesheet = client.get("/static/reference-frame-roi.css")
+    recording_search_stylesheet = client.get("/static/recording-search.css")
 
     assert stylesheet.status_code == 200
     assert "focus-visible" in stylesheet.text
@@ -103,6 +104,8 @@ def test_web_ui_serves_its_static_assets() -> None:
     assert '.roi-status[data-state="success"]' in roi_stylesheet.text
     assert '.roi-status[data-state="error"]' in roi_stylesheet.text
     assert "content: attr(data-label)" not in roi_stylesheet.text
+    assert recording_search_stylesheet.status_code == 200
+    assert "recording-search-quick-ranges" in recording_search_stylesheet.text
 
 
 def test_web_ui_serves_its_static_scripts() -> None:
@@ -228,6 +231,9 @@ def test_web_ui_exposes_the_phase7e_search_surface_safely() -> None:
     assert 'id="recording-search-confirmed-time"' in page.text
     assert 'id="recording-search-timezone"' in page.text
     assert 'id="recording-search-end"' in page.text
+    assert 'id="recording-search-quick-ranges"' in page.text
+    assert 'data-search-duration-seconds="1800"' in page.text
+    assert "기본 30분, 최대 2시간" in page.text
     assert 'id="recording-search-start"' in page.text
     assert 'id="recording-search-status"' in page.text
     assert 'role="status" aria-live="polite" aria-busy="false" tabindex="-1"' in page.text
@@ -236,6 +242,8 @@ def test_web_ui_exposes_the_phase7e_search_surface_safely() -> None:
     assert 'fetch("/api/v1/recording-searches"' in script.text
     assert "request_id" in script.text
     assert "search_end" in script.text
+    assert "MAX_SEARCH_DURATION_SECONDS" in script.text
+    assert "setSearchEndForDuration" in script.text
     assert "innerHTML" not in script.text
 
 

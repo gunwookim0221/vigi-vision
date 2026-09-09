@@ -17,6 +17,38 @@
   max-width: 32rem;
 }
 
+.recording-search-quick-ranges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-block-start: 0.75rem;
+}
+
+.recording-search-quick-ranges .field-hint {
+  margin: 0;
+}
+
+.recording-search-quick-ranges button {
+  min-block-size: 2.25rem;
+  padding: 0.35rem 0.75rem;
+  border: 1px solid var(--color-border, #cbd5e1);
+  border-radius: 0.35rem;
+  background: var(--color-surface, #fff);
+  color: inherit;
+  cursor: pointer;
+}
+
+.recording-search-quick-ranges button[aria-pressed="true"] {
+  border-color: var(--color-accent, #2563eb);
+  background: color-mix(in srgb, var(--color-accent, #2563eb) 12%, white);
+}
+
+.recording-search-quick-ranges button:focus-visible {
+  outline: 0.2rem solid var(--color-focus, #1d4ed8);
+  outline-offset: 0.15rem;
+}
+
 .recording-search-result {
   border-left: 0.25rem solid var(--color-accent, #2563eb);
   padding: 0.75rem 1rem;

@@ -1,17 +1,31 @@
 from __future__ import annotations
 
+import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.request import Request, urlopen
 
 from anyio import CapacityLimiter
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from vigi_vision.investigation_confirmation_api import install_investigation_confirmation_routes
 from vigi_vision.investigation_confirmation_models import (
+    ConfirmationManifest,
+    ConfirmationRecord,
+    ConfirmationReferenceFrame,
     ConfirmationRoi,
+    ConfirmationTiming,
     ConfirmedInvestigationInput,
     RoiProvenance,
+    artifact_relative_path,
 )
 from vigi_vision.object_presence_values import ClassificationOutcome, DecodedRgbImage
 from vigi_vision.recording_models import RecordingSegment, RecordingWindow, ReplayRequest
@@ -34,11 +48,36 @@ from vigi_vision.recording_search_successor_execution import (
 )
 from vigi_vision.recording_search_successor_narrowing import SuccessorBinaryNarrowingService
 from vigi_vision.reference_frame_decoder import ReferenceFrameDecodeRequest
-from vigi_vision.reference_frame_models import DecodedFrameEvidence, TimingPrecisionStatus
+from vigi_vision.reference_frame_models import (
+    DecodedFrameEvidence,
+    FrameSelectionPolicy,
+    TimingPrecisionStatus,
+)
+from vigi_vision.reference_frame_web_ui import install_reference_frame_web_ui
 from vigi_vision.replay import ReplayClip
 
 UTC = timezone.utc
 ANCHOR = datetime(2026, 9, 4, 5, 17, 32, tzinfo=UTC)
+
+
+def _free_port() -> int:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+def _http_json(
+    base_url: str, path: str, body: dict[str, object] | None = None
+) -> tuple[int, dict[str, object]]:
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    request = Request(  # noqa: S310 - loopback URL is fixed by the test.
+        f"{base_url}{path}",
+        data=data,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST" if body is not None else "GET",
+    )
+    with urlopen(request, timeout=3) as response:  # noqa: S310 - loopback test URL.
+        return response.status, json.load(response)
 
 
 def _segment(end: datetime) -> RecordingSegment:
@@ -185,6 +224,86 @@ def _service(tmp_path: Path, absent_after: datetime) -> SuccessorExecutionServic
     )
 
 
+def create_successor_browser_uvicorn_app() -> FastAPI:
+    """Build a real-Uvicorn successor app with only deterministic local doubles."""
+    root = Path(os.environ["VIGI_SUCCESSOR_BROWSER_ROOT"])
+    root.mkdir(parents=True, exist_ok=True)
+    confirmed = _confirmed(root)
+    execution = _service(root, ANCHOR + timedelta(minutes=15))
+
+    class _Confirmation:
+        def load_confirmed(self, investigation_id: str) -> ConfirmedInvestigationInput:
+            if investigation_id != confirmed.investigation_id:
+                raise AssertionError
+            return confirmed
+
+        def load_confirmation_manifest(self, investigation_id: str) -> ConfirmationManifest:
+            if investigation_id != confirmed.investigation_id:
+                raise AssertionError
+            return ConfirmationManifest(
+                schema_version=3,
+                investigation_id=confirmed.investigation_id,
+                investigation_kind="object_disappearance",
+                scenario_id="object-disappearance",
+                status="confirmed",
+                anchor_time_utc=confirmed.anchor_time_utc,
+                source_timezone=confirmed.source_timezone,
+                confirmed_at_utc=confirmed.anchor_time_utc,
+                artifact_directory_relative=artifact_relative_path(confirmed.investigation_id),
+                confirmation=ConfirmationRecord(
+                    channel_id=confirmed.channel_id,
+                    candidate_offset_seconds=confirmed.candidate_offset_seconds,
+                    reference_frame=ConfirmationReferenceFrame(
+                        resource_id=confirmed.reference_frame_resource_id,
+                        schema_version=1,
+                        generation_policy_version=confirmed.generation_policy_version,
+                        requested_time=confirmed.requested_time_text,
+                        requested_time_utc=confirmed.requested_time_utc,
+                        source_timezone=confirmed.source_timezone,
+                        frame_selection_policy=FrameSelectionPolicy(
+                            confirmed.frame_selection_policy
+                        ),
+                        width=confirmed.source_width,
+                        height=confirmed.source_height,
+                        jpeg_sha256=confirmed.jpeg_sha256,
+                        jpeg_size_bytes=confirmed.jpeg_size_bytes,
+                    ),
+                    timing=ConfirmationTiming(
+                        decoded_local_pts_seconds=confirmed.decoded_local_pts_seconds,
+                        estimated_source_time_utc=confirmed.estimated_source_time_utc,
+                        offset_from_requested_seconds=None,
+                        timing_precision_status=TimingPrecisionStatus(
+                            confirmed.timing_precision_status.lower()
+                        ),
+                        warnings=confirmed.warnings,
+                    ),
+                    roi=confirmed.roi,
+                ),
+            )
+
+    policy, classifier_policy, object_policy = approved_phase7e_policy()
+    service = Phase7EPublicService(
+        RecordingSearch7ERepository(root / "legacy"),
+        SimpleNamespace(),
+        _Confirmation(),
+        None,
+        None,
+        policy,
+        classifier_policy,
+        object_policy,
+        SimpleNamespace(status=lambda *_args: (None, None)),
+        lambda: ANCHOR + timedelta(hours=1),
+        None,
+        execution,
+    )
+    app = FastAPI()
+    install_reference_frame_web_ui(app)
+    limiter = CapacityLimiter(2)
+    install_investigation_confirmation_routes(app, _Confirmation(), limiter)
+    install_recording_search_routes(app, None, limiter, phase7e_service=service)
+    return app
+
+
 def test_successor_http_shaped_execution_publishes_found_and_reopens(tmp_path: Path) -> None:
     service = _service(tmp_path, ANCHOR + timedelta(minutes=15))
     confirmed = _confirmed(tmp_path)
@@ -294,3 +413,94 @@ def test_successor_runs_through_http_background_and_restart_status(tmp_path: Pat
         restored = client.get(status_url)
     assert restored.status_code == 200
     assert restored.json()["status"] == "FOUND"
+
+
+def test_successor_browser_surface_runs_through_uvicorn_http_and_reload(  # noqa: PLR0915
+    tmp_path: Path,
+) -> None:
+    """Exercise static UI delivery and Schema 8 background polling over real Uvicorn."""
+    port = _free_port()
+    environment = os.environ.copy()
+    environment["VIGI_SUCCESSOR_BROWSER_ROOT"] = os.fspath(tmp_path)
+    command = [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "test_recording_search_successor_execution:create_successor_browser_uvicorn_app",
+        "--factory",
+        "--app-dir",
+        "tests",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+    ]
+    process = subprocess.Popen(  # noqa: S603 - fixed local test command.
+        command,
+        cwd=Path(__file__).parents[1],
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+    )
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise AssertionError
+            try:
+                response = urlopen(f"{base_url}/", timeout=3)  # noqa: S310 - loopback test URL.
+                if response.status == 200:
+                    response.close()
+                    break
+            except Exception:  # noqa: BLE001 - bounded readiness probe.
+                time.sleep(0.05)
+        else:
+            raise AssertionError
+        page = urlopen(f"{base_url}/", timeout=3).read().decode("utf-8")  # noqa: S310
+        assert "기본 30분, 최대 2시간" in page
+        assert 'id="recording-search-quick-ranges"' in page
+        script = urlopen(f"{base_url}/static/recording-search.js", timeout=3).read().decode("utf-8")  # noqa: S310
+        assert "MAX_SEARCH_DURATION_SECONDS" in script
+        confirmation_code, confirmation = _http_json(
+            base_url,
+            "/api/v1/investigation-confirmations/object-disappearance-v3-ch1-20260904T051732Z",
+        )
+        assert confirmation_code == 200
+        assert confirmation["status"] == "confirmed"
+        assert confirmation["confirmation"]["source_timezone"] == "Asia/Seoul"
+        request_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+        code, accepted = _http_json(
+            base_url,
+            "/api/v1/recording-searches",
+            {
+                "investigation_id": "object-disappearance-v3-ch1-20260904T051732Z",
+                "search_end": "2026-09-04T14:47:32",
+                "request_id": request_id,
+            },
+        )
+        assert code == 202
+        status_payload: dict[str, object] = {}
+        for _ in range(100):
+            _, status_payload = _http_json(base_url, str(accepted["status_url"]))
+            if status_payload["status"] not in {"ACCEPTED", "RUNNING"}:
+                break
+            time.sleep(0.03)
+        assert status_payload["status"] == "FOUND"
+        assert status_payload["schema_version"] == 8
+        _, restored = _http_json(base_url, str(accepted["status_url"]))
+        assert restored == status_payload
+    finally:
+        if process.poll() is None:
+            process.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT)
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        _stdout, _stderr = process.communicate(timeout=1)
+        assert process.returncode in ({0, 3} if os.name == "nt" else {0})

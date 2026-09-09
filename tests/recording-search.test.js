@@ -33,11 +33,11 @@ function accepted() {
   };
 }
 
-function status(kind, reason = null) {
+function status(kind, reason = null, schemaVersion = null) {
   return {
     investigation_id: INVESTIGATION_ID,
     run_id: RUN_ID,
-    schema_version: ["ACCEPTED", "RUNNING"].includes(kind) ? 0 : 7,
+    schema_version: schemaVersion ?? (["ACCEPTED", "RUNNING"].includes(kind) ? 0 : 7),
     status: kind,
     reason_code: reason,
     terminal_result_id: ["FOUND", "NOT_FOUND", "INCONCLUSIVE"].includes(kind)
@@ -54,6 +54,10 @@ function status(kind, reason = null) {
       source_timezone: "Asia/Seoul",
     } : null,
   };
+}
+
+function successorStatus(kind, reason = null) {
+  return status(kind, reason, 8);
 }
 
 function foundStatusWithTiming() {
@@ -123,6 +127,94 @@ test("confirmed workflow submits only the closed start body and blocks a double 
   assert.equal(harness.recordingSearchStatus.textContent, "검색 중입니다.");
 });
 
+test("restored search defaults to a 30-minute range and exposes keyboard quick ranges", async () => {
+  const harness = createHarness(() => Promise.resolve({ ok: true, status: 200, json: async () => status("RUNNING") }), undefined, {
+    confirmation: true,
+    search: true,
+  });
+  dispatchConfirmed(harness);
+
+  assert.equal(harness.recordingSearchEnd.value, "2026-07-20T13:04:18");
+  assert.deepEqual(
+    harness.recordingSearchQuickButtons.map((button) => button.attributes["aria-pressed"]),
+    ["false", "true", "false", "false"],
+  );
+  const expected = [
+    [0, "2026-07-20T12:44:18"],
+    [1, "2026-07-20T13:04:18"],
+    [2, "2026-07-20T13:34:18"],
+    [3, "2026-07-20T14:34:18"],
+  ];
+  expected.forEach(([index, value]) => {
+    harness.recordingSearchQuickButtons[index].listeners.click({ preventDefault() {} });
+    assert.equal(harness.recordingSearchEnd.value, value);
+    assert.equal(harness.recordingSearchQuickButtons[index].attributes["aria-pressed"], "true");
+  });
+});
+
+test("successor range bounds accept 30 minutes through two hours and reject unsafe ends", async () => {
+  const requests = [];
+  const harness = createHarness((url) => {
+    requests.push(url);
+    return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+  }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  for (const value of ["2026-07-20T14:34:18"]) {
+    harness.recordingSearchEnd.value = value;
+    harness.recordingSearchEnd.listeners.input();
+    assert.equal(harness.recordingSearchStart.disabled, false);
+  }
+  for (const value of ["2026-07-20T12:34:18", "2026-07-20T14:34:19"]) {
+    harness.recordingSearchEnd.value = value;
+    harness.recordingSearchEnd.listeners.input();
+    assert.equal(harness.recordingSearchStart.disabled, true);
+    harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  }
+  assert.equal(requests.length, 0);
+});
+
+test("Schema 8 terminal payloads render localized facts and remain restartable", async () => {
+  const secondRequestId = "87654321-4321-4432-8432-abcdefabcdef";
+  let postCalls = 0;
+  const harness = createHarness((url, options) => {
+    if (url === "/api/v1/recording-searches") {
+      postCalls += 1;
+      const requestId = JSON.parse(options.body).request_id;
+      const runId = `search-run-${requestId.replaceAll("-", "")}`;
+      return Promise.resolve({
+        ok: true,
+        status: 202,
+        json: async () => ({
+          request_id: requestId,
+          investigation_id: INVESTIGATION_ID,
+          run_id: runId,
+          status: "ACCEPTED",
+          status_url: `/api/v1/recording-searches/${INVESTIGATION_ID}/${runId}`,
+        }),
+      });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => successorStatus("FOUND") });
+  }, undefined, {
+    confirmation: true,
+    search: true,
+    requestIds: [REQUEST_ID, secondRequestId],
+  });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T14:34:18";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  assert.equal(harness.recordingSearchResult.hidden, false);
+  assert.match(harness.recordingSearchResultKind.textContent, /사라진 구간/);
+  assert.match(harness.recordingSearchObservedRange.textContent, /Asia\/Seoul/);
+  assert.equal(harness.recordingSearchError.hidden, true);
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  assert.equal(postCalls, 2);
+});
+
 for (const terminal of ["FOUND", "NOT_FOUND", "INCONCLUSIVE", "FAILED", "INTERRUPTED", "CORRUPT"]) {
   test(`polling stops and renders safe request-relative ${terminal}`, async () => {
     let statusCalls = 0;
@@ -150,7 +242,7 @@ for (const terminal of ["FOUND", "NOT_FOUND", "INCONCLUSIVE", "FAILED", "INTERRU
     assert.equal(statusCalls, 2);
     assert.equal(harness.pendingTimerCount(), 0);
     assert.equal(harness.recordingSearchResult.hidden, false);
-    assert.equal(harness.recordingSearchStart.disabled, true);
+    assert.equal(harness.recordingSearchStart.disabled, false);
     assert.doesNotMatch(harness.recordingSearchResultKind.textContent, /theft|identity|intent|UTC/i);
   });
 }
@@ -176,7 +268,7 @@ for (const terminal of ["FOUND", "NOT_FOUND", "INCONCLUSIVE", "FAILED", "INTERRU
     await settle();
     assert.equal(statusCalls, 1);
     assert.equal(harness.recordingSearchStatus.textContent, "녹화 기록 검색이 종료되었습니다.");
-    assert.equal(harness.recordingSearchStart.disabled, true);
+    assert.equal(harness.recordingSearchStart.disabled, false);
     assert.equal(harness.pendingTimerCount(), 0);
     assert.equal(harness.window.vigiVisionRecordingSearch.getState().runId, RUN_ID);
   });
@@ -409,7 +501,7 @@ test("invalid search bounds never reach the HTTP start boundary and page teardow
   for (const invalid of [
     "2026-07-20T12:34:18",
     "2026-07-20T12:34:17",
-    "2026-07-20T12:44:19",
+    "2026-07-20T14:34:19",
     "not-a-time",
   ]) {
     harness.recordingSearchEnd.value = invalid;

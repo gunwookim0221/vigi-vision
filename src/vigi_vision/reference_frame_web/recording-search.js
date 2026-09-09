@@ -3,6 +3,7 @@
   const confirmedTime = document.querySelector("#recording-search-confirmed-time");
   const timezone = document.querySelector("#recording-search-timezone");
   const endInput = document.querySelector("#recording-search-end");
+  const quickRanges = document.querySelector("#recording-search-quick-ranges");
   const startAction = document.querySelector("#recording-search-start");
   const status = document.querySelector("#recording-search-status");
   const error = document.querySelector("#recording-search-error");
@@ -27,7 +28,12 @@
   const LOCAL_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/;
   const TERMINAL = new Set(["FOUND", "NOT_FOUND", "INCONCLUSIVE", "FAILED", "INTERRUPTED", "CORRUPT"]);
   const REQUEST_TIMEOUT_MS = 15_000;
+  // The backend invocation ceiling is 2,520 seconds; retain a bounded
+  // three-minute observation margin without turning polling into a promise
+  // of completion after the client has gone away.
   const CLIENT_POLL_DEADLINE_MS = 45 * 60 * 1_000;
+  const DEFAULT_SEARCH_DURATION_SECONDS = 30 * 60;
+  const MAX_SEARCH_DURATION_SECONDS = 2 * 60 * 60;
   const STATUS_RETRY_LIMIT = 5;
   const STATUS_RETRY_INITIAL_MS = 2_000;
   const STATUS_RETRY_MAX_MS = 15_000;
@@ -70,6 +76,7 @@
   let controller = null;
   let pollCount = 0;
   let submitting = false;
+  let terminalReady = false;
   let lifecycleGeneration = 0;
   let lifecycle = null;
 
@@ -190,10 +197,13 @@
     }
     const message = ERROR_MESSAGES[code] ?? ERROR_MESSAGES.internal_error;
     setStatus(message, "error");
-    error.textContent = message;
-    error.hidden = false;
-    error.focus?.({ preventScroll: true });
+    // The live status is the single visible error announcement.  Keep the
+    // alert node empty so the same safe message is not rendered twice.
+    error.textContent = "";
+    error.hidden = true;
+    status.focus?.({ preventScroll: true });
     submitting = false;
+    terminalReady = true;
     renderInput();
   }
 
@@ -257,24 +267,46 @@
     const end = utcFromLocal(endInput.value, confirmation.sourceTimezone);
     if (end === null) return false;
     const duration = (end.getTime() - new Date(confirmation.anchorTimeUtc).getTime()) / 1000;
-    return Number.isInteger(duration) && duration > 0 && duration <= 600 && end.getTime() <= Date.now();
+    return Number.isInteger(duration)
+      && duration > 0
+      && duration <= MAX_SEARCH_DURATION_SECONDS
+      && end.getTime() <= Date.now();
   }
 
   function renderInput() {
-    startAction.disabled = submitting || activeRun !== null || !validSearchEnd();
+    startAction.disabled = submitting || (activeRun !== null && !terminalReady) || !validSearchEnd();
+  }
+
+  function setQuickRangePressed(seconds) {
+    if (quickRanges === null) return;
+    Array.from(quickRanges.children ?? []).forEach((button) => {
+      const selected = Number(button.dataset.searchDurationSeconds) === seconds;
+      button.setAttribute("aria-pressed", String(selected));
+    });
+  }
+
+  function setSearchEndForDuration(seconds) {
+    if (confirmation === null || !Number.isInteger(seconds) || seconds <= 0) return;
+    const anchor = new Date(confirmation.anchorTimeUtc).getTime();
+    const target = Math.min(anchor + seconds * 1_000, Date.now());
+    endInput.value = localFromUtc(new Date(target).toISOString(), confirmation.sourceTimezone);
+    setQuickRangePressed(seconds);
+    renderInput();
   }
 
   function showConfirmation(value) {
     confirmation = value;
+    terminalReady = false;
     panel.hidden = false;
     confirmedTime.textContent = localFromUtc(value.anchorTimeUtc, value.sourceTimezone);
     timezone.textContent = value.sourceTimezone;
     if (!LOCAL_TIME_PATTERN.test(endInput.value)) {
       const suggested = new Date(Math.min(
-        new Date(value.anchorTimeUtc).getTime() + 600000,
+        new Date(value.anchorTimeUtc).getTime() + DEFAULT_SEARCH_DURATION_SECONDS * 1_000,
         Date.now(),
       ));
       endInput.value = localFromUtc(suggested.toISOString(), value.sourceTimezone);
+      setQuickRangePressed(DEFAULT_SEARCH_DURATION_SECONDS);
     }
     setStatus("검색 종료 시각을 검토한 뒤 검색을 시작하세요.", "ready");
     error.hidden = true;
@@ -354,7 +386,7 @@
 
   async function start(event) {
     event.preventDefault();
-    if (submitting || activeRun !== null || !validSearchEnd()) return;
+    if (submitting || (activeRun !== null && !terminalReady) || !validSearchEnd()) return;
     const requestId = window.crypto?.randomUUID?.();
     if (typeof requestId !== "string" || !UUID_V4_PATTERN.test(requestId)) {
       fail("recording_search_unavailable");
@@ -369,6 +401,9 @@
     const requestController = requestControllerFor(owner, "start");
     if (!isCurrentLifecycle(owner) || requestController === null) return;
     submitting = true;
+    terminalReady = false;
+    result.hidden = true;
+    resultReason.textContent = "";
     renderInput();
     setStatus("검색 요청을 접수하는 중입니다…", "loading", true);
     error.hidden = true;
@@ -451,16 +486,22 @@
   function finish(payload, owner) {
     if (!isCurrentLifecycle(owner)) return;
     invalidateLifecycle(owner);
+    terminalReady = true;
     setStatus("녹화 기록 검색이 종료되었습니다.", "complete");
     resultKind.textContent = terminalText(payload.status);
     const reasons = {
+      disappearance_confirmed: "대상이 사라진 구간이 확인되었습니다.",
+      complete_present_coverage: "관측 가능한 검색 범위에서는 대상이 계속 존재했습니다.",
+      no_present_absent_bracket: "관측 가능한 증거에서 소실 전환 구간을 찾지 못했습니다.",
+      unavailable_gap: "녹화 공백 또는 확인되지 않은 범위가 있어 결론을 낼 수 없습니다.",
+      incomplete_coverage: "일부 검색 범위를 확인하지 못해 결론을 낼 수 없습니다.",
       INCOMPLETE_MEDIA_COVERAGE: "사용 가능한 녹화가 요청 종료 전 끝나 전체 구간을 판단할 수 없습니다.",
       VISUAL_INDETERMINATE: "사용 가능한 화면만으로 대상의 존재 여부를 신뢰성 있게 판단할 수 없습니다.",
       INCOMPLETE_VISUAL_EVIDENCE: "판정에 필요한 화면 증거가 충분하지 않습니다.",
       BASELINE_ONLY_LOWER_BOUND: "기준 화면 이후의 존재 증거가 충분하지 않습니다.",
     };
     resultReason.textContent = reasons[payload.reason_code]
-      ?? (payload.reason_code === null ? "서버가 추가 사유를 제공하지 않았습니다." : `결과 사유: ${payload.reason_code}`);
+      ?? (payload.reason_code === null ? "서버가 추가 사유를 제공하지 않았습니다." : "서버가 제공한 안전한 결과 사유가 있습니다.");
     const details = payload.terminal_details;
     resultTiming.hidden = details === null;
     if (details !== null) {
@@ -568,6 +609,7 @@
     }
     if (runId !== null && RUN_PATTERN.test(runId) && confirmation !== null) {
       const owner = createLifecycle();
+      terminalReady = false;
       activeRun = { investigationId: confirmation.investigationId, runId };
       owner.runId = runId;
       setStatus("이전 검색 상태를 다시 확인하는 중입니다…", "loading", true);
@@ -602,6 +644,11 @@
   }
 
   endInput.addEventListener("input", renderInput);
+  Array.from(quickRanges?.children ?? []).forEach((button) => {
+    button.addEventListener("click", () => {
+      setSearchEndForDuration(Number(button.dataset.searchDurationSeconds));
+    });
+  });
   startAction.addEventListener("click", start);
   window.addEventListener("vigi:investigation-confirmed", receiveConfirmation);
   window.addEventListener("pagehide", () => {

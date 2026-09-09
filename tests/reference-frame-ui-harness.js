@@ -254,6 +254,7 @@ function createHarness(
     ["#recording-search-confirmed-time", new FakeElement("dd")],
     ["#recording-search-timezone", new FakeElement("dd")],
     ["#recording-search-end", new FakeElement("input")],
+    ["#recording-search-quick-ranges", new FakeElement("div")],
     ["#recording-search-start", new FakeElement("button")],
     ["#recording-search-status", new FakeElement("p")],
     ["#recording-search-error", new FakeElement("p")],
@@ -294,6 +295,13 @@ function createHarness(
   elements.get("#confirmation-reconfirm-action").disabled = true;
   elements.get("#confirmation-error").hidden = true;
   elements.get("#recording-search-panel").hidden = true;
+  const quickRanges = elements.get("#recording-search-quick-ranges");
+  [600, 1800, 3600, 7200].forEach((seconds) => {
+    const button = new FakeElement("button");
+    button.dataset.searchDurationSeconds = String(seconds);
+    button.setAttribute("aria-pressed", seconds === 1800 ? "true" : "false");
+    quickRanges.append(button);
+  });
   elements.get("#recording-search-result").hidden = true;
   elements.get("#recording-search-result-timing").hidden = true;
   elements.get("#recording-search-error").hidden = true;
@@ -307,6 +315,7 @@ function createHarness(
   const timerDelays = [];
   let channelRequests = 0;
   let timerSequence = 0;
+  let requestIdSequence = 0;
   const setTimeout = (handler, delay) => {
     const id = ++timerSequence;
     timers.set(id, { handler, delay });
@@ -336,7 +345,13 @@ function createHarness(
         },
       },
       crypto: {
-        randomUUID: () => options.requestId ?? "12345678-1234-4234-8234-123456789abc",
+        randomUUID: () => {
+          const requestIds = Array.isArray(options.requestIds) ? options.requestIds : null;
+          const value = requestIds === null
+            ? options.requestId ?? "12345678-1234-4234-8234-123456789abc"
+            : requestIds[Math.min(requestIdSequence++, requestIds.length - 1)];
+          return value;
+        },
       },
       addEventListener(name, handler) {
         if (windowListeners[name] === undefined) {
@@ -449,6 +464,8 @@ function createHarness(
     recordingSearchConfirmedTime: elements.get("#recording-search-confirmed-time"),
     recordingSearchTimezone: elements.get("#recording-search-timezone"),
     recordingSearchEnd: elements.get("#recording-search-end"),
+    recordingSearchQuickRanges: quickRanges,
+    recordingSearchQuickButtons: quickRanges.children,
     recordingSearchStart: elements.get("#recording-search-start"),
     recordingSearchStatus: elements.get("#recording-search-status"),
     recordingSearchError: elements.get("#recording-search-error"),
