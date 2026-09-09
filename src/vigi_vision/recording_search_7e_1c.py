@@ -287,7 +287,7 @@ class CommonSessionPolicy:
     maximum_classifications: int = 32
     decoder_timeout_seconds: int = DECODER_TIMEOUT_SECONDS
     ffprobe_timeout_seconds: int = MEDIA_PROBE_TIMEOUT_SECONDS
-    classifier_timeout_seconds: int = 10
+    classifier_timeout_seconds: int = 30
     classifier_total_budget_seconds: int = 320
     support_cadence_seconds: int = 1
     terminal_interpretation_seconds: int = 10

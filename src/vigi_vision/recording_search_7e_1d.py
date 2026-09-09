@@ -1536,7 +1536,18 @@ def _build_d2_snapshot(
     )
     coarse_refs: list[D2EvidenceReference] = []
     for item in c2_snapshot.targets:
-        if item.origin_coarse_target_utc is not None or item.is_alias:
+        # C2 carries the locally classified search-start frame separately as
+        # ``initial_present_evidence``.  D2's coarse grid is the plan's
+        # target_times (which intentionally excludes that baseline), so do not
+        # publish the duplicate start observation as another COARSE_TARGET.
+        if (
+            item.origin_coarse_target_utc is not None
+            or item.is_alias
+            or (
+                item is c2_snapshot.initial_present_evidence
+                and getattr(c2_result, "bracket", None) is None
+            )
+        ):
             continue
         coarse_refs.append(_d2_reference(run, item, D2EvidenceRole.COARSE_TARGET))
     d1_refs: list[D2EvidenceReference] = []

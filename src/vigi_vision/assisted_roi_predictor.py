@@ -8,6 +8,7 @@ import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING, Literal, NoReturn, Protocol, cast, final
 
 from typing_extensions import Self, override
@@ -198,16 +199,31 @@ class LazyEfficientSamPredictor(RoiPredictor):
             self._torch = None
             self._device = None
 
-    def _runtime(self) -> tuple[_Model, _TorchModule, str, _ImageModule, _ToTensor]:
+    def ensure_ready(
+        self,
+        stage_sink: collections.abc.Callable[[str, int], None] | None = None,
+    ) -> None:
+        """Load and validate the local runtime before a bounded inference."""
+        _ = self._runtime(stage_sink=stage_sink)
+
+    def _runtime(
+        self,
+        *,
+        stage_sink: collections.abc.Callable[[str, int], None] | None = None,
+    ) -> tuple[_Model, _TorchModule, str, _ImageModule, _ToTensor]:
         if self._unavailable:
             raise RoiSuggestionUnavailableError
         if self._model is not None and self._torch is not None and self._device is not None:
             image_module, to_tensor = _load_image_dependencies()
+            _emit_stage(stage_sink, "model_ready", 0)
             return self._model, self._torch, self._device, image_module, to_tensor
         try:
+            started = monotonic()
             _verify_checkpoint(self.checkpoint_path, self.expected_sha256)
+            _emit_stage(stage_sink, "checkpoint_validated", _elapsed_ms(started))
             torch = _load_torch()
             efficient_sam = importlib.import_module("efficient_sam.efficient_sam")
+            _emit_stage(stage_sink, "runtime_ready", _elapsed_ms(started))
             factory = cast("_EfficientSamModule", cast("object", efficient_sam)).build_efficient_sam
             device = _select_device(torch, self.device_mode)
             model = (
@@ -220,6 +236,7 @@ class LazyEfficientSamPredictor(RoiPredictor):
                 .eval()
             )
             image_module, to_tensor = _load_image_dependencies()
+            _emit_stage(stage_sink, "model_ready", _elapsed_ms(started))
         except (
             ImportError,
             ModuleNotFoundError,
@@ -234,6 +251,19 @@ class LazyEfficientSamPredictor(RoiPredictor):
         self._torch = torch
         self._device = device
         return model, torch, device, image_module, to_tensor
+
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, round((monotonic() - started) * 1000))
+
+
+def _emit_stage(
+    sink: collections.abc.Callable[[str, int], None] | None,
+    name: str,
+    elapsed_ms: int,
+) -> None:
+    if sink is not None:
+        sink(name, elapsed_ms)
 
 
 def _load_torch() -> _TorchModule:

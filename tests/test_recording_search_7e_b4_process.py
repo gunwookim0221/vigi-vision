@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from multiprocessing.process import BaseProcess
 from pathlib import Path
 from threading import Event, Thread
+from time import sleep
 from types import SimpleNamespace
 
 import pytest
@@ -152,6 +153,16 @@ def _extra_key_worker_entry(connection: object, _encoded: bytes) -> None:
 
 def _eof_worker_entry(connection: object, _encoded: bytes) -> None:
     connection.close()
+
+
+def _delayed_ready_worker_entry(connection: object, encoded: bytes) -> None:
+    sleep(0.15)
+    b4_process._worker_entry(connection, encoded)
+
+
+def _delayed_graceful_exit_worker_entry(connection: object, encoded: bytes) -> None:
+    b4_process._worker_entry(connection, encoded)
+    sleep(0.75)
 
 
 def _active_classifier_children() -> list[BaseProcess]:
@@ -379,6 +390,91 @@ def test_timeout_terminates_process_and_retry_does_not_overlap() -> None:
         timeout_seconds=3.0,
     )
     assert result.outcome.value == "INDETERMINATE"
+    assert not _active_classifier_children()
+
+
+def test_startup_budget_is_separate_from_inference_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline, probe, baseline_mask, probe_mask, roi, policy = _values()
+    monkeypatch.setattr(b4_process, "_worker_entry", _delayed_ready_worker_entry)
+    events: list[dict[str, int | str]] = []
+    result = run_b4_in_process(
+        baseline_image=baseline,
+        probe_image=probe,
+        source_width=32,
+        source_height=32,
+        roi=roi,
+        policy=policy,
+        worker_spec=StaticMaskWorkerSpec(baseline_mask, probe_mask),
+        correlation_id="startup-budget",
+        timeout_seconds=3.0,
+        startup_timeout_seconds=3.0,
+        timing_sink=events.append,
+    )
+    assert result.outcome.value == "INDETERMINATE"
+    assert events[-1]["stage"] == "completed"
+    assert "startup_ms" in events[-1]
+    assert "child_started_ms" in events[-1]
+    assert not _active_classifier_children()
+
+
+def test_valid_result_waits_for_bounded_graceful_worker_reap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline, probe, baseline_mask, probe_mask, roi, policy = _values()
+    monkeypatch.setattr(b4_process, "_worker_entry", _delayed_graceful_exit_worker_entry)
+    result = run_b4_in_process(
+        baseline_image=baseline,
+        probe_image=probe,
+        source_width=32,
+        source_height=32,
+        roi=roi,
+        policy=policy,
+        worker_spec=StaticMaskWorkerSpec(baseline_mask, probe_mask),
+        correlation_id="graceful-reap",
+        timeout_seconds=3.0,
+    )
+    assert result.outcome.value == "INDETERMINATE"
+    assert not _active_classifier_children()
+
+
+def test_inference_timeout_reports_stage_and_safe_timing() -> None:
+    baseline, probe, baseline_mask, probe_mask, roi, policy = _values()
+    events: list[dict[str, int | str]] = []
+    with pytest.raises(B4ProcessTimeout) as raised:
+        run_b4_in_process(
+            baseline_image=baseline,
+            probe_image=probe,
+            source_width=32,
+            source_height=32,
+            roi=roi,
+            policy=policy,
+            worker_spec=StaticMaskWorkerSpec(baseline_mask, probe_mask, delay_seconds=0.25),
+            correlation_id="inference-budget",
+            timeout_seconds=0.05,
+            startup_timeout_seconds=3.0,
+            timing_sink=events.append,
+        )
+    assert raised.value.stage == "inference"
+    assert events[-1]["stage"] == "timeout"
+    assert events[-1]["timeout_stage"] == "inference"
+    assert set(events[-1]) <= {
+        "event",
+        "stage",
+        "timeout_stage",
+        "cleanup_ms",
+        "startup_ms",
+        "ipc_result_ms",
+        "inference_ms",
+        "child_started_ms",
+        "request_decoded_ms",
+        "checkpoint_validated_ms",
+        "runtime_ready_ms",
+        "model_ready_ms",
+        "preprocessing_ms",
+        "child_inference_ms",
+    }
     assert not _active_classifier_children()
 
 

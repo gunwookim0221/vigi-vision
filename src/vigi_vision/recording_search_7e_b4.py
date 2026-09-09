@@ -15,6 +15,7 @@ terminate and reap the worker before any output is admitted.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -62,6 +63,7 @@ if TYPE_CHECKING:
 
 
 ConfirmedInputLoader = Callable[[str], ConfirmedInvestigationInput]
+_CLASSIFIER_STARTUP_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +74,33 @@ class Phase7EProductionB4Adapter(B4Bridge):
     media_decoder: MediaDecoder = field(repr=False)
     mask_predictor: MaskPredictor | None = field(repr=False)
     policy: ObjectPresenceDecisionPolicy = field(repr=False)
+
+    def readiness_error(self) -> str | None:
+        """Return a fixed readiness category before media work is admitted."""
+        try:
+            worker_spec = _worker_spec(self.mask_predictor)
+            if not isinstance(worker_spec, EfficientSamWorkerSpec):
+                return None
+            checkpoint = worker_spec.checkpoint_path
+            if (
+                not isinstance(checkpoint, Path)
+                or checkpoint.is_symlink()
+                or not checkpoint.is_file()
+            ):
+                return "classifier_unavailable"
+            with checkpoint.open("rb") as handle:
+                if not handle.read(1):
+                    return "classifier_unavailable"
+            if (
+                importlib.util.find_spec("torch") is None
+                or importlib.util.find_spec("efficient_sam.efficient_sam") is None
+                or importlib.util.find_spec("PIL.Image") is None
+                or importlib.util.find_spec("torchvision.transforms.functional") is None
+            ):
+                return "classifier_unavailable"
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+            return "classifier_unavailable"
+        return None
 
     def classify(self, authoritative: Phase7EB4Input) -> StrictIdentityEnvelope:
         """Validate reopened authority, then return one Phase 7 operation."""
@@ -96,6 +125,7 @@ class Phase7EProductionB4Adapter(B4Bridge):
         try:
             result = _bounded_classification(
                 timeout,
+                _CLASSIFIER_STARTUP_TIMEOUT_SECONDS,
                 baseline.image,
                 probe,
                 confirmed.source_width,
@@ -285,6 +315,7 @@ class Phase7EProductionB4Adapter(B4Bridge):
 
 def _bounded_classification(  # noqa: PLR0913
     timeout: float,
+    startup_timeout: float,
     baseline: DecodedRgbImage,
     probe: DecodedRgbImage,
     width: int,
@@ -307,6 +338,7 @@ def _bounded_classification(  # noqa: PLR0913
         worker_spec=predictor,
         correlation_id=correlation_id,
         timeout_seconds=timeout,
+        startup_timeout_seconds=startup_timeout,
         cancellation=cancellation,
     )
 

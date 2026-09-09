@@ -20,15 +20,18 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import math
 import multiprocessing
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic, sleep
 from typing import TYPE_CHECKING, Final, Literal
 
 from vigi_vision.assisted_roi_predictor import LazyEfficientSamPredictor
+from vigi_vision.assisted_roi_service import RoiSuggestionUnavailableError
 from vigi_vision.investigation_confirmation_models import ConfirmationRoi
 from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
 from vigi_vision.object_presence_values import BinaryMask, DecodedRgbImage
@@ -39,7 +42,6 @@ from vigi_vision.recording_search_b3_models import (
 from vigi_vision.recording_search_b3_service import classify_decoded_images
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from multiprocessing.connection import Connection
 
     from vigi_vision.object_presence_evidence import ClassificationResult
@@ -51,7 +53,10 @@ MAX_RESULT_BYTES: Final = 4 * 1024 * 1024
 MAX_CHECKPOINT_PATH_CHARS: Final = 4096
 MAX_CORRELATION_CHARS: Final = 256
 MAX_STATIC_DELAY_SECONDS: Final = 60.0
-_CLEANUP_CEILING_SECONDS: Final = 0.5
+# Windows EfficientSAM workers can still finalize native model/runtime state
+# briefly after sending a valid result.  Keep the reap bounded, but allow that
+# normal graceful-exit tail to finish before treating cleanup as a failure.
+_CLEANUP_CEILING_SECONDS: Final = 2.0
 _SHA256_PATTERN: Final = re.compile(r"^[0-9a-fA-F]{64}$")
 _REQUEST_KEYS: Final = frozenset(
     {
@@ -71,6 +76,7 @@ _PREDICTOR_KEYS: Final = {
     "static_masks": frozenset({"kind", "baseline_rows", "probe_rows", "delay_seconds"}),
 }
 _RESULT_KEYS: Final = frozenset({"version", "correlation_id", "kind", "result"})
+_READY_KEYS: Final = frozenset({"version", "correlation_id", "kind", "timings_ms"})
 _FAILURE_KEYS: Final = frozenset({"version", "correlation_id", "kind", "code"})
 _FAILURE_CODES: Final = frozenset(
     {
@@ -80,6 +86,18 @@ _FAILURE_CODES: Final = frozenset(
         "worker_execution_failed",
     }
 )
+_TIMING_KEYS: Final = frozenset(
+    {
+        "child_started_ms",
+        "request_decoded_ms",
+        "checkpoint_validated_ms",
+        "runtime_ready_ms",
+        "model_ready_ms",
+        "preprocessing_ms",
+        "child_inference_ms",
+    }
+)
+_LOGGER = logging.getLogger("uvicorn.error.vigi_vision.phase7e")
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +153,7 @@ class StaticMaskWorkerSpec:
 
 
 WorkerSpec = EfficientSamWorkerSpec | StaticMaskWorkerSpec
+TimingSink = Callable[[dict[str, int | str]], None]
 
 
 class B4ProcessError(RuntimeError):
@@ -149,8 +168,9 @@ class B4ProcessError(RuntimeError):
 class B4ProcessTimeout(B4ProcessError):
     """The child exceeded the classifier operation ceiling."""
 
-    def __init__(self, *, cleanup_failed: bool = False) -> None:
+    def __init__(self, *, stage: str = "inference", cleanup_failed: bool = False) -> None:
         super().__init__("classifier_timeout", cleanup_failed=cleanup_failed)
+        self.stage = stage
 
 
 class B4ProcessCancelled(B4ProcessError):
@@ -178,16 +198,18 @@ def run_b4_in_process(
     worker_spec: WorkerSpec,
     correlation_id: str,
     timeout_seconds: float,
+    startup_timeout_seconds: float | None = None,
     cancellation: object | None = None,
     pid_observer: Callable[[int], None] | None = None,
+    timing_sink: TimingSink | None = None,
 ) -> ClassificationResult:
     """Compute B4 in one spawned child and accept only a fully reaped result."""
-    if (
-        isinstance(timeout_seconds, bool)
-        or not isinstance(timeout_seconds, (int, float))
-        or not math.isfinite(float(timeout_seconds))
-        or timeout_seconds <= 0
-    ):
+    if not _valid_timeout(timeout_seconds):
+        raise B4ProcessError("worker_start_failed")
+    startup_timeout = (
+        timeout_seconds if startup_timeout_seconds is None else startup_timeout_seconds
+    )
+    if not _valid_timeout(startup_timeout):
         raise B4ProcessError("worker_start_failed")
     try:
         request = _build_request(
@@ -216,8 +238,12 @@ def run_b4_in_process(
     started = False
     primary_error: B4ProcessError | None = None
     result: ClassificationResult | None = None
+    ready = False
+    process_started_at: float | None = None
+    inference_started_at: float | None = None
+    result_received_at: float | None = None
+    child_timings: dict[str, int | str] = {}
     try:
-        operation_deadline = monotonic() + timeout_seconds
         parent, child = context.Pipe(duplex=False)
         process = context.Process(
             target=_worker_entry,
@@ -235,6 +261,9 @@ def run_b4_in_process(
                 started = True
             raise B4ProcessError("worker_start_failed") from error
         started = True
+        process_started_at = monotonic()
+        startup_deadline = process_started_at + float(startup_timeout)
+        inference_deadline: float | None = None
         if pid_observer is not None and process.pid is not None:
             try:
                 pid_observer(process.pid)
@@ -243,9 +272,11 @@ def run_b4_in_process(
         while True:
             if _is_cancelled(cancellation):
                 raise B4ProcessCancelled()
-            remaining = operation_deadline - monotonic()
+            deadline = startup_deadline if not ready else inference_deadline
+            assert deadline is not None
+            remaining = deadline - monotonic()
             if remaining <= 0:
-                raise B4ProcessTimeout()
+                raise B4ProcessTimeout(stage="startup" if not ready else "inference")
             try:
                 available = parent.poll(min(0.05, remaining))
             except (OSError, EOFError) as error:
@@ -259,29 +290,61 @@ def run_b4_in_process(
                 # available concurrently with the authority check.
                 if _is_cancelled(cancellation):
                     raise B4ProcessCancelled()
-                if monotonic() >= operation_deadline:
-                    raise B4ProcessTimeout()
+                if monotonic() >= deadline:
+                    raise B4ProcessTimeout(stage="startup" if not ready else "inference")
+                message_kind = _message_kind(raw)
+                if message_kind in {"ready", "timing", "inference"}:
+                    if message_kind == "inference":
+                        child_timings.update(_decode_timing(raw, correlation_id, "inference"))
+                        inference_started_at = monotonic()
+                        inference_deadline = inference_started_at + float(timeout_seconds)
+                        continue
+                    if ready:
+                        child_timings.update(_decode_timing(raw, correlation_id, "timing"))
+                        continue
+                    child_timings = _decode_timing(raw, correlation_id, "ready")
+                    ready = True
+                    inference_deadline = monotonic() + float(startup_timeout)
+                    continue
                 result = _decode_result(raw, correlation_id)
+                result_received_at = monotonic()
                 if _is_cancelled(cancellation):
                     raise B4ProcessCancelled()
-                if monotonic() >= operation_deadline:
-                    raise B4ProcessTimeout()
+                if inference_deadline is None or result_received_at >= inference_deadline:
+                    raise B4ProcessTimeout(stage="inference")
                 return result
             if not process.is_alive():
                 # Drain one queued message before classifying an exit without
                 # output; malformed/truncated output is never visual evidence.
                 if _is_cancelled(cancellation):
                     raise B4ProcessCancelled()
-                if monotonic() >= operation_deadline:
-                    raise B4ProcessTimeout()
+                if monotonic() >= deadline:
+                    raise B4ProcessTimeout(stage="startup" if not ready else "inference")
                 try:
                     if parent.poll(0):
                         raw = parent.recv_bytes(MAX_RESULT_BYTES + 1)
+                        message_kind = _message_kind(raw)
+                        if message_kind in {"ready", "timing", "inference"}:
+                            if message_kind == "inference":
+                                child_timings.update(
+                                    _decode_timing(raw, correlation_id, "inference")
+                                )
+                                inference_started_at = monotonic()
+                                inference_deadline = inference_started_at + float(timeout_seconds)
+                                continue
+                            if ready:
+                                child_timings.update(_decode_timing(raw, correlation_id, "timing"))
+                                continue
+                            child_timings = _decode_timing(raw, correlation_id, "ready")
+                            ready = True
+                            inference_deadline = monotonic() + float(startup_timeout)
+                            continue
                         result = _decode_result(raw, correlation_id)
+                        result_received_at = monotonic()
                         if _is_cancelled(cancellation):
                             raise B4ProcessCancelled()
-                        if monotonic() >= operation_deadline:
-                            raise B4ProcessTimeout()
+                        if inference_deadline is None or result_received_at >= inference_deadline:
+                            raise B4ProcessTimeout(stage="inference")
                         return result
                 except B4ProcessError:
                     raise
@@ -298,6 +361,7 @@ def run_b4_in_process(
         primary_error = B4ProcessError("worker_execution_failed")
         raise primary_error from error
     finally:
+        cleanup_started_at = monotonic()
         cleanup_failed = True
         exitcode: int | None = None
         try:
@@ -313,6 +377,28 @@ def run_b4_in_process(
             # The cleanup owner is defensive by itself, but a patched or
             # platform-specific failure must never mask the primary outcome.
             cleanup_failed = True
+        event: dict[str, int | str] = {
+            "event": "phase7e.classifier_timing",
+            "stage": (
+                "timeout"
+                if isinstance(primary_error, B4ProcessTimeout)
+                else "failure"
+                if primary_error is not None
+                else "completed"
+            ),
+            "cleanup_ms": _elapsed_ms(cleanup_started_at),
+        }
+        if isinstance(primary_error, B4ProcessTimeout):
+            event["timeout_stage"] = primary_error.stage
+        if process_started_at is not None:
+            if ready:
+                event["startup_ms"] = _elapsed_ms(process_started_at)
+            if result_received_at is not None:
+                event["ipc_result_ms"] = _elapsed_ms(process_started_at, result_received_at)
+            if inference_started_at is not None:
+                event["inference_ms"] = _elapsed_ms(inference_started_at, result_received_at)
+        event.update(child_timings)
+        _emit_timing(event, timing_sink)
         if primary_error is not None:
             primary_error.cleanup_failed = primary_error.cleanup_failed or cleanup_failed
         elif result is not None:
@@ -320,6 +406,75 @@ def run_b4_in_process(
                 raise B4ProcessError("worker_abnormal_exit", cleanup_failed=cleanup_failed)
             if cleanup_failed:
                 raise B4ProcessError("worker_execution_failed", cleanup_failed=True)
+
+
+def _valid_timeout(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+        and float(value) > 0
+    )
+
+
+def _elapsed_ms(started: float, ended: float | None = None) -> int:
+    return max(0, round(((monotonic() if ended is None else ended) - started) * 1000))
+
+
+def _message_kind(raw: bytes) -> object:
+    try:
+        value = _decode_json(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return value.get("kind") if isinstance(value, dict) else None
+
+
+def _decode_timing(
+    raw: bytes,
+    expected_correlation: str,
+    expected_kind: str,
+) -> dict[str, int | str]:
+    try:
+        value = _decode_json(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as error:
+        raise B4ProcessError("malformed_worker_protocol") from error
+    if (
+        not isinstance(value, dict)
+        or set(value) != _READY_KEYS
+        or value.get("version") != PROTOCOL_VERSION
+        or value.get("correlation_id") != expected_correlation
+        or value.get("kind") != expected_kind
+        or not isinstance(value.get("timings_ms"), dict)
+    ):
+        raise B4ProcessError("malformed_worker_protocol")
+    timings = value["timings_ms"]
+    assert isinstance(timings, dict)
+    if not set(timings).issubset(_TIMING_KEYS):
+        raise B4ProcessError("malformed_worker_protocol")
+    result: dict[str, int | str] = {}
+    for key, timing in timings.items():
+        if type(key) is not str or type(timing) is not int or timing < 0:
+            raise B4ProcessError("malformed_worker_protocol")
+        result[key] = timing
+    return result
+
+
+def _emit_timing(event: dict[str, int | str], sink: TimingSink | None) -> None:
+    """Emit only fixed, non-sensitive classifier stage facts."""
+    if sink is not None:
+        try:
+            sink(dict(event))
+        except Exception:  # noqa: S110 - diagnostics cannot affect authority.
+            pass
+    try:
+        _LOGGER.info("phase7e.classifier_timing %s", json.dumps(event, sort_keys=True))
+    except Exception:  # noqa: S110 - diagnostics cannot affect authority.
+        pass
+
+
+def _emit_stage(sink: Callable[[str, int], None] | None, name: str, elapsed_ms: int) -> None:
+    if sink is not None:
+        sink(name, elapsed_ms)
 
 
 def _build_request(
@@ -359,16 +514,78 @@ def _build_request(
     }
 
 
+def _send_payload(connection: Connection, payload: dict[str, object]) -> None:
+    try:
+        encoded = _encode_json(payload)
+        if len(encoded) <= MAX_RESULT_BYTES:
+            connection.send_bytes(encoded)
+    except (OSError, EOFError, ValueError):
+        pass
+
+
 def _worker_entry(connection: Connection, encoded: bytes) -> None:
     """Top-level spawn target with no parent capability or persistence access."""
+    child_started_at = monotonic()
+    timings: dict[str, int | str] = {}
+
+    def stage_sink(name: str, elapsed_ms: int) -> None:
+        if name in _TIMING_KEYS:
+            timings[name] = elapsed_ms
+        if name == "preprocessing_ms":
+            _send_payload(
+                connection,
+                {
+                    "version": PROTOCOL_VERSION,
+                    "correlation_id": request["correlation_id"],
+                    "kind": "inference",
+                    "timings_ms": timings,
+                },
+            )
+
     try:
         request = _decode_request(encoded)
-        result = _compute(request)
+        timings["request_decoded_ms"] = _elapsed_ms(child_started_at)
+        predictor = _predictor_from_payload(
+            request["predictor"],
+            request["source_width"],
+            request["source_height"],
+        )
+        if isinstance(predictor, LazyEfficientSamPredictor):
+            predictor.ensure_ready(stage_sink)
+        else:
+            timings["model_ready_ms"] = timings.get("request_decoded_ms", 0)
+        timings["child_started_ms"] = _elapsed_ms(child_started_at)
+        _send_payload(
+            connection,
+            {
+                "version": PROTOCOL_VERSION,
+                "correlation_id": request["correlation_id"],
+                "kind": "ready",
+                "timings_ms": timings,
+            },
+        )
+        result = _compute(request, predictor=predictor, stage_sink=stage_sink)
+        _send_payload(
+            connection,
+            {
+                "version": PROTOCOL_VERSION,
+                "correlation_id": request["correlation_id"],
+                "kind": "timing",
+                "timings_ms": timings,
+            },
+        )
         payload = {
             "version": PROTOCOL_VERSION,
             "correlation_id": request["correlation_id"],
             "kind": "result",
             "result": result.model_dump(mode="json"),
+        }
+    except RoiSuggestionUnavailableError:
+        payload = {
+            "version": PROTOCOL_VERSION,
+            "correlation_id": _correlation_or_empty(encoded),
+            "kind": "failure",
+            "code": "classifier_unavailable",
         }
     except ClassificationPreparationError as error:
         payload = {
@@ -384,25 +601,24 @@ def _worker_entry(connection: Connection, encoded: bytes) -> None:
             "kind": "failure",
             "code": "worker_execution_failed",
         }
+    _send_payload(connection, payload)
     try:
-        encoded_result = _encode_json(payload)
-        if len(encoded_result) > MAX_RESULT_BYTES:
-            return
-        connection.send_bytes(encoded_result)
-    except (OSError, EOFError, ValueError):
-        return
-    finally:
-        try:
-            connection.close()
-        except OSError:
-            pass
+        connection.close()
+    except OSError:
+        pass
 
 
-def _compute(request: dict[str, object]) -> ClassificationResult:
+def _compute(
+    request: dict[str, object],
+    *,
+    predictor: object | None = None,
+    stage_sink: Callable[[str, int], None] | None = None,
+) -> ClassificationResult:
     """Reconstruct only validated values and run the shared pure computation."""
     width = request["source_width"]
     height = request["source_height"]
     assert type(width) is int and type(height) is int
+    preprocessing_started = monotonic()
     baseline = _image_from_b64(request["baseline_rgb24"], width, height)
     probe = _image_from_b64(request["probe_rgb24"], width, height)
     roi = ConfirmationRoi.model_validate(request["roi"])
@@ -417,8 +633,11 @@ def _compute(request: dict[str, object]) -> ClassificationResult:
         "luma_integer_coefficients": tuple(coefficients),
     }
     policy = ObjectPresenceDecisionPolicy.model_validate(policy_payload)
-    predictor = _predictor_from_payload(request["predictor"], width, height)
-    return classify_decoded_images(
+    if predictor is None:
+        predictor = _predictor_from_payload(request["predictor"], width, height)
+    _emit_stage(stage_sink, "preprocessing_ms", _elapsed_ms(preprocessing_started))
+    started = monotonic()
+    result = classify_decoded_images(
         baseline_image=baseline,
         probe_image=probe,
         source_width=width,
@@ -427,6 +646,8 @@ def _compute(request: dict[str, object]) -> ClassificationResult:
         policy=policy,
         mask_predictor=predictor,
     )
+    _emit_stage(stage_sink, "child_inference_ms", _elapsed_ms(started))
+    return result
 
 
 class _StaticPredictor:

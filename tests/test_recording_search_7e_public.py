@@ -82,10 +82,10 @@ def test_public_request_is_closed_and_strict() -> None:
 def test_policy_snapshots_reproduce_approved_identities() -> None:
     policy, classifier, _ = approved_phase7e_policy()
     assert policy.identity == (
-        "rr-policy-v1-3e976cea4523523b81762351983a19d50a3febe036413b165831f74edaa6904d"
+        "rr-policy-v1-85724f1281baed3d092528763890d640dcf6dd303ce8398d1194ffaac6b7560a"
     )
     assert classifier.identity == (
-        "rr-classifier-policy-v1-6cf4b00da268a53dc7efde13a4fd563800fd5ee7210653a6362b0bb644afda7f"
+        "rr-classifier-policy-v1-d20a9d64543ce5bfa2b0d4861952593d36342ad51489588de06c89efa258838f"
     )
 
 

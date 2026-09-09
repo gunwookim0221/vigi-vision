@@ -880,7 +880,7 @@ _POLICY_MAXIMUMS: dict[str, int] = {
     "replay_margin_seconds": 40,
     "ffprobe_timeout_seconds": 20,
     "decoder_timeout_seconds": 120,
-    "classifier_timeout_seconds": 10,
+    "classifier_timeout_seconds": 30,
     "classifier_total_budget_seconds": 320,
     "terminal_interpretation_seconds": 10,
     "publication_seconds": 10,
@@ -1163,7 +1163,7 @@ def _validate_classifier_policy(payload: Mapping[str, Any]) -> None:
         or payload["execution"]["maximum_concurrent_attempts"] != 1
     ):
         raise IdentityValidationError("invalid classifier attempt policy")
-    if payload["execution"]["timeout_seconds"] > 10:
+    if payload["execution"]["timeout_seconds"] > 30:
         raise IdentityValidationError("classifier timeout exceeds approved ceiling")
     if payload["mask"]["maximum_source_coverage"] != "0.950000":
         raise IdentityValidationError("invalid background-dominant ceiling")

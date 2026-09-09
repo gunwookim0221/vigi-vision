@@ -342,6 +342,11 @@ def _phase7e_error_response(error: Phase7EPublicError) -> JSONResponse:
             "recording_search_unavailable",
             "Recording search is unavailable.",
         ),
+        "classifier_unavailable": (
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "classifier_unavailable",
+            "The recording classifier is unavailable.",
+        ),
         "confirmation_unavailable": (
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "confirmation_unavailable",

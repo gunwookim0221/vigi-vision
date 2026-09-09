@@ -348,14 +348,24 @@ discarded. Loss of authority or changed state returns a fixed ownership/conflict
 outcome and publishes nothing. The timeout value is operator/runtime
 configuration, not visual evidence or an observation-identity input.
 
+The Phase 7E production adapter validates classifier readiness before admitting
+media work. Its Windows-spawn child has a separate bounded cold-start and
+preparation budget (30 seconds); the bounded 30-second classifier budget
+begins only after preprocessing has completed. This keeps model import,
+checkpoint validation, and tensor preparation out of the measured inference
+window with the revised classifier-policy timeout while preserving the overall
+run ceilings.
+
 The shared predictor and inference limiter remain process-local, one-at-a-time
 resources owned by the service composition. The Phase 7E process adapter owns
 one spawned classifier child per invocation and applies one bounded cleanup
-boundary on every post-start exit. It terminates, escalates, reaps, and closes
-the child and both IPC endpoints before returning or raising; cleanup failure is
-secondary typed context and never changes the primary operational category. A
-deterministic retry therefore starts only after the prior attempt has no live
-classifier child and strict reload proves that no observation was committed.
+boundary on every post-start exit. It allows up to two seconds for a graceful
+Windows runtime tail after a valid result, then terminates, escalates, reaps,
+and closes the child and both IPC endpoints before returning or raising;
+cleanup failure is secondary typed context and never changes the primary
+operational category. A deterministic retry therefore starts only after the
+prior attempt has no live classifier child and strict reload proves that no
+observation was committed.
 
 The model's candidate score is used only inside the already verified
 score-to-mask selection step. It is not a Phase 7B outcome threshold and is not

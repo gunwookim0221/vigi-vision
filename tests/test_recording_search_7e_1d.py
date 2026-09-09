@@ -41,6 +41,8 @@ from vigi_vision.recording_search_7e_1d import (
     Phase7ELocalEvidenceAdapter,
     Phase7ETerminalDecision,
     Phase7ETerminalReason,
+    _build_c2_snapshot,
+    _build_d2_snapshot,
     build_evidence_snapshot,
     build_schema7_manifest,
     build_source_record_set,
@@ -62,9 +64,15 @@ from vigi_vision.recording_search_7e_repository import (
     RecordingSearch7ERepository,
 )
 from vigi_vision.recording_search_7e_validation import Schema5Envelope, Schema6Envelope
+from vigi_vision.recording_search_c1_planner import SupportDirection, build_coarse_sampling_plan
+from vigi_vision.recording_search_c2_models import (
+    CoarseInterpretationResult,
+    CoarseInterpretationStatus,
+)
 from vigi_vision.recording_search_d1_models import NarrowingResult
 from vigi_vision.recording_search_d1_service import BinaryNarrowingService
 from vigi_vision.recording_search_d2_terminal_models import TerminalResultKind
+from vigi_vision.recording_search_models import default_policy
 from vigi_vision.replay import ReplayClip
 
 _DOC = Path(__file__).parents[1] / "docs" / "design" / "object-disappearance-recording-search.md"
@@ -369,6 +377,43 @@ def test_phase7e_c1_adapter_refuses_to_clamp_short_final_support() -> None:
     )
     with pytest.raises(Phase7EIncompleteEvidenceError):
         Phase7EC1PlannerAdapter().build(request, policy)
+
+
+def test_d2_snapshot_does_not_publish_initial_present_as_coarse_target(
+    tmp_path: Path,
+) -> None:
+    _repo, run = _create_golden_schema6(tmp_path)
+    policy_record = _envelope(next(item for item in _vectors() if item["family"] == "policy"))
+    request = CommonSessionRequest(
+        "inv-01",
+        "run-01",
+        1,
+        _utc("2026-07-20T03:00:00Z"),
+        _utc("2026-07-20T03:00:04Z"),
+        CommonSessionPolicy.from_payload(policy_record.payload),
+    )
+    policy = default_policy(request.start_utc, request.end_utc)
+    plan = build_coarse_sampling_plan(
+        policy,
+        support_direction=SupportDirection.BACKWARD_FROM_END,
+    )
+    c2_snapshot = _build_c2_snapshot(run, request, policy, plan)
+    d2_snapshot = _build_d2_snapshot(
+        run,
+        c2_snapshot,
+        CoarseInterpretationResult(
+            status=CoarseInterpretationStatus.NO_CANDIDATE,
+            safe_reason="no_supported_transition",
+        ),
+        None,
+        policy,
+    )
+    coarse_times = tuple(
+        item.requested_time_utc
+        for item in d2_snapshot.references
+        if item.role.value == "COARSE_TARGET"
+    )
+    assert coarse_times == plan.target_times
 
 
 def test_d1_iteration_ceiling_reuses_existing_policy() -> None:

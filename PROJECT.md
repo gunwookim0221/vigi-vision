@@ -270,7 +270,11 @@ with the limitation above, while terminal real-NVR search acceptance remains
 pending the Phase 4C-2/5/6 user workflow and a human-labeled scenario.
 Correction B adds a bounded Windows-spawn process boundary around production
 Phase 7E B4 classification; timeout/cancellation terminate and reap the child,
-and late output cannot become evidence.
+and late output cannot become evidence. Valid results allow a bounded two-second
+Windows runtime tail for graceful child reaping before cleanup failure is
+reported. The classifier now validates readiness early and separates bounded
+cold startup/preparation from the measured 30-second inference window while
+retaining the cumulative and overall invocation ceilings.
 Absolute source-time calibration remains unavailable; Phase 4C-2
 provides transient frontend-only selection of one
 successful candidate, and Phase 5-1/5-2 provide the transient source-space

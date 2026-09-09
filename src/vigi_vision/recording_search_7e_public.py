@@ -458,7 +458,7 @@ class Phase7EPublicService:
             run_id=f"search-run-{request_id.replace('-', '')}",
         )
 
-    def prepare(
+    def prepare(  # noqa: C901 - strict boundary validation is intentionally explicit.
         self,
         investigation_id: str,
         search_end_time_text: str,
@@ -469,6 +469,11 @@ class Phase7EPublicService:
         """Strictly reopen Phase 6 and build the deterministic Phase 7E plan."""
         if self.classifier is None or self.local_decoder is None:
             raise Phase7EPublicError("recording_search_execution_unavailable")
+        readiness_check = getattr(self.classifier, "readiness_error", None)
+        if callable(readiness_check):
+            readiness_error = readiness_check()
+            if readiness_error is not None:
+                raise Phase7EPublicError(readiness_error)
         try:
             confirmed = self.confirmation_service.load_confirmed(investigation_id)
         except InvestigationConfirmationNotFoundError as error:
@@ -886,7 +891,7 @@ def _policy_payload() -> dict[str, object]:
         "replay_margin_seconds": 40,
         "ffprobe_timeout_seconds": 20,
         "decoder_timeout_seconds": 120,
-        "classifier_timeout_seconds": 10,
+        "classifier_timeout_seconds": 30,
         "classifier_total_budget_seconds": 320,
         "terminal_interpretation_seconds": 10,
         "publication_seconds": 10,
@@ -961,7 +966,7 @@ def _classifier_payload() -> dict[str, object]:
             "otherwise": "INDETERMINATE",
         },
         "execution": {
-            "timeout_seconds": 10,
+            "timeout_seconds": 30,
             "maximum_attempts": 1,
             "maximum_concurrent_attempts": 1,
             "late_result": "revoked",
