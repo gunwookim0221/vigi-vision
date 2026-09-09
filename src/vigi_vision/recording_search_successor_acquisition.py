@@ -202,6 +202,21 @@ def successor_target_id(plan: MultiSegmentCoarsePlan, target: CoarseTargetAssign
     )
 
 
+def successor_midpoint_target_id(
+    plan: MultiSegmentCoarsePlan, target: CoarseTargetAssignment
+) -> str:
+    """Return a deterministic identity for a bounded narrowing target."""
+    _validate_midpoint_target(plan, target)
+    return _hashed_identity(
+        "successor-midpoint-target-v1-",
+        {
+            "plan_id": plan.plan_id,
+            "requested_time_utc": _timestamp(target.requested_time_utc),
+            "segment_id": target.segment_id,
+        },
+    )
+
+
 def build_successor_target_window(
     plan: MultiSegmentCoarsePlan,
     target: CoarseTargetAssignment,
@@ -209,7 +224,18 @@ def build_successor_target_window(
 ) -> RecordingWindow | None:
     """Build a short window inside the one segment assigned to ``target``."""
     selected_policy = policy or SuccessorTargetAcquisitionPolicy()
-    _validate_target_membership(plan, target)
+    return _build_successor_target_window(plan, target, selected_policy, validate_membership=True)
+
+
+def _build_successor_target_window(
+    plan: MultiSegmentCoarsePlan,
+    target: CoarseTargetAssignment,
+    selected_policy: SuccessorTargetAcquisitionPolicy,
+    *,
+    validate_membership: bool,
+) -> RecordingWindow | None:
+    if validate_membership:
+        _validate_target_membership(plan, target)
     if target.availability is TargetAvailability.UNAVAILABLE:
         return None
     coverage = _assigned_coverage(plan, target)
@@ -249,13 +275,34 @@ class SuccessorTargetAcquisitionService:
         """Acquire all targets independently, preserving plan order."""
         return tuple(self.acquire(plan, target) for target in plan.targets)
 
-    def acquire(  # noqa: C901
+    def acquire(
         self, plan: MultiSegmentCoarsePlan, target: CoarseTargetAssignment
     ) -> SuccessorTargetAcquisitionResult:
         """Acquire one target or preserve its safe target-level unavailable state."""
-        target_id = successor_target_id(plan, target)
-        window = build_successor_target_window(plan, target, self.policy)
-        acquisition_id = _acquisition_id(plan, target, window, self.policy)
+        return self._acquire_with_identity(plan, target, successor_target_id(plan, target))
+
+    def acquire_midpoint(
+        self, plan: MultiSegmentCoarsePlan, target: CoarseTargetAssignment
+    ) -> SuccessorTargetAcquisitionResult:
+        """Acquire one narrowing midpoint through the same short-window path."""
+        target_id = successor_midpoint_target_id(plan, target)
+        return self._acquire_with_identity(plan, target, target_id, validate_membership=False)
+
+    def _acquire_with_identity(  # noqa: C901
+        self,
+        plan: MultiSegmentCoarsePlan,
+        target: CoarseTargetAssignment,
+        target_id: str,
+        *,
+        validate_membership: bool = True,
+    ) -> SuccessorTargetAcquisitionResult:
+        window = _build_successor_target_window(
+            plan,
+            target,
+            self.policy,
+            validate_membership=validate_membership,
+        )
+        acquisition_id = _acquisition_id(plan, target, window, self.policy, target_id)
         cached = self._cache.get(acquisition_id)
         if cached is not None:
             return cached
@@ -480,6 +527,26 @@ def _validate_target_membership(
         raise SuccessorAcquisitionContractError
 
 
+def _validate_midpoint_target(plan: MultiSegmentCoarsePlan, target: CoarseTargetAssignment) -> None:
+    if (
+        target.availability is not TargetAvailability.AVAILABLE
+        or not _is_whole_utc(target.requested_time_utc)
+        or target.requested_time_utc < plan.anchor_time_utc
+        or target.requested_time_utc > plan.search_end_utc
+        or target.segment_id is None
+        or sum(item.segment_id == target.segment_id for item in plan.segments) != 1
+    ):
+        raise SuccessorAcquisitionContractError
+    coverage = next(item for item in plan.segments if item.segment_id == target.segment_id)
+    inside_coverage = coverage.start_utc <= target.requested_time_utc < coverage.end_utc
+    at_search_end = (
+        target.requested_time_utc == plan.search_end_utc
+        and target.requested_time_utc == coverage.end_utc
+    )
+    if not inside_coverage and not at_search_end:
+        raise SuccessorAcquisitionContractError
+
+
 def _assigned_coverage(
     plan: MultiSegmentCoarsePlan, target: CoarseTargetAssignment
 ) -> SegmentCoverage:
@@ -507,12 +574,13 @@ def _acquisition_id(
     target: CoarseTargetAssignment,
     window: RecordingWindow | None,
     policy: SuccessorTargetAcquisitionPolicy,
+    target_id: str | None = None,
 ) -> str:
     return _hashed_identity(
         "successor-acquisition-v1-",
         {
             "plan_id": plan.plan_id,
-            "target_id": successor_target_id(plan, target),
+            "target_id": target_id or successor_target_id(plan, target),
             "segment_id": target.segment_id,
             "window_start_utc": None if window is None else _timestamp(window.start_utc),
             "window_end_utc": None if window is None else _timestamp(window.end_utc),
@@ -563,5 +631,6 @@ __all__ = (
     "SuccessorTargetAcquisitionService",
     "SuccessorTargetStatus",
     "build_successor_target_window",
+    "successor_midpoint_target_id",
     "successor_target_id",
 )

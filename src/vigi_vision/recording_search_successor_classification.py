@@ -37,9 +37,11 @@ from vigi_vision.recording_search_7e_b4_process import (
     run_b4_in_process,
 )
 from vigi_vision.recording_search_b3_models import ClassificationPreparationError
+from vigi_vision.recording_search_successor import TargetAvailability
 from vigi_vision.recording_search_successor_acquisition import (
     SuccessorTargetAcquisitionResult,
     SuccessorTargetStatus,
+    successor_midpoint_target_id,
     successor_target_id,
 )
 
@@ -444,6 +446,26 @@ class SuccessorCoarseClassificationService:
             _candidate_bracket(renumbered),
         )
 
+    def classify_target(
+        self,
+        plan: MultiSegmentCoarsePlan,
+        target: CoarseTargetAssignment,
+        acquisition: SuccessorTargetAcquisitionResult,
+        authority: SuccessorClassificationAuthority,
+    ) -> SuccessorObservation:
+        """Classify one bounded target, including a non-coarse midpoint target."""
+        self._validate_authority(plan, authority)
+        if (
+            target.availability is not TargetAvailability.AVAILABLE
+            or acquisition.plan_id != plan.plan_id
+            or acquisition.target_id != successor_midpoint_target_id(plan, target)
+            or acquisition.sequence != target.sequence
+            or acquisition.requested_time_utc != target.requested_time_utc
+            or acquisition.assigned_segment_id != target.segment_id
+        ):
+            raise SuccessorClassificationContractError
+        return self._classify_target(plan, target, acquisition, authority)
+
     def _validate_authority(
         self, plan: MultiSegmentCoarsePlan, authority: SuccessorClassificationAuthority
     ) -> None:
@@ -456,6 +478,12 @@ class SuccessorCoarseClassificationService:
             raise SuccessorClassificationContractError
         if self.classifier.policy_identity == "":
             raise SuccessorClassificationContractError
+
+    def validate_authority(
+        self, plan: MultiSegmentCoarsePlan, authority: SuccessorClassificationAuthority
+    ) -> None:
+        """Validate Phase 6 authority before a standalone target classification."""
+        self._validate_authority(plan, authority)
 
     def _classify_target(
         self,

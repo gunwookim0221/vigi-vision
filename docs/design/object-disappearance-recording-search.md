@@ -125,7 +125,7 @@ and `git blame` across all local refs. The evidence is:
    six-hundred-second implementation cap, but that conversion is an inference;
    the commits do not explicitly say it was accidental.
 
-### Two-hour multi-segment successor (Slices 1–3 implemented; Slices 4–6 planned)
+### Two-hour multi-segment successor (Slices 1–4 implemented; Slices 5–6 planned)
 
 The successor keeps the current schemas and evidence-safety rules while removing
 the one-segment total-horizon assumption. Its explicit initial policy is a
@@ -162,17 +162,24 @@ The planned flow is:
    the observed coverage and limitation reason.
 
 Implementation status: Slice 1 is implemented as a planning-only, deterministic
-multi-segment discovery and coarse-target scheduling boundary. Slice 2 now adds
+multi-segment discovery and coarse-target scheduling boundary. Slice 2 adds
 short per-target replay windows, actual decoded-PTS nearest-frame selection,
-target-level unavailable states, and invocation-owned cleanup. Slice 3 now adds
+target-level unavailable states, and invocation-owned cleanup. Slice 3 adds
 serial coarse classification through the existing process-isolated EfficientSAM
 boundary, actual-PTS observation ordering, strict Phase 6 authority/ROI binding,
-and provisional PRESENT → ABSENT candidate-bracket metadata. Gaps and target
-unavailable facts remain unclassified. None of these slices adds persistence,
-browser/API work, or real-NVR acceptance; the browser and NVR compatibility
-baseline remains the existing 600-second, single-segment path. Binary narrowing
-and final terminal classification remain unimplemented and are split into the
-following practical slices:
+and provisional PRESENT → ABSENT candidate-bracket metadata. Slice 4 now adds
+bounded serial binary narrowing inside one validated bracket: each midpoint uses
+the assigned segment and a short Slice 2 acquisition, classification consumes
+the actual decoded frame PTS, and the result preserves the last PRESENT/first
+ABSENT observations, bounded interval, policy identity, and target-level
+unavailable/incomplete completion. The MVP stops at 30 seconds or six
+iterations; gaps, indeterminate observations, unavailable acquisition, and
+classifier failures close safely without inventing a boundary. None of these
+slices adds persistence, browser/API work, terminal Schema 5–7 publication, or
+real-NVR acceptance; the browser and NVR compatibility baseline remains the
+existing 600-second, single-segment path. Slice 5 terminal publication/API
+composition and Slice 6 real-NVR acceptance remain unimplemented and are split
+into the following practical slices:
 
 | Slice | User-visible outcome | Minimum tests | Acceptance criterion | Deferred hardening |
 | --- | --- | --- | --- | --- |
@@ -183,9 +190,10 @@ following practical slices:
 | 5. Browser/API horizon and result presentation | The user can request the horizon and see status, interval, coverage, and limitations. | Validation, RUNNING/terminal transitions, reload/run isolation, mobile layout, safe network errors. | The exact investigation/run returns `FOUND`, `NOT_FOUND`, or `INCONCLUSIVE` without stale status. | Phase 8 review controls and Phase 9 judgment UI. |
 | 6. Final real-NVR acceptance | One human-labeled two-hour scenario proves the normal path. | Production-shaped HTTP/background flow, real segments, cleanup, logs, and restart restoration. | User-visible result agrees with labeled evidence and no P0 finding remains. | Broader cameras, object types, and exhaustive fault matrices. |
 
-Until Slices 3–6 are implemented and accepted, references to two hours or
+Until Slices 5–6 are implemented and accepted, references to two hours or
 multi-segment execution remain successor-slice scope rather than browser/NVR
-support. Slices 1–2 provide only bounded planning and per-target acquisition;
+support. Slices 1–4 provide only bounded planning, per-target acquisition,
+coarse classification, and in-memory narrowing;
 the current 600-second, single-segment implementation and the completed
 one-minute `NOT_FOUND` acceptance remain the browser/NVR compatibility baseline.
 
