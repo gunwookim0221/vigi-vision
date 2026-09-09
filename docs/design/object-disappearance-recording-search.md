@@ -125,7 +125,7 @@ and `git blame` across all local refs. The evidence is:
    six-hundred-second implementation cap, but that conversion is an inference;
    the commits do not explicitly say it was accidental.
 
-### Two-hour multi-segment successor (Slice 1 implemented; Slices 2–6 planned)
+### Two-hour multi-segment successor (Slices 1–2 implemented; Slices 3–6 planned)
 
 The successor keeps the current schemas and evidence-safety rules while removing
 the one-segment total-horizon assumption. Its explicit initial policy is a
@@ -162,11 +162,13 @@ The planned flow is:
    the observed coverage and limitation reason.
 
 Implementation status: Slice 1 is implemented as a planning-only, deterministic
-multi-segment discovery and coarse-target scheduling boundary. It performs no
-replay, classification, persistence, browser/API work, or real-NVR acceptance;
-the browser and NVR compatibility baseline remains the existing 600-second,
-single-segment path. Slices 2–6 remain not implemented and are split into the
-following practical slices:
+multi-segment discovery and coarse-target scheduling boundary. Slice 2 now adds
+short per-target replay windows, actual decoded-PTS nearest-frame selection,
+target-level unavailable states, and invocation-owned cleanup. Neither slice
+adds persistence, browser/API work, classification, or real-NVR acceptance; the
+browser and NVR compatibility baseline remains the existing 600-second,
+single-segment path. Slice 3 coarse classification and Slices 4–6 remain not
+implemented and are split into the following practical slices:
 
 | Slice | User-visible outcome | Minimum tests | Acceptance criterion | Deferred hardening |
 | --- | --- | --- | --- | --- |
@@ -177,11 +179,11 @@ following practical slices:
 | 5. Browser/API horizon and result presentation | The user can request the horizon and see status, interval, coverage, and limitations. | Validation, RUNNING/terminal transitions, reload/run isolation, mobile layout, safe network errors. | The exact investigation/run returns `FOUND`, `NOT_FOUND`, or `INCONCLUSIVE` without stale status. | Phase 8 review controls and Phase 9 judgment UI. |
 | 6. Final real-NVR acceptance | One human-labeled two-hour scenario proves the normal path. | Production-shaped HTTP/background flow, real segments, cleanup, logs, and restart restoration. | User-visible result agrees with labeled evidence and no P0 finding remains. | Broader cameras, object types, and exhaustive fault matrices. |
 
-Until Slices 2–6 are implemented and accepted, references to two hours or
-multi-segment execution remain design targets only. Slice 1 provides only the
-bounded planner described above; the current 600-second, single-segment
-implementation and the completed one-minute `NOT_FOUND` acceptance remain the
-browser/NVR compatibility baseline.
+Until Slices 3–6 are implemented and accepted, references to two hours or
+multi-segment execution remain successor-slice scope rather than browser/NVR
+support. Slices 1–2 provide only bounded planning and per-target acquisition;
+the current 600-second, single-segment implementation and the completed
+one-minute `NOT_FOUND` acceptance remain the browser/NVR compatibility baseline.
 
 ## Scope and phase boundaries
 
