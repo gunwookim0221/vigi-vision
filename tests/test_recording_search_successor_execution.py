@@ -383,7 +383,7 @@ def test_successor_runs_through_http_background_and_restart_status(tmp_path: Pat
         classifier_policy,
         object_policy,
         SimpleNamespace(status=lambda *_args: (None, None)),
-        lambda: ANCHOR + timedelta(hours=3),
+        lambda: ANCHOR + timedelta(hours=3, microseconds=123456),
         None,
         execution,
     )

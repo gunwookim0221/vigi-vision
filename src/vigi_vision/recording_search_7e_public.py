@@ -505,12 +505,13 @@ class Phase7EPublicService:
             raise Phase7EPublicError("confirmation_unavailable") from error
         if source_timezone is not None and source_timezone != confirmed.source_timezone:
             raise Phase7EPublicError("invalid_request")
+        now_utc = self.now_utc()
         try:
             end = parse_reference_frame_request(
                 channel_id=confirmed.channel_id,
                 requested_time_text=search_end_time_text,
                 source_timezone=confirmed.source_timezone,
-                now_utc=self.now_utc(),
+                now_utc=now_utc,
             ).requested_time_utc
             duration_seconds = (end - confirmed.anchor_time_utc).total_seconds()
         except Exception as error:
@@ -518,13 +519,14 @@ class Phase7EPublicService:
         if duration_seconds != int(duration_seconds) or duration_seconds <= 0:
             raise Phase7EPublicError("invalid_request")
         if duration_seconds >= _MAX_SEARCH_SECONDS:
+            successor_now_utc = now_utc.astimezone(timezone.utc).replace(microsecond=0)
             try:
                 successor_request = SuccessorPlanRequest.from_text(
                     channel_id=confirmed.channel_id,
                     anchor_time_utc=confirmed.anchor_time_utc,
                     search_end_time_text=search_end_time_text,
                     source_timezone=confirmed.source_timezone,
-                    now_utc=self.now_utc(),
+                    now_utc=successor_now_utc,
                 )
             except (SuccessorPlanError, TypeError, ValueError) as error:
                 raise Phase7EPublicError("invalid_request") from error
@@ -535,7 +537,7 @@ class Phase7EPublicService:
                     confirmed,
                     search_end_time_text=search_end_time_text,
                     run_id=run_id,
-                    now_utc=self.now_utc(),
+                    now_utc=successor_now_utc,
                 )
             except SuccessorExecutionError as error:
                 code = str(error)

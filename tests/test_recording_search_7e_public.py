@@ -165,7 +165,7 @@ def test_new_ten_minute_request_does_not_fall_back_to_legacy_executor() -> None:
         classifier_policy,
         object_policy,
         SimpleNamespace(),
-        lambda: datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc),
+        lambda: datetime(2026, 7, 20, 4, 0, 0, 123456, tzinfo=timezone.utc),
     )
 
     with pytest.raises(Phase7EPublicError) as raised:
