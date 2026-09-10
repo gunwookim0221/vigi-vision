@@ -41,8 +41,18 @@
     "NOT_REQUESTED", "RETRYABLE", "READY", "MEDIA_MISSING", "MEDIA_CORRUPT",
     "DELETING", "DELETED",
   ]);
-  const PHASE8_REASONS = new Set([
-    "phase8_media_unavailable", "phase8_media_corrupt", "phase8_clip_failed", "phase8_corrupt",
+  const PHASE8_REASONS_BY_STATUS = Object.freeze({
+    NOT_REQUESTED: new Set([null, "successor_slice5_does_not_create_handoffs"]),
+    RETRYABLE: new Set(["phase8_clip_failed", "phase8_media_unavailable", "phase8_media_corrupt"]),
+    READY: new Set([null]),
+    MEDIA_MISSING: new Set(["phase8_media_unavailable"]),
+    MEDIA_CORRUPT: new Set(["phase8_media_corrupt"]),
+    DELETING: new Set([null]),
+    DELETED: new Set([null]),
+  });
+  const RUN_STORAGE_KEY = "vigiVision.recordingSearch.activeRun.v1";
+  const RUN_STORAGE_KEYS = Object.freeze([
+    "version", "investigation_id", "run_id", "request_id", "search_end", "duration_seconds",
   ]);
   const START_KEYS = Object.freeze(["request_id", "investigation_id", "run_id", "status", "status_url"]);
   const STATUS_KEYS = Object.freeze([
@@ -275,6 +285,64 @@
       && end.getTime() <= Date.now();
   }
 
+  function storage() {
+    try {
+      return window.sessionStorage ?? null;
+    } catch (_caught) {
+      return null;
+    }
+  }
+
+  function readStoredRun() {
+    const store = storage();
+    if (store === null) return null;
+    let parsed;
+    try {
+      const raw = store.getItem(RUN_STORAGE_KEY);
+      parsed = raw === null ? null : JSON.parse(raw);
+    } catch (_caught) {
+      return null;
+    }
+    if (!hasExactKeys(parsed, RUN_STORAGE_KEYS)
+      || parsed.version !== 1
+      || !INVESTIGATION_PATTERN.test(parsed.investigation_id)
+      || !RUN_PATTERN.test(parsed.run_id)
+      || !UUID_V4_PATTERN.test(parsed.request_id)
+      || !LOCAL_TIME_PATTERN.test(parsed.search_end)
+      || !Number.isInteger(parsed.duration_seconds)
+      || parsed.duration_seconds <= 0
+      || parsed.duration_seconds > MAX_SEARCH_DURATION_SECONDS) {
+      return null;
+    }
+    return parsed;
+  }
+
+  function rememberStoredRun(record) {
+    const store = storage();
+    if (store === null) return;
+    try {
+      store.setItem(RUN_STORAGE_KEY, JSON.stringify(record));
+    } catch (_caught) {
+      // A storage quota or privacy failure must not break the active run.
+    }
+  }
+
+  function durationFromSearchEnd(value) {
+    if (confirmation === null) return null;
+    const end = utcFromLocal(value, confirmation.sourceTimezone);
+    if (end === null) return null;
+    const duration = (end.getTime() - new Date(confirmation.anchorTimeUtc).getTime()) / 1000;
+    return Number.isInteger(duration) && duration > 0 && duration <= MAX_SEARCH_DURATION_SECONDS
+      ? duration
+      : null;
+  }
+
+  function phase8Valid(statusValue, reason) {
+    if (statusValue === null && reason === null) return true;
+    if (!PHASE8_STATUSES.has(statusValue)) return false;
+    return PHASE8_REASONS_BY_STATUS[statusValue]?.has(reason) === true;
+  }
+
   function renderInput() {
     startAction.disabled = submitting || (activeRun !== null && !terminalReady) || !validSearchEnd();
   }
@@ -302,7 +370,21 @@
     panel.hidden = false;
     confirmedTime.textContent = localFromUtc(value.anchorTimeUtc, value.sourceTimezone);
     timezone.textContent = value.sourceTimezone;
-    if (!LOCAL_TIME_PATTERN.test(endInput.value)) {
+    let locationRunId = null;
+    try {
+      locationRunId = new URL(window.location.href).searchParams.get("run_id");
+    } catch (_caught) {
+      // The current input remains the safe fallback when URL access is unavailable.
+    }
+    const stored = readStoredRun();
+    const restoresStoredEnd = stored !== null
+      && stored.investigation_id === value.investigationId
+      && durationFromSearchEnd(stored.search_end) === stored.duration_seconds
+      && (locationRunId === null || locationRunId === stored.run_id);
+    if (restoresStoredEnd) {
+      endInput.value = stored.search_end;
+      setQuickRangePressed(stored.duration_seconds);
+    } else if (!LOCAL_TIME_PATTERN.test(endInput.value)) {
       const suggested = new Date(Math.min(
         new Date(value.anchorTimeUtc).getTime() + DEFAULT_SEARCH_DURATION_SECONDS * 1_000,
         Date.now(),
@@ -364,8 +446,25 @@
     }
   }
 
-  function rememberRun(receipt) {
-    activeRun = { investigationId: receipt.investigation_id, runId: receipt.run_id };
+  function rememberRun(receipt, expected) {
+    const durationSeconds = durationFromSearchEnd(expected.searchEnd);
+    activeRun = {
+      investigationId: receipt.investigation_id,
+      runId: receipt.run_id,
+      requestId: expected.requestId,
+      searchEnd: expected.searchEnd,
+      durationSeconds,
+    };
+    if (durationSeconds !== null) {
+      rememberStoredRun({
+        version: 1,
+        investigation_id: receipt.investigation_id,
+        run_id: receipt.run_id,
+        request_id: expected.requestId,
+        search_end: expected.searchEnd,
+        duration_seconds: durationSeconds,
+      });
+    }
     try {
       const location = new URL(window.location.href);
       location.searchParams.set("investigation_id", receipt.investigation_id);
@@ -434,7 +533,7 @@
         fail("internal_error", owner);
         return;
       }
-      rememberRun(payload);
+      rememberRun(payload, expected);
       owner.runId = payload.run_id;
       setStatus("검색 중입니다.", "accepted", true);
       pollCount = 0;
@@ -459,9 +558,6 @@
       && ["Asia/Seoul", "UTC"].includes(details.source_timezone)
     );
     const terminalNeedsDetails = ["FOUND", "NOT_FOUND", "INCONCLUSIVE"].includes(payload?.status);
-    const phase8Valid = (payload.phase8_status === null && payload.phase8_reason === null)
-      || (PHASE8_STATUSES.has(payload.phase8_status)
-        && (payload.phase8_reason === null || PHASE8_REASONS.has(payload.phase8_reason)));
     return hasExactKeys(payload, STATUS_KEYS)
       && payload.investigation_id === activeRun?.investigationId
       && payload.run_id === activeRun?.runId
@@ -469,7 +565,7 @@
       && typeof payload.status === "string"
       && (payload.reason_code === null || typeof payload.reason_code === "string")
       && (payload.terminal_result_id === null || typeof payload.terminal_result_id === "string")
-      && phase8Valid
+      && phase8Valid(payload.phase8_status, payload.phase8_reason)
       && validDetails
       && (!terminalNeedsDetails || details !== null);
   }
@@ -478,7 +574,7 @@
     return {
       FOUND: "요청한 검색 범위에서 대상이 사라진 구간을 찾았습니다.",
       NOT_FOUND: "요청한 검색 범위에서는 대상이 사라진 구간을 찾지 못했습니다.",
-      INCONCLUSIVE: "요청한 검색 범위의 증거만으로 결과를 확정할 수 없습니다.",
+      INCONCLUSIVE: "검색 결과를 확정할 수 없습니다.",
       FAILED: "검색이 안전하게 실패했습니다.",
       INTERRUPTED: "검색이 중단되었습니다.",
       CORRUPT: "검색 실행 기록을 안전하게 읽을 수 없습니다.",
@@ -501,12 +597,26 @@
       VISUAL_INDETERMINATE: "사용 가능한 화면만으로 대상의 존재 여부를 신뢰성 있게 판단할 수 없습니다.",
       INCOMPLETE_VISUAL_EVIDENCE: "판정에 필요한 화면 증거가 충분하지 않습니다.",
       BASELINE_ONLY_LOWER_BOUND: "기준 화면 이후의 존재 증거가 충분하지 않습니다.",
+      indeterminate_observation: "일부 관측 프레임에서 대상의 존재 여부를 신뢰성 있게 판단할 수 없습니다.",
       recording_unavailable: "해당 검색 범위의 녹화 기록을 충분히 확인할 수 없습니다.",
       successor_unavailable: "장시간 녹화 검색 기능을 준비할 수 없습니다. 서버 설정을 확인하세요.",
     };
     resultReason.textContent = reasons[payload.reason_code]
       ?? (payload.reason_code === null ? "서버가 추가 사유를 제공하지 않았습니다." : "서버가 제공한 안전한 결과 사유가 있습니다.");
     const details = payload.terminal_details;
+    if ((activeRun?.searchEnd === null || activeRun?.searchEnd === undefined)
+      && details !== null && validUtc(details.observed_end_time_utc)) {
+      const restoredEnd = localFromUtc(details.observed_end_time_utc, details.source_timezone);
+      if (LOCAL_TIME_PATTERN.test(restoredEnd)) {
+        const restoredDuration = durationFromSearchEnd(restoredEnd);
+        if (restoredDuration !== null) {
+          activeRun.searchEnd = restoredEnd;
+          activeRun.durationSeconds = restoredDuration;
+          endInput.value = restoredEnd;
+          setQuickRangePressed(restoredDuration);
+        }
+      }
+    }
     resultTiming.hidden = details === null;
     if (details !== null) {
       const zone = details.source_timezone;
@@ -607,16 +717,33 @@
   function resumeFromLocation() {
     let runId = null;
     try {
-      runId = new URL(window.location.href).searchParams.get("run_id");
+      const location = new URL(window.location.href);
+      runId = location.searchParams.get("run_id");
     } catch (_caught) {
       return;
     }
     if (runId !== null && RUN_PATTERN.test(runId) && confirmation !== null) {
+      const stored = readStoredRun();
+      const storedForRun = stored !== null
+        && stored.investigation_id === confirmation.investigationId
+        && stored.run_id === runId
+        && durationFromSearchEnd(stored.search_end) === stored.duration_seconds;
       const owner = createLifecycle();
       terminalReady = false;
-      activeRun = { investigationId: confirmation.investigationId, runId };
+      activeRun = {
+        investigationId: confirmation.investigationId,
+        runId,
+        requestId: storedForRun ? stored.request_id : null,
+        searchEnd: storedForRun ? stored.search_end : null,
+        durationSeconds: storedForRun ? stored.duration_seconds : null,
+      };
+      if (storedForRun) {
+        endInput.value = stored.search_end;
+        setQuickRangePressed(stored.duration_seconds);
+      }
       owner.runId = runId;
       setStatus("이전 검색 상태를 다시 확인하는 중입니다…", "loading", true);
+      renderInput();
       schedulePoll(owner, 0);
     }
   }

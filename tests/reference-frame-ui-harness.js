@@ -313,6 +313,18 @@ function createHarness(
   const windowListeners = {};
   const timers = new Map();
   const timerDelays = [];
+  const storageData = options.storage ?? new Map();
+  const sessionStorage = {
+    getItem(key) {
+      return storageData.has(key) ? storageData.get(key) : null;
+    },
+    setItem(key, value) {
+      storageData.set(key, String(value));
+    },
+    removeItem(key) {
+      storageData.delete(key);
+    },
+  };
   let channelRequests = 0;
   let timerSequence = 0;
   let requestIdSequence = 0;
@@ -338,6 +350,7 @@ function createHarness(
     window: {
       clearTimeout,
       setTimeout,
+      sessionStorage,
       location: { href: options.location ?? "http://127.0.0.1/" },
       history: {
         replaceState(_state, _title, location) {
@@ -478,6 +491,7 @@ function createHarness(
     recordingSearchObservedRange: elements.get("#recording-search-observed-range"),
     windowListeners,
     window: context.window,
+    storage: storageData,
     channelRequests: () => channelRequests,
     runTimers,
     timerDelays,

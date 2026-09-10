@@ -60,6 +60,27 @@ function successorStatus(kind, reason = null) {
   return status(kind, reason, 8);
 }
 
+function observedSchema8InconclusiveStatus() {
+  return {
+    investigation_id: "object-disappearance-v3-ch2-20260910T032148Z",
+    run_id: "search-run-1a7ba9fb6f9e4dd183b5b834c1b62328",
+    schema_version: 8,
+    status: "INCONCLUSIVE",
+    reason_code: "indeterminate_observation",
+    terminal_result_id: "successor-terminal-v1-b9816b6653eb929d04495e617c73a6e0fe643b72ebdbd9039e0f6f8207a8602d",
+    phase8_status: "NOT_REQUESTED",
+    phase8_reason: "successor_slice5_does_not_create_handoffs",
+    terminal_details: {
+      last_present_time_utc: null,
+      first_absent_time_utc: null,
+      observed_start_time_utc: "2026-09-10T03:21:48Z",
+      observed_end_time_utc: "2026-09-10T03:31:48Z",
+      coverage_complete: false,
+      source_timezone: "Asia/Seoul",
+    },
+  };
+}
+
 function foundStatusWithTiming() {
   return {
     ...status("FOUND", "SUPPORTED_TRANSITION"),
@@ -181,6 +202,174 @@ test("recording-unavailable terminal reason is rendered with its fixed explanati
     harness.recordingSearchResultReason.textContent,
     "해당 검색 범위의 녹화 기록을 충분히 확인할 수 없습니다.",
   );
+});
+
+test("real Schema 8 INCONCLUSIVE terminal payload is accepted", async () => {
+  const requestId = "1a7ba9fb-6f9e-4dd1-83b5-b834c1b62328";
+  const investigationId = "object-disappearance-v3-ch2-20260910T032148Z";
+  const runId = "search-run-1a7ba9fb6f9e4dd183b5b834c1b62328";
+  let statusCalls = 0;
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({
+        ok: true,
+        status: 202,
+        json: async () => ({
+          request_id: requestId,
+          investigation_id: investigationId,
+          run_id: runId,
+          status: "ACCEPTED",
+          status_url: `/api/v1/recording-searches/${investigationId}/${runId}`,
+        }),
+      });
+    }
+    statusCalls += 1;
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: async () => observedSchema8InconclusiveStatus(),
+    });
+  }, undefined, { confirmation: true, search: true, requestId });
+  harness.window.dispatchEvent({
+    type: "vigi:investigation-confirmed",
+    detail: {
+      investigationId,
+      anchorTimeUtc: "2026-09-10T03:21:48Z",
+      sourceTimezone: "Asia/Seoul",
+      schemaVersion: 3,
+    },
+  });
+  harness.recordingSearchEnd.value = "2026-09-10T12:44:18";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+
+  assert.equal(statusCalls, 1);
+  assert.equal(harness.recordingSearchStatus.textContent, "녹화 기록 검색이 종료되었습니다.");
+  assert.equal(harness.recordingSearchResult.hidden, false);
+  assert.match(harness.recordingSearchResultKind.textContent, /확정할 수 없습니다/);
+  assert.match(harness.recordingSearchResultReason.textContent, /신뢰성 있게 판단할 수 없습니다/);
+  assert.equal(harness.recordingSearchLastPresent.textContent, "해당 없음");
+  assert.equal(harness.recordingSearchFirstAbsent.textContent, "해당 없음");
+  assert.match(harness.recordingSearchObservedRange.textContent, /2026-09-10T12:21:48/);
+  assert.equal(harness.pendingTimerCount(), 0);
+});
+
+test("malformed Phase 8 status/reason pairs are rejected instead of rendered", async () => {
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    const payload = successorStatus("INCONCLUSIVE", "indeterminate_observation");
+    payload.phase8_status = "READY";
+    payload.phase8_reason = "phase8_media_corrupt";
+    return Promise.resolve({ ok: true, status: 200, json: async () => payload });
+  }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:44:18";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+
+  assert.equal(harness.recordingSearchResult.hidden, true);
+  assert.match(harness.recordingSearchStatus.textContent, /다시 확인하고 있습니다/);
+  assert.equal(harness.pendingTimerCount(), 1);
+});
+
+test("reload restores the exact submitted run and search end from session storage", async () => {
+  const storage = new Map();
+  const first = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => status("RUNNING") });
+  }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID, storage });
+  dispatchConfirmed(first);
+  first.recordingSearchEnd.value = "2026-07-20T12:44:18";
+  first.recordingSearchEnd.listeners.input();
+  first.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+
+  const stored = JSON.parse(storage.get("vigiVision.recordingSearch.activeRun.v1"));
+  assert.deepEqual(stored, {
+    version: 1,
+    investigation_id: INVESTIGATION_ID,
+    run_id: RUN_ID,
+    request_id: REQUEST_ID,
+    search_end: "2026-07-20T12:44:18",
+    duration_seconds: 600,
+  });
+
+  const location = `http://127.0.0.1/?investigation_id=${INVESTIGATION_ID}&run_id=${RUN_ID}`;
+  const restored = createHarness((url) => {
+    if (url.startsWith("/api/v1/investigation-confirmations/")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => loadedConfirmation() });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => status("INCONCLUSIVE") });
+  }, undefined, { confirmation: true, search: true, location, storage });
+  await settle();
+  restored.runTimers();
+  await settle();
+
+  assert.equal(restored.recordingSearchEnd.value, "2026-07-20T12:44:18");
+  assert.equal(restored.recordingSearchQuickButtons[0].attributes["aria-pressed"], "true");
+  assert.equal(restored.recordingSearchStart.disabled, false);
+  assert.equal(restored.recordingSearchResult.hidden, false);
+  assert.equal(restored.recordingSearchStatus.textContent, "녹화 기록 검색이 종료되었습니다.");
+  assert.equal(restored.pendingTimerCount(), 0);
+});
+
+test("legacy run without stored search end derives a safe observed end on terminal restore", async () => {
+  const location = `http://127.0.0.1/?investigation_id=${INVESTIGATION_ID}&run_id=${RUN_ID}`;
+  const harness = createHarness((url) => {
+    if (url.startsWith("/api/v1/investigation-confirmations/")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => loadedConfirmation() });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => status("INCONCLUSIVE") });
+  }, undefined, { confirmation: true, search: true, location, storage: new Map() });
+  await settle();
+  harness.runTimers();
+  await settle();
+
+  assert.equal(harness.recordingSearchEnd.value, "2026-07-20T12:35:27");
+  assert.equal(harness.recordingSearchResult.hidden, false);
+  assert.equal(harness.pendingTimerCount(), 0);
+});
+
+test("a stored run for another run ID never crosses the restored lifecycle", async () => {
+  const otherRunId = "search-run-87654321432144328432abcdefabcdef";
+  const storage = new Map([
+    ["vigiVision.recordingSearch.activeRun.v1", JSON.stringify({
+      version: 1,
+      investigation_id: INVESTIGATION_ID,
+      run_id: RUN_ID,
+      request_id: REQUEST_ID,
+      search_end: "2026-07-20T12:44:18",
+      duration_seconds: 600,
+    })],
+  ]);
+  const location = `http://127.0.0.1/?investigation_id=${INVESTIGATION_ID}&run_id=${otherRunId}`;
+  const harness = createHarness((url) => {
+    if (url.startsWith("/api/v1/investigation-confirmations/")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => loadedConfirmation() });
+    }
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: async () => ({ ...status("RUNNING"), run_id: otherRunId }),
+    });
+  }, undefined, { confirmation: true, search: true, location, storage });
+  await settle();
+  harness.runTimers();
+  await settle();
+
+  assert.equal(harness.recordingSearchEnd.value, "2026-07-20T13:04:18");
+  assert.equal(harness.window.vigiVisionRecordingSearch.getState().runId, otherRunId);
+  assert.equal(harness.pendingTimerCount(), 1);
 });
 
 test("restored search defaults to a 30-minute range and exposes keyboard quick ranges", async () => {
