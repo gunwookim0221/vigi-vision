@@ -383,10 +383,25 @@ def test_successor_runs_through_http_background_and_restart_status(tmp_path: Pat
         classifier_policy,
         object_policy,
         SimpleNamespace(status=lambda *_args: (None, None)),
-        lambda: ANCHOR + timedelta(hours=1),
+        lambda: ANCHOR + timedelta(hours=3),
         None,
         execution,
     )
+    for index, search_end in enumerate(
+        (
+            "2026-09-04T14:27:32",
+            "2026-09-04T14:47:32",
+            "2026-09-04T15:17:32",
+            "2026-09-04T16:17:32",
+        ),
+        start=1,
+    ):
+        prepared = service.prepare_http(
+            confirmed.investigation_id,
+            search_end,
+            f"{index:08x}-0000-4000-8000-000000000000",
+        )
+        assert prepared.successor is not None
     app = FastAPI()
     install_recording_search_routes(app, None, CapacityLimiter(2), phase7e_service=service)
     body = {
@@ -407,6 +422,22 @@ def test_successor_runs_through_http_background_and_restart_status(tmp_path: Pat
         duplicate = client.post("/api/v1/recording-searches", json=body)
         assert duplicate.status_code == 202
         assert duplicate.json()["status"] == "FOUND"
+        ten_minute = client.post(
+            "/api/v1/recording-searches",
+            json={
+                "investigation_id": confirmed.investigation_id,
+                "search_end": "2026-09-04T14:27:32",
+                "request_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+            },
+        )
+        assert ten_minute.status_code == 202
+        ten_status = client.get(ten_minute.json()["status_url"])
+        for _ in range(100):
+            if ten_status.json()["status"] not in {"ACCEPTED", "RUNNING"}:
+                break
+            ten_status = client.get(ten_minute.json()["status_url"])
+        assert ten_status.json()["status"] == "NOT_FOUND"
+        assert ten_status.json()["schema_version"] == 8
     restarted = FastAPI()
     install_recording_search_routes(restarted, None, CapacityLimiter(2), phase7e_service=service)
     with TestClient(restarted) as client:

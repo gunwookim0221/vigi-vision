@@ -163,6 +163,11 @@ def install_recording_search_routes(  # noqa: C901 - explicit legacy/Phase 7E di
         phase7e_manager,
     )
     app.state.phase7e_recording_search = phase7e_service is not None
+    app.state.phase7e_successor_readiness = (
+        None
+        if phase7e_service is None
+        else getattr(phase7e_service, "successor_readiness", "unavailable")
+    )
     app.state.phase7e_background_manager = phase7e_manager
     router = APIRouter(prefix="/api/v1/recording-searches", tags=["recording-searches"])
 
@@ -341,6 +346,11 @@ def _phase7e_error_response(error: Phase7EPublicError) -> JSONResponse:
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "recording_search_unavailable",
             "Recording search is unavailable.",
+        ),
+        "successor_unavailable": (
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "successor_unavailable",
+            "The long-range recording search is unavailable.",
         ),
         "acquisition_failed": (
             status.HTTP_503_SERVICE_UNAVAILABLE,

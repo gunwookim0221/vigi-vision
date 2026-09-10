@@ -67,6 +67,8 @@
     confirmation_corrupt: "확인된 조사 기록이 손상되었습니다.",
     search_run_corrupt: "검색 실행 기록이 손상되었습니다.",
     recording_search_unavailable: "녹화 기록 검색을 사용할 수 없습니다.",
+    successor_unavailable: "장시간 녹화 검색 기능을 준비할 수 없습니다. 서버 설정을 확인하세요.",
+    recording_unavailable: "해당 검색 범위의 녹화 기록을 충분히 확인할 수 없습니다.",
     status_confirmation_failed: "검색 상태를 확인할 수 없습니다.",
     search_run_not_found: "접수된 검색 실행을 찾을 수 없습니다.",
     internal_error: "검색 작업을 안전하게 완료할 수 없습니다.",
@@ -499,6 +501,8 @@
       VISUAL_INDETERMINATE: "사용 가능한 화면만으로 대상의 존재 여부를 신뢰성 있게 판단할 수 없습니다.",
       INCOMPLETE_VISUAL_EVIDENCE: "판정에 필요한 화면 증거가 충분하지 않습니다.",
       BASELINE_ONLY_LOWER_BOUND: "기준 화면 이후의 존재 증거가 충분하지 않습니다.",
+      recording_unavailable: "해당 검색 범위의 녹화 기록을 충분히 확인할 수 없습니다.",
+      successor_unavailable: "장시간 녹화 검색 기능을 준비할 수 없습니다. 서버 설정을 확인하세요.",
     };
     resultReason.textContent = reasons[payload.reason_code]
       ?? (payload.reason_code === null ? "서버가 추가 사유를 제공하지 않았습니다." : "서버가 제공한 안전한 결과 사유가 있습니다.");

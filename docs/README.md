@@ -44,9 +44,10 @@ documentation route is added, removed, or relocated.
   schema-4 publication, strict reopen/status projection, and D2-5 Phase 8
   request boundary. FOUND reopen independently rebuilds the persisted D1
   reconstruction against the live schema-3 evidence. The same document now
-  contains the single Phase 7E normative design: request-relative timing, one
-  replay/decode session and SDK segment, a five-minute default and 600-second
-  maximum, pre-acquisition schema 5, incremental schema 6, immutable schema 7,
+  contains the single Phase 7E normative design: request-relative timing, the
+  legacy one-segment schemas 5–7 with a five-minute default and 600-second
+  maximum, and successor 10-minute-to-2-hour multi-segment requests,
+  pre-acquisition schema 5, incremental schema 6, immutable schema 7,
   26 domain-separated identity families with full classifier evidence, a
   binary-complete conformance fixture, an exact 2,520-second deadline, and a
   closed-state Phase 8 repository whose semantic clip ID is separate from MP4

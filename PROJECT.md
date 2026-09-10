@@ -276,7 +276,9 @@ implementation slices are normative in
 [`docs/design/object-disappearance-recording-search.md`](docs/design/object-disappearance-recording-search.md#phase-7e-mvp-realignment-and-successor-boundary).
 Successor Slices 1–6 are now implemented as a planning, short-target
 acquisition, coarse-classification, bounded binary-narrowing, durable local
-HTTP/background execution, and browser integration chain. Slice 5
+HTTP/background execution, and browser integration chain. New 10-minute-to-
+2-hour requests route through the successor multi-segment executor; existing
+legacy Schema 5–7 runs remain reopenable without silent fallback. Slice 5
 publishes/reopens a versioned successor terminal record with explicit interval,
 coverage, and `NOT_REQUESTED` Phase 8 state while preserving the legacy Schema
 5–7 path. Slice 6 exposes the successor range controls, bounded polling, reload

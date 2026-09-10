@@ -181,6 +181,7 @@ def _safe_error(code: str) -> None:
     messages = {
         "unsupported_source": "Recording search is available only for NVR sources.",
         "recording_search_execution_unavailable": "Recording search execution is unavailable.",
+        "successor_unavailable": "Long-range recording search is unavailable.",
         "classifier_unavailable": "The recording classifier is unavailable.",
         "recording_search_status_unavailable": "Recording search status is unavailable.",
         "baseline_unavailable": "The confirmed investigation baseline is unavailable.",

@@ -173,16 +173,19 @@ ABSENT observations, bounded interval, policy identity, and target-level
 unavailable/incomplete completion. The MVP stops at 30 seconds or six
 iterations; gaps, indeterminate observations, unavailable acquisition, and
 classifier failures close safely without inventing a boundary. Slice 5 now
-composes this chain behind the existing HTTP/background boundary for requests
-over the legacy 600-second cap, publishes an atomic Schema 8 successor
-terminal record, reopens status after restart, and keeps Phase 8 explicitly
-`NOT_REQUESTED`. Slice 6 connects the successor horizon to the existing browser
+composes this chain behind the existing HTTP/background boundary for every new
+10-minute-to-2-hour request, publishes an atomic Schema 8 successor terminal
+record, reopens status after restart, and keeps Phase 8 explicitly
+`NOT_REQUESTED`. If successor composition is unavailable, admission returns a
+credential-free 503 rather than falling back to the legacy executor. Slice 6
+connects the successor horizon to the existing browser
 shell: it provides 10-minute, 30-minute, 1-hour, and 2-hour quick ranges with a
 30-minute default, validates the source-timezone end bound, keeps exact
 investigation/run polling isolated through bounded retries, restores RUNNING and
 Schema 8 terminal states after reload, and renders localized interval and
-coverage facts using text-only DOM updates. The legacy Schema 5–7 path is
-unchanged. Final human real-NVR acceptance remains unimplemented:
+coverage facts using text-only DOM updates. The legacy Schema 5–7 path remains
+available for reopening existing runs and is not used as a silent fallback for
+new successor requests. Final human real-NVR acceptance remains unimplemented:
 
 | Slice | User-visible outcome | Minimum tests | Acceptance criterion | Deferred hardening |
 | --- | --- | --- | --- | --- |
@@ -252,9 +255,11 @@ contract.
 The legacy requested interval is half-open `[S,E)`. Its default duration is
 `300` seconds and its exact maximum is `600` seconds. Duration is a positive
 integer; strings, fractions, alternate units, zero, and values above `600` fail
-before a legacy run directory is created. Successor requests use the same
-half-open interval with a 1,800-second browser default and a 7,200-second
-maximum, represented by the multi-segment planner. Exactly one SDK segment must satisfy
+before a legacy run directory is created. New browser/API requests from 600
+through 7,200 seconds use the successor half-open interval with a 1,800-second
+browser default and a 7,200-second maximum, represented by the multi-segment
+planner. Existing legacy Schema 5–7 runs remain reopenable through their
+original repository. For legacy execution, exactly one SDK segment must satisfy
 `segment_start <= S < E <= segment_end`. A touching next segment is never read.
 
 The Phase 6 schema-3 confirmation supplies the historical baseline and

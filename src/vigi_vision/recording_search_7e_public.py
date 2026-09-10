@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from secrets import token_hex
@@ -62,6 +64,7 @@ from vigi_vision.recording_search_7e_repository import (
 from vigi_vision.recording_search_7e_validation import Phase7EValidationError
 from vigi_vision.recording_search_b3_media import InMemoryRgbDecoder
 from vigi_vision.recording_search_successor import (
+    SuccessorPlanError,
     SuccessorPlanRequest,
     SuccessorPlanService,
 )
@@ -210,6 +213,9 @@ class Phase7EPublicError(RuntimeError):
 
 _MAX_SEARCH_SECONDS = 600
 _MAX_STARTUP_RECOVERY_RUNS = 1024
+_SUCCESSOR_CONFIGURED = "configured"
+_SUCCESSOR_UNAVAILABLE = "unavailable"
+_LOGGER = logging.getLogger("uvicorn.error.vigi_vision.phase7e")
 
 
 def _execution_public_error(
@@ -430,6 +436,7 @@ class Phase7EPublicService:
     now_utc: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     media_probe: object | None = None
     successor_execution: SuccessorExecutionService | None = None
+    successor_readiness: str = _SUCCESSOR_UNAVAILABLE
 
     def execute(
         self,
@@ -473,7 +480,7 @@ class Phase7EPublicService:
             run_id=f"search-run-{request_id.replace('-', '')}",
         )
 
-    def prepare(  # noqa: C901, PLR0912 - strict boundary validation is intentionally explicit.
+    def prepare(  # noqa: C901, PLR0912, PLR0915 - strict boundary validation is intentionally explicit.
         self,
         investigation_id: str,
         search_end_time_text: str,
@@ -510,9 +517,7 @@ class Phase7EPublicService:
             raise Phase7EPublicError("invalid_request") from error
         if duration_seconds != int(duration_seconds) or duration_seconds <= 0:
             raise Phase7EPublicError("invalid_request")
-        if duration_seconds > _MAX_SEARCH_SECONDS:
-            if self.successor_execution is None:
-                raise Phase7EPublicError("invalid_request")
+        if duration_seconds >= _MAX_SEARCH_SECONDS:
             try:
                 successor_request = SuccessorPlanRequest.from_text(
                     channel_id=confirmed.channel_id,
@@ -521,6 +526,11 @@ class Phase7EPublicService:
                     source_timezone=confirmed.source_timezone,
                     now_utc=self.now_utc(),
                 )
+            except (SuccessorPlanError, TypeError, ValueError) as error:
+                raise Phase7EPublicError("invalid_request") from error
+            if self.successor_execution is None:
+                raise Phase7EPublicError("successor_unavailable")
+            try:
                 successor = self.successor_execution.prepare(
                     confirmed,
                     search_end_time_text=search_end_time_text,
@@ -537,7 +547,7 @@ class Phase7EPublicService:
             except NvrRequestError as error:
                 raise Phase7EPublicError("acquisition_failed") from error
             except Exception as error:
-                raise Phase7EPublicError("invalid_request") from error
+                raise Phase7EPublicError("successor_unavailable") from error
             if successor.plan.search_end_utc != successor_request.search_end_utc:
                 raise Phase7EPublicError("request_conflict")
             return Phase7EPreparedRequest(
@@ -932,6 +942,8 @@ def build_phase7e_service(
     )
     executor = Phase7E1CExecutor(repository, acquirer)
     successor_execution = None
+    successor_readiness = _SUCCESSOR_UNAVAILABLE
+    successor_failure_stage = "classifier_wiring"
     try:
         if mask_predictor is not None:
             from vigi_vision.recording_search_7e_b4 import _worker_spec
@@ -974,8 +986,25 @@ def build_phase7e_service(
                 InMemoryRgbDecoder(ffmpeg),
                 SuccessorTerminalRepository(root / ".successor"),
             )
+            successor_readiness = _SUCCESSOR_CONFIGURED
+            successor_failure_stage = "none"
     except (TypeError, ValueError):
         successor_execution = None
+        successor_readiness = _SUCCESSOR_UNAVAILABLE
+        successor_failure_stage = "successor_wiring"
+    if successor_execution is None:
+        _LOGGER.warning(
+            "%s",
+            json.dumps(
+                {
+                    "event": "phase7e.successor_unavailable",
+                    "readiness": successor_readiness,
+                    "stage": successor_failure_stage,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
     return Phase7EPublicService(
         repository,
         executor,
@@ -1003,6 +1032,7 @@ def build_phase7e_service(
         now_utc or (lambda: datetime.now(timezone.utc)),
         FfprobeMediaProbe(ffprobe),
         successor_execution,
+        successor_readiness,
     )
 
 

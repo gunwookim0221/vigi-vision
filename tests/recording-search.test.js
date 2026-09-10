@@ -127,6 +127,62 @@ test("confirmed workflow submits only the closed start body and blocks a double 
   assert.equal(harness.recordingSearchStatus.textContent, "검색 중입니다.");
 });
 
+test("successor admission failure is shown as a safe configuration message", async () => {
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({
+        ok: false,
+        status: 503,
+        json: async () => ({
+          error: {
+            code: "successor_unavailable",
+            message: "The long-range recording search is unavailable.",
+            details: null,
+          },
+        }),
+      });
+    }
+    throw new Error("status must not be polled after admission failure");
+  }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+
+  assert.equal(
+    harness.recordingSearchStatus.textContent,
+    "장시간 녹화 검색 기능을 준비할 수 없습니다. 서버 설정을 확인하세요.",
+  );
+  assert.equal(harness.recordingSearchResult.hidden, true);
+  assert.equal(harness.window.vigiVisionRecordingSearch.getState().polling, false);
+});
+
+test("recording-unavailable terminal reason is rendered with its fixed explanation", async () => {
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: async () => status("FAILED", "recording_unavailable"),
+    });
+  }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+
+  assert.equal(
+    harness.recordingSearchResultReason.textContent,
+    "해당 검색 범위의 녹화 기록을 충분히 확인할 수 없습니다.",
+  );
+});
+
 test("restored search defaults to a 30-minute range and exposes keyboard quick ranges", async () => {
   const harness = createHarness(() => Promise.resolve({ ok: true, status: 200, json: async () => status("RUNNING") }), undefined, {
     confirmation: true,
