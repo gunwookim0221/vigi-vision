@@ -1,16 +1,18 @@
 """Temporary MP4 extraction for credential-free NVR replay requests."""
 
+import json
 import logging
 import math
 import os
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from threading import Event, Thread
 from time import perf_counter
 from typing import final
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -29,7 +31,27 @@ from vigi_vision.replay_progress import (
 _STARTUP_ALLOWANCE_SECONDS = 30.0
 _FINALIZATION_MARGIN_SECONDS = 10.0
 _REPLAY_TIMEOUT_MULTIPLIER = 3.0
+_PROGRESS_POLL_INTERVAL_SECONDS = 0.5
+_PROGRESS_SAMPLE_INTERVAL_SECONDS = 10.0
+_MAX_OUTPUT_PROGRESS_EVENTS = 16
+_OUTPUT_GROWTH_THRESHOLD_BYTES = 4 * 1024
 _LOGGER = logging.getLogger(__name__)
+_PROGRESS_LOGGER = logging.getLogger("uvicorn.error.vigi_vision.phase7e")
+
+_REPLAY_PROGRESS_STAGES = frozenset(
+    {
+        "started",
+        "first_output",
+        "output_progress",
+        "process_exited",
+        "timeout_started",
+        "termination_requested",
+        "termination_completed",
+        "cleanup_completed",
+    }
+)
+_REPLAY_TERMINATION_STAGES = frozenset({"none", "requested", "completed", "cleanup"})
+_REPLAY_CLEANUP_OUTCOMES = frozenset({"not_required", "completed", "failed", "unknown"})
 
 ReplayRunner = Callable[[tuple[str, ...], float], subprocess.CompletedProcess[str]]
 
@@ -100,10 +122,213 @@ class ReplayClip:
     replay_url: str = field(repr=False)
     temporary_mp4_path: Path = field(repr=False)
     duration_seconds: int
+    _cleanup_callback: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
     def remove(self) -> None:
         """Remove the consumer-owned temporary MP4."""
-        self.temporary_mp4_path.unlink(missing_ok=True)
+        try:
+            self.temporary_mp4_path.unlink(missing_ok=True)
+        finally:
+            if self._cleanup_callback is not None:
+                self._cleanup_callback()
+
+
+@dataclass(slots=True)
+class _ReplayLifecycle:
+    """Process-local safe replay lifecycle and output-growth observation."""
+
+    request: ReplayRequest
+    output_path: Path
+    deadline_seconds: float
+    diagnostics: ReplayProgressDiagnostics | None
+    started_at: float = field(default_factory=perf_counter)
+    output_created: bool = False
+    last_size_bytes: int = 0
+    total_growth_bytes: int = 0
+    last_growth_at: float | None = None
+    last_progress_log_at: float | None = None
+    output_progress_events: int = 0
+    emitted_stages: set[str] = field(default_factory=set)
+    process_running: bool = False
+    stop_event: Event = field(default_factory=Event, repr=False)
+    monitor_thread: Thread | None = field(default=None, repr=False)
+
+    def start(self) -> None:
+        """Emit start facts and begin bounded output polling."""
+        self.process_running = True
+        self._emit("started", termination_stage="none")
+        try:
+            self.monitor_thread = Thread(
+                target=self._monitor_output,
+                name="vigi-replay-output-progress",
+                daemon=True,
+            )
+            self.monitor_thread.start()
+        except Exception:  # noqa: BLE001  # Instrumentation must never alter replay behavior.
+            self.monitor_thread = None
+
+    def process_exited(self, exit_code: int | None) -> None:
+        """Record process completion without retaining native output."""
+        self.stop()
+        self._observe_output(force_progress=True)
+        self.process_running = False
+        self._emit("process_exited", exit_code=exit_code, termination_stage="none")
+
+    def timeout_started(self) -> None:
+        """Record that the bounded deadline expired."""
+        self.stop()
+        self._observe_output(force_progress=True)
+        self._emit("timeout_started", termination_stage="none")
+
+    def termination_requested(self) -> None:
+        """Record the bounded child-termination request."""
+        self._emit("termination_requested", termination_stage="requested")
+
+    def termination_completed(self) -> None:
+        """Record that child termination/reaping completed."""
+        self.process_running = False
+        self._emit("termination_completed", termination_stage="completed")
+
+    def cleanup_completed(self, outcome: str) -> None:
+        """Record invocation-owned output cleanup."""
+        safe_outcome = outcome if outcome in _REPLAY_CLEANUP_OUTCOMES else "unknown"
+        self._observe_output(force_progress=True)
+        self._emit(
+            "cleanup_completed",
+            termination_stage="cleanup",
+            cleanup_outcome=safe_outcome,
+        )
+
+    def stop(self) -> None:
+        """Stop the polling thread without affecting replay state."""
+        try:
+            self.stop_event.set()
+            thread = self.monitor_thread
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=1.0)
+        except Exception:  # noqa: BLE001  # Instrumentation must never alter replay behavior.
+            return
+
+    def _monitor_output(self) -> None:
+        while not self.stop_event.is_set():
+            self._observe_output(force_progress=False)
+            _ = self.stop_event.wait(_PROGRESS_POLL_INTERVAL_SECONDS)
+
+    def _observe_output(self, *, force_progress: bool) -> None:
+        now = perf_counter()
+        try:
+            size_bytes = self.output_path.stat().st_size
+            is_file = self.output_path.is_file()
+        except OSError:
+            size_bytes = 0
+            is_file = False
+        if not is_file:
+            return
+        if size_bytes <= 0:
+            return
+        growth_bytes = max(0, size_bytes - self.last_size_bytes)
+        if growth_bytes:
+            self.total_growth_bytes += growth_bytes
+            self.last_growth_at = now
+        self.last_size_bytes = max(self.last_size_bytes, size_bytes)
+        if not self.output_created:
+            self.output_created = True
+            self._emit("first_output", termination_stage="none")
+        if (
+            not growth_bytes
+            and not force_progress
+            and self.last_progress_log_at is not None
+            and now - self.last_progress_log_at < _PROGRESS_SAMPLE_INTERVAL_SECONDS
+        ):
+            return
+        should_log_growth = bool(growth_bytes) and (
+            self.output_progress_events == 0 or growth_bytes >= _OUTPUT_GROWTH_THRESHOLD_BYTES
+        )
+        should_log_sample = (
+            force_progress
+            or self.last_progress_log_at is None
+            or now - self.last_progress_log_at >= _PROGRESS_SAMPLE_INTERVAL_SECONDS
+        )
+        if not (should_log_growth or should_log_sample):
+            return
+        if self.output_progress_events >= _MAX_OUTPUT_PROGRESS_EVENTS:
+            return
+        self.output_progress_events += 1
+        self.last_progress_log_at = now
+        self._emit(
+            "output_progress",
+            output_growth_bytes=growth_bytes,
+            termination_stage="none",
+        )
+
+    def _emit(
+        self,
+        stage: str,
+        *,
+        exit_code: int | None = None,
+        output_growth_bytes: int = 0,
+        termination_stage: str = "none",
+        cleanup_outcome: str = "not_required",
+    ) -> None:
+        if stage not in _REPLAY_PROGRESS_STAGES:
+            return
+        if termination_stage not in _REPLAY_TERMINATION_STAGES:
+            termination_stage = "none"
+        if cleanup_outcome not in _REPLAY_CLEANUP_OUTCOMES:
+            cleanup_outcome = "unknown"
+        if stage != "output_progress" and stage in self.emitted_stages:
+            return
+        self.emitted_stages.add(stage)
+        elapsed_ms = round((perf_counter() - self.started_at) * 1_000)
+        last_growth_elapsed_ms = (
+            None
+            if self.last_growth_at is None
+            else max(0, round((self.last_growth_at - self.started_at) * 1_000))
+        )
+        progress_ms = _progress_milliseconds(self.diagnostics)
+        payload = {
+            "event": "phase7e.replay_progress",
+            "stage": stage,
+            "channel_id": self.request.window.channel_id,
+            "window_start_utc": self.request.window.start_utc.isoformat(),
+            "window_end_utc": self.request.window.end_utc.isoformat(),
+            "requested_duration_seconds": self.request.window.duration_seconds,
+            "deadline_ms": round(self.deadline_seconds * 1_000),
+            "elapsed_ms": elapsed_ms,
+            "output_created": self.output_created,
+            "output_size_bytes": self.last_size_bytes,
+            "output_growth_bytes": output_growth_bytes,
+            "last_output_growth_elapsed_ms": last_growth_elapsed_ms,
+            "ffmpeg_out_time_ms": progress_ms,
+            "process_running": self.process_running,
+            "exit_code": exit_code,
+            "termination_stage": termination_stage,
+            "cleanup_outcome": cleanup_outcome,
+        }
+        _safe_replay_log(payload)
+
+
+def _progress_milliseconds(diagnostics: ReplayProgressDiagnostics | None) -> int | None:
+    if diagnostics is None:
+        return None
+    try:
+        summary = diagnostics.summary(now=perf_counter())
+    except Exception:  # noqa: BLE001  # Logging must never alter replay behavior.
+        return None
+    if summary.highest_media_time_us is None:
+        return None
+    return summary.highest_media_time_us // 1_000
+
+
+def _safe_replay_log(payload: Mapping[str, object]) -> None:
+    """Emit only the closed replay-progress vocabulary; never fail replay."""
+    try:
+        _PROGRESS_LOGGER.info(
+            "phase7e.replay_progress %s",
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        )
+    except Exception:  # noqa: BLE001  # A logging sink is outside replay authority.
+        return
 
 
 def _run_ffmpeg(
@@ -136,7 +361,7 @@ class ReplayExtractor:
         """Extract one bounded MP4 from a credential-free replay request."""
         return self.extract_with_timeout(request, None)
 
-    def extract_with_timeout(  # noqa: C901
+    def extract_with_timeout(  # noqa: C901, PLR0912, PLR0915
         self,
         request: ReplayRequest,
         timeout_seconds: float | None,
@@ -156,6 +381,7 @@ class ReplayExtractor:
             if self.progress_diagnostics
             else None
         )
+        lifecycle: _ReplayLifecycle | None = None
         try:
             arguments = self._arguments(request, output_path)
             normal_timeout = effective_replay_timeout_seconds(
@@ -169,8 +395,14 @@ class ReplayExtractor:
                 if timeout_seconds is None
                 else min(float(normal_timeout), timeout_seconds)
             )
+            lifecycle = _ReplayLifecycle(request, output_path, effective_timeout, diagnostics)
+            lifecycle.start()
             completed = self._run(arguments, effective_timeout, diagnostics)
         except subprocess.TimeoutExpired:
+            if lifecycle is not None:
+                lifecycle.timeout_started()
+                lifecycle.termination_requested()
+                lifecycle.termination_completed()
             try:
                 partial_output_bytes = output_path.stat().st_size
             except OSError:
@@ -193,21 +425,36 @@ class ReplayExtractor:
                     diagnostics.summary(now=perf_counter()),
                 )
             self._preserve_timeout_partial(request, output_path)
+            if lifecycle is not None:
+                lifecycle.cleanup_completed("completed" if not output_path.exists() else "failed")
             raise ReplayTimeoutError from None
         except OSError:
             _remove_partial(output_path)
+            if lifecycle is not None:
+                lifecycle.process_exited(None)
+                lifecycle.cleanup_completed("completed" if not output_path.exists() else "failed")
             raise ReplayExtractionError from None
         except ReplayExtractionError:
             _remove_partial(output_path)
+            if lifecycle is not None:
+                lifecycle.process_exited(None)
+                lifecycle.cleanup_completed("completed" if not output_path.exists() else "failed")
             raise
         except KeyboardInterrupt:
             _remove_partial(output_path)
+            if lifecycle is not None:
+                lifecycle.termination_requested()
+                lifecycle.termination_completed()
+                lifecycle.cleanup_completed("completed" if not output_path.exists() else "failed")
             raise
+        lifecycle.process_exited(completed.returncode)
         if completed.returncode != 0:
             _remove_partial(output_path)
+            lifecycle.cleanup_completed("completed" if not output_path.exists() else "failed")
             raise _process_error(completed.stderr)
         if not _is_nonempty_file(output_path):
             _remove_partial(output_path)
+            lifecycle.cleanup_completed("completed" if not output_path.exists() else "failed")
             raise ReplayExtractionError
         return ReplayClip(
             channel_id=request.window.channel_id,
@@ -216,6 +463,11 @@ class ReplayExtractor:
             replay_url=request.replay_url,
             temporary_mp4_path=output_path,
             duration_seconds=request.window.duration_seconds,
+            _cleanup_callback=(
+                lambda: lifecycle.cleanup_completed(
+                    "completed" if not output_path.exists() else "failed"
+                )
+            ),
         )
 
     def _temporary_path(self) -> Path:

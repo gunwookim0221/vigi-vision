@@ -71,12 +71,22 @@ MP4:
 
 ### Replay progress diagnostics
 
+Every replay invocation also emits a bounded, process-local
+`phase7e.replay_progress` lifecycle event through the Uvicorn error logger.
+The events cover start, first non-empty output, sampled output growth, process
+exit, timeout/termination, and invocation-owned cleanup. They contain only the
+channel, UTC window, duration/deadline/elapsed facts, output byte facts, safe
+media-progress facts when available, process state, exit code, and closed
+termination/cleanup values. Output-progress events are capped per replay and
+the logger is best effort, so observability cannot change replay behavior.
+
 When `VIGI_REPLAY_PROGRESS_DIAGNOSTICS=true` is set, `ReplayExtractor`
 delegates to `run_ffmpeg_with_progress` in
 [replay_progress.py](../../src/vigi_vision/replay_progress.py). This runs
 ffmpeg with its machine-readable progress stream, collects bounded aggregates
 in `ReplayProgressDiagnostics` (frame count, output media time, output size,
-progress/stall ages), and logs only an allowlisted summary on timeout.
+progress/stall ages), which is included as a safe media-progress field in the
+lifecycle events and the existing timeout summary.
 
 When `VIGI_REPLAY_TIMEOUT_DIAGNOSTIC_DIRECTORY` is set, timeout partials
 are copied (not moved) to that directory with a diagnostic filename for

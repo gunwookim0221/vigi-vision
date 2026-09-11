@@ -56,11 +56,18 @@ default, does not preserve non-timeout failures, and the operator must remove
 the diagnostic file after local inspection.
 
 `VIGI_REPLAY_PROGRESS_DIAGNOSTICS=true` is a separate, disabled-by-default
-loopback reference-frame diagnostic. It adds FFmpeg's machine-readable progress
-stream and logs only bounded aggregates on timeout: frame, output media time,
-output size, progress/stall ages, duration reachability, and `progress=end`.
-It does not preserve media, change timeout/retry/container behavior, or expose
-progress data through the API, browser, manifests, or artifacts. Run
+loopback reference-frame diagnostic. Independently of that flag, every replay
+emits bounded `phase7e.replay_progress` lifecycle events through the Uvicorn
+error logger for start, first non-empty output, sampled output growth, process
+exit, timeout/termination, and cleanup. These events contain only safe channel,
+UTC window, deadline/elapsed, byte-growth, optional media-progress, process,
+exit, and closed cleanup facts; output samples are capped and logging failures
+are ignored. The flag additionally adds FFmpeg's machine-readable progress
+stream, whose bounded aggregates (frame, output media time, output size,
+progress/stall ages, duration reachability, and `progress=end`) are included in
+those events and the existing timeout summary. It does not preserve media,
+change timeout/retry/container behavior, or expose progress data through the
+API, browser, manifests, or artifacts. Run
 `tools/reference-frame-replay-progress.ps1` for the local NVR procedure; it
 prints only the allowlisted summary and removes its temporary server logs.
 
