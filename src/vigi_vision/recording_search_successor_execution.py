@@ -35,9 +35,11 @@ from vigi_vision.recording_search_7e_b4_process import (
 )
 from vigi_vision.recording_search_b3_models import ClassificationPreparationError
 from vigi_vision.recording_search_successor import (
+    CoarseTargetAssignment,
     MultiSegmentCoarsePlan,
     SuccessorPlanRequest,
     SuccessorPlanService,
+    TargetAvailability,
 )
 from vigi_vision.recording_search_successor_acquisition import (
     SuccessorTargetAcquisitionResult,
@@ -53,6 +55,7 @@ from vigi_vision.recording_search_successor_classification import (
     SuccessorCoarseClassificationService,
     SuccessorObservation,
     SuccessorObservationState,
+    reidentify_observation,
 )
 from vigi_vision.recording_search_successor_narrowing import (
     SuccessorBinaryNarrowingResult,
@@ -108,6 +111,10 @@ class SuccessorPreparedExecution:
     request: SuccessorRequest
     plan: MultiSegmentCoarsePlan
     authority: SuccessorClassificationAuthority
+    baseline_time_utc: datetime
+    baseline_pts_seconds: float | None
+    baseline_timing_precision_status: str
+    baseline_warnings: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +143,7 @@ class SuccessorTerminal:
     coarse_observation_ids: tuple[str, ...] = ()
     coarse_target_ids: tuple[str, ...] = ()
     target_statuses: tuple[str, ...] = ()
+    coarse_observations: tuple[dict[str, object], ...] = ()
 
     def as_record(self) -> dict[str, object]:
         return {
@@ -163,6 +171,7 @@ class SuccessorTerminal:
             "coarse_observation_ids": list(self.coarse_observation_ids),
             "coarse_target_ids": list(self.coarse_target_ids),
             "target_statuses": list(self.target_statuses),
+            "coarse_observations": list(self.coarse_observations),
         }
 
 
@@ -393,9 +402,13 @@ class SuccessorExecutionService:
             ),
             plan,
             authority,
+            confirmed.requested_time_utc,
+            confirmed.decoded_local_pts_seconds,
+            confirmed.timing_precision_status,
+            confirmed.warnings,
         )
 
-    def execute(
+    def execute(  # noqa: C901, PLR0911
         self,
         prepared: SuccessorPreparedExecution,
         *,
@@ -404,31 +417,42 @@ class SuccessorExecutionService:
         self.publisher.publish_running(prepared)
         try:
             acquisitions: list[SuccessorTargetAcquisitionResult] = []
+            if cancellation is not None and cancellation():
+                return self._publish_interrupted(prepared)
+            anchor_target = _anchor_target(prepared.plan)
+            anchor_acquisition = self.acquisition.acquire_anchor(prepared.plan, anchor_target)
+            anchor_observation = self.classification.classify_anchor_target(
+                prepared.plan, anchor_target, anchor_acquisition, prepared.authority
+            )
             for target in prepared.plan.targets:
                 if cancellation is not None and cancellation():
                     return self._publish_interrupted(prepared)
                 acquisitions.append(self.acquisition.acquire(prepared.plan, target))
             acquired = tuple(acquisitions)
             coarse = self.classification.classify_plan(prepared.plan, acquired, prepared.authority)
-            augmented = _with_anchor_observation(prepared, coarse)
-            if prepared.plan.gaps or any(
+            augmented = _with_anchor_observation(prepared, coarse, anchor_observation)
+            if any(
                 item.state
                 not in {SuccessorObservationState.PRESENT, SuccessorObservationState.ABSENT}
                 for item in augmented.observations
             ):
                 return self._publish_inconclusive(
                     prepared,
-                    "incomplete_coverage" if prepared.plan.gaps else "indeterminate_observation",
+                    _inconclusive_reason(prepared.plan, augmented.observations),
                     augmented,
                 )
             bracket = augmented.candidate_bracket
             if bracket is None:
+                if prepared.plan.gaps:
+                    return self._publish_inconclusive(prepared, "incomplete_coverage", augmented)
                 if all(
                     item.state is SuccessorObservationState.PRESENT
                     for item in augmented.observations
                 ):
                     return self._publish_not_found(prepared, augmented)
                 return self._publish_inconclusive(prepared, "no_present_absent_bracket", augmented)
+            if _bracket_intersects_gap(prepared.plan, bracket):
+                return self._publish_inconclusive(prepared, "incomplete_coverage", augmented)
             narrowed = self.narrowing.narrow(prepared.plan, augmented, prepared.authority)
             if narrowed.completion is not SuccessorNarrowingCompletion.NARROWED:
                 return self._publish_inconclusive(
@@ -463,32 +487,35 @@ class SuccessorExecutionService:
         coarse: SuccessorCoarseClassificationResult,
         narrowed: SuccessorBinaryNarrowingResult,
     ) -> SuccessorTerminal:
-        terminal = self._base_terminal(prepared, "FOUND", "disappearance_confirmed", True)
+        terminal = self._base_terminal(
+            prepared, "FOUND", "disappearance_confirmed", not prepared.plan.gaps
+        )
+        observations = _observation_bundle(coarse, narrowed)
         terminal = replace(
             terminal,
-            terminal_result_id=_digest_terminal(
-                {
-                    "plan": prepared.plan.plan_id,
-                    "narrowing": narrowed.narrowing_id,
-                    "status": "FOUND",
-                }
-            ),
             last_present_time_utc=_timestamp(narrowed.last_present_frame_utc),
             first_absent_time_utc=_timestamp(narrowed.first_absent_frame_utc),
             observed_end_time_utc=_timestamp(narrowed.first_absent_frame_utc),
             narrowing_id=narrowed.narrowing_id,
-            coarse_observation_ids=tuple(item.observation_id for item in coarse.observations),
-            coarse_target_ids=tuple(item.target_id for item in coarse.observations),
-            target_statuses=tuple(item.acquisition_status.value for item in coarse.observations),
+            coarse_observation_ids=tuple(item.observation_id for item in observations),
+            coarse_target_ids=tuple(item.target_id for item in observations),
+            target_statuses=tuple(item.acquisition_status.value for item in observations),
+            coarse_observations=tuple(_observation_record(item) for item in observations),
+        )
+        terminal = replace(
+            terminal,
+            observed_start_time_utc=_observed_start(observations, terminal.observed_start_time_utc),
+            terminal_result_id=_digest_terminal(
+                {**terminal.as_record(), "terminal_result_id": None}
+            ),
         )
         return self.publisher.publish_terminal(terminal)
 
     def _publish_not_found(
         self, prepared: SuccessorPreparedExecution, coarse: SuccessorCoarseClassificationResult
     ) -> SuccessorTerminal:
-        observed = tuple(
-            item.frame_utc for item in coarse.observations if item.frame_utc is not None
-        )
+        observations = _observation_bundle(coarse)
+        observed = tuple(item.frame_utc for item in observations if item.frame_utc is not None)
         terminal = self._base_terminal(prepared, "NOT_FOUND", "complete_present_coverage", True)
         terminal = replace(
             terminal,
@@ -498,9 +525,17 @@ class SuccessorExecutionService:
             observed_end_time_utc=_timestamp(
                 max(observed) if observed else prepared.request.end_utc
             ),
-            coarse_observation_ids=tuple(item.observation_id for item in coarse.observations),
-            coarse_target_ids=tuple(item.target_id for item in coarse.observations),
-            target_statuses=tuple(item.acquisition_status.value for item in coarse.observations),
+            coarse_observation_ids=tuple(item.observation_id for item in observations),
+            coarse_target_ids=tuple(item.target_id for item in observations),
+            target_statuses=tuple(item.acquisition_status.value for item in observations),
+            coarse_observations=tuple(_observation_record(item) for item in observations),
+        )
+        terminal = replace(
+            terminal,
+            observed_start_time_utc=_observed_start(observations, terminal.observed_start_time_utc),
+            terminal_result_id=_digest_terminal(
+                {**terminal.as_record(), "terminal_result_id": None}
+            ),
         )
         return self.publisher.publish_terminal(terminal)
 
@@ -512,15 +547,23 @@ class SuccessorExecutionService:
         narrowed: SuccessorBinaryNarrowingResult | None = None,
     ) -> SuccessorTerminal:
         terminal = self._base_terminal(prepared, "INCONCLUSIVE", reason, False)
+        observations = _observation_bundle(coarse, narrowed)
         terminal = replace(
             terminal,
             terminal_result_id=_digest_terminal(
                 {"plan": prepared.plan.plan_id, "status": "INCONCLUSIVE", "reason": reason}
             ),
             narrowing_id=None if narrowed is None else narrowed.narrowing_id,
-            coarse_observation_ids=tuple(item.observation_id for item in coarse.observations),
-            coarse_target_ids=tuple(item.target_id for item in coarse.observations),
-            target_statuses=tuple(item.acquisition_status.value for item in coarse.observations),
+            coarse_observation_ids=tuple(item.observation_id for item in observations),
+            coarse_target_ids=tuple(item.target_id for item in observations),
+            target_statuses=tuple(item.acquisition_status.value for item in observations),
+            coarse_observations=tuple(_observation_record(item) for item in observations),
+        )
+        terminal = replace(
+            terminal,
+            terminal_result_id=_digest_terminal(
+                {**terminal.as_record(), "terminal_result_id": None}
+            ),
         )
         return self.publisher.publish_terminal(terminal)
 
@@ -570,47 +613,71 @@ class SuccessorExecutionService:
 def _with_anchor_observation(
     prepared: SuccessorPreparedExecution,
     coarse: SuccessorCoarseClassificationResult,
+    anchor_observation: SuccessorObservation,
 ) -> SuccessorCoarseClassificationResult:
-    """Bind the confirmed PRESENT baseline as the left edge of the search."""
-    anchor = SuccessorObservation(
+    """Bind the historical Phase 6 baseline and an actual anchor observation."""
+    policy_identity = anchor_observation.classifier_policy_identity or (
+        coarse.observations[0].classifier_policy_identity if coarse.observations else ""
+    )
+    baseline_time = prepared.baseline_time_utc
+    baseline_pts = prepared.baseline_pts_seconds
+    baseline_payload = {
+        "version": "phase7e-successor-historical-baseline-v1",
+        "plan_id": prepared.plan.plan_id,
+        "target_id": f"successor-baseline-v1-{hashlib.sha256((prepared.plan.plan_id + ':' + _timestamp(baseline_time)).encode()).hexdigest()}",
+        "requested_time_utc": _timestamp(baseline_time),
+        "frame_utc": _timestamp(baseline_time),
+        "frame_pts_seconds": baseline_pts,
+        "authority_identity": prepared.authority.authority_identity,
+        "reference_frame_resource_id": prepared.authority.reference_frame_resource_id,
+        "reference_frame_jpeg_sha256": prepared.authority.reference_frame_jpeg_sha256,
+        "roi_identity": prepared.authority.roi_identity,
+        "policy_identity": policy_identity,
+        "state": SuccessorObservationState.PRESENT.value,
+    }
+    baseline_id = (
+        "successor-observation-v1-"
+        + hashlib.sha256(
+            json.dumps(baseline_payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+    baseline = SuccessorObservation(
         prepared.plan.plan_id,
-        f"successor-anchor-v1-{hashlib.sha256(prepared.plan.plan_id.encode()).hexdigest()}",
-        f"successor-anchor-acquisition-v1-{hashlib.sha256(prepared.plan.plan_id.encode()).hexdigest()}",
+        baseline_payload["target_id"],
+        f"successor-baseline-acquisition-v1-{hashlib.sha256((prepared.plan.plan_id + ':' + _timestamp(baseline_time)).encode()).hexdigest()}",
         1,
-        prepared.plan.anchor_time_utc,
-        prepared.plan.anchor_time_utc,
-        0.0,
-        0.0,
+        baseline_time,
+        baseline_time,
+        baseline_pts,
+        None,
         prepared.authority.authority_identity,
         prepared.authority.reference_frame_resource_id,
         prepared.authority.roi_identity,
-        coarse.observations[0].classifier_policy_identity
-        if coarse.observations
-        else "successor-baseline-v1",
+        policy_identity,
         SuccessorTargetStatus.FRAME_AVAILABLE,
         SuccessorObservationState.PRESENT,
         None,
         1,
-        f"successor-observation-v1-{hashlib.sha256((prepared.plan.plan_id + ':anchor').encode()).hexdigest()}",
+        baseline_id,
+        prepared.baseline_timing_precision_status,
+        prepared.baseline_warnings,
+        prepared.authority.reference_frame_jpeg_sha256,
     )
+    anchor = reidentify_observation(anchor_observation, sequence=2, ordinal=2)
     shifted = tuple(
-        replace(item, sequence=item.sequence + 1, ordinal=item.ordinal + 1)
+        reidentify_observation(item, sequence=item.sequence + 2, ordinal=item.ordinal + 2)
         for item in coarse.observations
     )
-    observations = (anchor, *shifted)
+    observations = (baseline, anchor, *shifted)
     bracket = None
     for left, right in zip(observations, observations[1:], strict=False):
         if (
             left.state is SuccessorObservationState.PRESENT
             and right.state is SuccessorObservationState.ABSENT
+            and left.frame_utc is not None
+            and right.frame_utc is not None
         ):
-            bracket = (
-                type(coarse.candidate_bracket)(
-                    left.observation_id, right.observation_id, left.frame_utc, right.frame_utc
-                )
-                if coarse.candidate_bracket is not None
-                else _bracket(left, right)
-            )
+            bracket = _bracket(left, right)
             break
     return SuccessorCoarseClassificationResult(
         coarse.plan_id, coarse.authority_identity, observations, bracket
@@ -627,6 +694,97 @@ def _bracket(left: SuccessorObservation, right: SuccessorObservation) -> object:
     )
 
 
+def _anchor_target(plan: MultiSegmentCoarsePlan) -> CoarseTargetAssignment:
+    for segment in plan.segments:
+        if segment.start_utc <= plan.anchor_time_utc < segment.end_utc:
+            return CoarseTargetAssignment(
+                1,
+                plan.anchor_time_utc,
+                TargetAvailability.AVAILABLE,
+                segment.segment_id,
+                None,
+            )
+    for gap in plan.gaps:
+        if gap.start_utc <= plan.anchor_time_utc <= gap.end_utc:
+            return CoarseTargetAssignment(
+                1,
+                plan.anchor_time_utc,
+                TargetAvailability.UNAVAILABLE,
+                None,
+                gap,
+            )
+    raise SuccessorExecutionError("incomplete_coverage")
+
+
+def _inconclusive_reason(
+    plan: MultiSegmentCoarsePlan, observations: tuple[SuccessorObservation, ...]
+) -> str:
+    if plan.gaps or any(
+        item.state is SuccessorObservationState.UNAVAILABLE_GAP for item in observations
+    ):
+        return "incomplete_coverage"
+    for item in observations:
+        if item.state is SuccessorObservationState.INDETERMINATE:
+            return item.reason_code or "indeterminate_observation"
+        if item.state in {
+            SuccessorObservationState.CLASSIFIER_TIMEOUT,
+            SuccessorObservationState.CLASSIFIER_FAILED,
+            SuccessorObservationState.RECORDING_UNAVAILABLE,
+            SuccessorObservationState.REPLAY_TIMEOUT,
+            SuccessorObservationState.REPLAY_FAILED,
+            SuccessorObservationState.DECODE_TIMEOUT,
+            SuccessorObservationState.DECODE_UNAVAILABLE,
+        }:
+            return item.reason_code or item.state.value.lower()
+    return "indeterminate_observation"
+
+
+def _bracket_intersects_gap(plan: MultiSegmentCoarsePlan, bracket: object) -> bool:
+    start = getattr(bracket, "present_frame_utc", None)
+    end = getattr(bracket, "absent_frame_utc", None)
+    if not isinstance(start, datetime) or not isinstance(end, datetime):
+        return True
+    return any(gap.start_utc < end and gap.end_utc > start for gap in plan.gaps)
+
+
+def _observation_record(item: SuccessorObservation) -> dict[str, object]:
+    return {
+        "observation_id": item.observation_id,
+        "target_id": item.target_id,
+        "acquisition_id": item.acquisition_id,
+        "sequence": item.sequence,
+        "ordinal": item.ordinal,
+        "requested_time_utc": _timestamp(item.requested_time_utc),
+        "frame_utc": None if item.frame_utc is None else _timestamp(item.frame_utc),
+        "frame_pts_seconds": item.frame_pts_seconds,
+        "frame_offset_seconds": item.frame_offset_seconds,
+        "timing_precision_status": item.timing_precision_status,
+        "timing_warnings": list(item.timing_warnings),
+        "acquisition_status": item.acquisition_status.value,
+        "state": item.state.value,
+        "reason_code": item.reason_code,
+        "frame_sha256": item.frame_sha256,
+        "authority_identity": item.authority_identity,
+        "reference_frame_resource_id": item.reference_frame_resource_id,
+        "roi_identity": item.roi_identity,
+        "classifier_policy_identity": item.classifier_policy_identity,
+    }
+
+
+def _observation_bundle(
+    coarse: SuccessorCoarseClassificationResult,
+    narrowed: SuccessorBinaryNarrowingResult | None = None,
+) -> tuple[SuccessorObservation, ...]:
+    if narrowed is None:
+        return coarse.observations
+    return (*coarse.observations, *narrowed.midpoint_observations)
+
+
+def _observed_start(observations: tuple[SuccessorObservation, ...], fallback: str) -> str:
+    frames = tuple(item.frame_utc for item in observations if item.frame_utc is not None)
+    return fallback if not frames else _timestamp(min(frames))
+
+
 def _terminal_identity(value: Mapping[str, object]) -> str | None:
     candidate = value.get("terminal_result_id")
     return candidate if isinstance(candidate, str) else None
@@ -638,6 +796,7 @@ def _terminal_from_record(value: Mapping[str, object]) -> SuccessorTerminal:
     observation_ids = _strings(value.get("coarse_observation_ids"))
     target_ids = _strings(value.get("coarse_target_ids"))
     target_statuses = _strings(value.get("target_statuses"))
+    coarse_observations = _record_objects(value.get("coarse_observations"))
     return SuccessorTerminal(
         str(value["investigation_id"]),
         str(value["run_id"]),
@@ -665,10 +824,17 @@ def _terminal_from_record(value: Mapping[str, object]) -> SuccessorTerminal:
         observation_ids,
         target_ids,
         target_statuses,
+        coarse_observations,
     )
 
 
 def _record_dicts(value: object) -> tuple[dict[str, str], ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(item for item in value if isinstance(item, dict))
+
+
+def _record_objects(value: object) -> tuple[dict[str, object], ...]:
     if not isinstance(value, (list, tuple)):
         return ()
     return tuple(item for item in value if isinstance(item, dict))

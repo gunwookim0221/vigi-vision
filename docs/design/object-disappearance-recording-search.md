@@ -172,7 +172,10 @@ the actual decoded frame PTS, and the result preserves the last PRESENT/first
 ABSENT observations, bounded interval, policy identity, and target-level
 unavailable/incomplete completion. The MVP stops at 30 seconds or six
 iterations; gaps, indeterminate observations, unavailable acquisition, and
-classifier failures close safely without inventing a boundary. Slice 5 now
+classifier failures close safely without inventing a boundary. When the
+historical baseline precedes the successor horizon, narrowing retains that
+measured baseline-to-anchor bracket instead of fabricating pre-anchor media.
+Slice 5 now
 composes this chain behind the existing HTTP/background boundary for every new
 10-minute-to-2-hour request, publishes an atomic Schema 8 successor terminal
 record, reopens status after restart, and keeps Phase 8 explicitly
@@ -185,7 +188,12 @@ investigation/run polling isolated through bounded retries, restores RUNNING and
 Schema 8 terminal states after reload, and renders localized interval and
 coverage facts using text-only DOM updates. The legacy Schema 5–7 path remains
 available for reopening existing runs and is not used as a silent fallback for
-new successor requests. Final human real-NVR acceptance remains unimplemented:
+new successor requests. Successor execution preserves the selected historical
+reference-frame time as a confirmed PRESENT baseline, adds an actual
+search-anchor observation before coarse targets, and durably records safe
+per-target timing, acquisition, classifier, digest, ROI, and policy facts.
+Target-local unavailable and visual-indeterminate reasons remain distinct in
+terminal evidence. Final human real-NVR acceptance remains unimplemented:
 
 | Slice | User-visible outcome | Minimum tests | Acceptance criterion | Deferred hardening |
 | --- | --- | --- | --- | --- |

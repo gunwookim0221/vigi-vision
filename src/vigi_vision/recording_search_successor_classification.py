@@ -41,6 +41,7 @@ from vigi_vision.recording_search_successor import TargetAvailability
 from vigi_vision.recording_search_successor_acquisition import (
     SuccessorTargetAcquisitionResult,
     SuccessorTargetStatus,
+    successor_anchor_target_id,
     successor_midpoint_target_id,
     successor_target_id,
 )
@@ -55,6 +56,15 @@ if TYPE_CHECKING:
     )
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_TIMING_PRECISION_CODES = frozenset(
+    {
+        "measured_clip_relative",
+        "estimated",
+        "unavailable",
+        "indeterminate",
+        "MEASURED_CLIP_RELATIVE",
+    }
+)
 _AUTHORITY_VERSION = "phase7e-successor-authority-v1"
 _CLASSIFICATION_VERSION = "phase7e-successor-coarse-classification-v1"
 _SAFE_REASON_CODES = frozenset(
@@ -314,6 +324,9 @@ class SuccessorObservation:
     reason_code: str | None
     ordinal: int
     observation_id: str
+    timing_precision_status: str | None = None
+    timing_warnings: tuple[str, ...] = ()
+    frame_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -340,14 +353,22 @@ class SuccessorObservation:
             or not self.observation_id.startswith("successor-observation-v1-")
             or self.reason_code is not None
             and self.reason_code not in _SAFE_REASON_CODES
+            or self.timing_precision_status is not None
+            and self.timing_precision_status not in _TIMING_PRECISION_CODES
+            or self.frame_sha256 is not None
+            and _SHA256.fullmatch(self.frame_sha256) is None
         ):
             raise SuccessorClassificationContractError
-        if self.state in {
-            SuccessorObservationState.PRESENT,
-            SuccessorObservationState.ABSENT,
-            SuccessorObservationState.CLASSIFIER_TIMEOUT,
-            SuccessorObservationState.CLASSIFIER_FAILED,
-        } and (self.frame_utc is None or self.frame_pts_seconds is None):
+        if (
+            self.state
+            in {
+                SuccessorObservationState.PRESENT,
+                SuccessorObservationState.ABSENT,
+                SuccessorObservationState.CLASSIFIER_TIMEOUT,
+                SuccessorObservationState.CLASSIFIER_FAILED,
+            }
+            and self.frame_utc is None
+        ):
             raise SuccessorClassificationContractError
         if self.state is SuccessorObservationState.INDETERMINATE and self.reason_code is None:
             raise SuccessorClassificationContractError
@@ -459,6 +480,25 @@ class SuccessorCoarseClassificationService:
             target.availability is not TargetAvailability.AVAILABLE
             or acquisition.plan_id != plan.plan_id
             or acquisition.target_id != successor_midpoint_target_id(plan, target)
+            or acquisition.sequence != target.sequence
+            or acquisition.requested_time_utc != target.requested_time_utc
+            or acquisition.assigned_segment_id != target.segment_id
+        ):
+            raise SuccessorClassificationContractError
+        return self._classify_target(plan, target, acquisition, authority)
+
+    def classify_anchor_target(
+        self,
+        plan: MultiSegmentCoarsePlan,
+        target: CoarseTargetAssignment,
+        acquisition: SuccessorTargetAcquisitionResult,
+        authority: SuccessorClassificationAuthority,
+    ) -> SuccessorObservation:
+        """Classify the actual frame at the successor search anchor."""
+        self._validate_authority(plan, authority)
+        if (
+            acquisition.plan_id != plan.plan_id
+            or acquisition.target_id != successor_anchor_target_id(plan, target)
             or acquisition.sequence != target.sequence
             or acquisition.requested_time_utc != target.requested_time_utc
             or acquisition.assigned_segment_id != target.segment_id
@@ -609,11 +649,15 @@ def _observation(
         "requested_time_utc": _timestamp(target.requested_time_utc),
         "frame_utc": None if frame_utc is None else _timestamp(frame_utc),
         "frame_pts_seconds": frame_pts_seconds,
+        "frame_offset_seconds": frame_offset_seconds,
         "authority_identity": authority.authority_identity,
+        "reference_frame_resource_id": authority.reference_frame_resource_id,
         "roi_identity": authority.roi_identity,
         "policy_identity": policy_identity,
         "state": state.value,
         "reason_code": reason_code,
+        "timing_precision_status": acquisition.timing_precision_status,
+        "frame_sha256": acquisition.frame_sha256,
     }
     identity = _digest_identity("successor-observation-v1-", payload)
     return SuccessorObservation(
@@ -634,6 +678,9 @@ def _observation(
         reason_code,
         1,
         identity,
+        acquisition.timing_precision_status,
+        acquisition.frame_warnings,
+        acquisition.frame_sha256,
     )
 
 
@@ -656,6 +703,55 @@ def _with_ordinal(item: SuccessorObservation, ordinal: int) -> SuccessorObservat
         item.reason_code,
         ordinal,
         item.observation_id,
+        item.timing_precision_status,
+        item.timing_warnings,
+        item.frame_sha256,
+    )
+
+
+def reidentify_observation(
+    item: SuccessorObservation, *, sequence: int, ordinal: int
+) -> SuccessorObservation:
+    """Rebind an observation identity after deterministic ordering changes."""
+    payload = {
+        "version": _CLASSIFICATION_VERSION,
+        "plan_id": item.plan_id,
+        "target_id": item.target_id,
+        "acquisition_id": item.acquisition_id,
+        "sequence": sequence,
+        "requested_time_utc": _timestamp(item.requested_time_utc),
+        "frame_utc": None if item.frame_utc is None else _timestamp(item.frame_utc),
+        "frame_pts_seconds": item.frame_pts_seconds,
+        "authority_identity": item.authority_identity,
+        "reference_frame_resource_id": item.reference_frame_resource_id,
+        "roi_identity": item.roi_identity,
+        "policy_identity": item.classifier_policy_identity,
+        "state": item.state.value,
+        "reason_code": item.reason_code,
+        "timing_precision_status": item.timing_precision_status,
+        "frame_sha256": item.frame_sha256,
+    }
+    return SuccessorObservation(
+        item.plan_id,
+        item.target_id,
+        item.acquisition_id,
+        sequence,
+        item.requested_time_utc,
+        item.frame_utc,
+        item.frame_pts_seconds,
+        item.frame_offset_seconds,
+        item.authority_identity,
+        item.reference_frame_resource_id,
+        item.roi_identity,
+        item.classifier_policy_identity,
+        item.acquisition_status,
+        item.state,
+        item.reason_code,
+        ordinal,
+        _digest_identity("successor-observation-v1-", payload),
+        item.timing_precision_status,
+        item.timing_warnings,
+        item.frame_sha256,
     )
 
 
@@ -718,4 +814,5 @@ __all__ = (
     "SuccessorCoarseClassificationService",
     "SuccessorObservation",
     "SuccessorObservationState",
+    "reidentify_observation",
 )

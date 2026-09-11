@@ -283,6 +283,10 @@ publishes/reopens a versioned successor terminal record with explicit interval,
 coverage, and `NOT_REQUESTED` Phase 8 state while preserving the legacy Schema
 5–7 path. Slice 6 exposes the successor range controls, bounded polling, reload
 restoration, and Schema 8 terminal projection in the existing browser shell.
+The historical-baseline correction preserves the selected Phase 6 frame time,
+classifies a real search-anchor frame, and persists target-level timing,
+acquisition, classifier, digest, ROI, policy, and safe-reason evidence without
+changing the public Schema 8 projection.
 Only the final human real-NVR acceptance remains future work.
 Correction B adds a bounded Windows-spawn process boundary around production
 Phase 7E B4 classification; timeout/cancellation terminate and reap the child,

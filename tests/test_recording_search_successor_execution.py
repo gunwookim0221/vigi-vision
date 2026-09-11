@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -168,6 +169,22 @@ class _Classifier:
             ClassificationOutcome.ABSENT if probe.pixels[0][0][0] else ClassificationOutcome.PRESENT
         )
         return SuccessorClassifierResult(outcome)
+
+
+class _IndeterminateClassifier(_Classifier):
+    def classify(
+        self,
+        _baseline: object,
+        _probe: DecodedRgbImage,
+        _width: int,
+        _height: int,
+        _roi: object,
+        _correlation_id: str,
+    ) -> SuccessorClassifierResult:
+        return SuccessorClassifierResult(
+            ClassificationOutcome.INDETERMINATE,
+            "insufficient_visual_evidence",
+        )
 
 
 def _confirmed(tmp_path: Path) -> ConfirmedInvestigationInput:
@@ -345,6 +362,73 @@ def test_successor_complete_present_publishes_not_found(tmp_path: Path) -> None:
     result = service.execute(prepared)
     assert result.status == "NOT_FOUND"
     assert result.reason_code == "complete_present_coverage"
+
+
+def test_historical_baseline_and_actual_anchor_are_durable_and_narrowable(tmp_path: Path) -> None:
+    service = _service(tmp_path, ANCHOR + timedelta(seconds=1))
+    confirmed = replace(
+        _confirmed(tmp_path),
+        requested_time_utc=ANCHOR - timedelta(seconds=60),
+        requested_time_text="2026-09-04T14:16:32",
+    )
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:27:32",
+        run_id="search-run-hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+
+    result = service.execute(prepared)
+
+    assert result.status == "FOUND"
+    records = result.coarse_observations
+    assert records[0]["state"] == "PRESENT"
+    assert records[0]["requested_time_utc"] == "2026-09-04T05:16:32Z"
+    assert records[0]["frame_utc"] == "2026-09-04T05:16:32Z"
+    assert records[0]["frame_sha256"] == confirmed.jpeg_sha256
+    assert records[1]["requested_time_utc"] == "2026-09-04T05:17:32Z"
+    assert records[1]["state"] == "ABSENT"
+    assert records[0]["observation_id"] != records[1]["observation_id"]
+    assert result.last_present_time_utc is not None
+    assert result.first_absent_time_utc is not None
+    assert result.last_present_time_utc < result.first_absent_time_utc
+
+
+def test_visual_indeterminate_reason_is_not_collapsed_in_terminal(tmp_path: Path) -> None:
+    segment = _segment(ANCHOR + timedelta(minutes=30, seconds=1))
+    planner = _Planner(segment)
+    acquisition = SuccessorTargetAcquisitionService(
+        planner,
+        _Extractor(tmp_path, ANCHOR + timedelta(hours=2)),
+        _FrameDecoder(),
+        temporary_directory=tmp_path / "temporary",
+    )
+    classification = SuccessorCoarseClassificationService(
+        _IndeterminateClassifier(), _MediaDecoder()
+    )
+    service = SuccessorExecutionService(
+        SuccessorPlanService(planner),
+        acquisition,
+        classification,
+        SuccessorBinaryNarrowingService(acquisition, classification),
+        _MediaDecoder(),
+        SuccessorTerminalRepository(tmp_path / "successor"),
+    )
+    prepared = service.prepare(
+        _confirmed(tmp_path),
+        search_end_time_text="2026-09-04T14:27:32",
+        run_id="search-run-iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+
+    result = service.execute(prepared)
+
+    assert result.status == "INCONCLUSIVE"
+    assert result.reason_code == "insufficient_visual_evidence"
+    assert result.coarse_observations
+    assert any(
+        item["reason_code"] == "insufficient_visual_evidence" for item in result.coarse_observations
+    )
 
 
 def test_successor_durable_running_state_recovers_as_interrupted(tmp_path: Path) -> None:

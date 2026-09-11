@@ -116,6 +116,7 @@ class SuccessorTargetAcquisitionResult:
     frame_width: int | None = None
     frame_height: int | None = None
     frame_warnings: tuple[str, ...] = ()
+    timing_precision_status: str | None = None
 
     def __post_init__(self) -> None:
         """Validate target identity, status, and frame evidence consistency."""
@@ -217,6 +218,20 @@ def successor_midpoint_target_id(
     )
 
 
+def successor_anchor_target_id(plan: MultiSegmentCoarsePlan, target: CoarseTargetAssignment) -> str:
+    """Return a deterministic identity for the actual search-start target."""
+    _validate_anchor_target(plan, target)
+    return _hashed_identity(
+        "successor-anchor-target-v1-",
+        {
+            "plan_id": plan.plan_id,
+            "requested_time_utc": _timestamp(target.requested_time_utc),
+            "availability": target.availability.value,
+            "segment_id": target.segment_id,
+        },
+    )
+
+
 def build_successor_target_window(
     plan: MultiSegmentCoarsePlan,
     target: CoarseTargetAssignment,
@@ -286,6 +301,13 @@ class SuccessorTargetAcquisitionService:
     ) -> SuccessorTargetAcquisitionResult:
         """Acquire one narrowing midpoint through the same short-window path."""
         target_id = successor_midpoint_target_id(plan, target)
+        return self._acquire_with_identity(plan, target, target_id, validate_membership=False)
+
+    def acquire_anchor(
+        self, plan: MultiSegmentCoarsePlan, target: CoarseTargetAssignment
+    ) -> SuccessorTargetAcquisitionResult:
+        """Acquire one actual frame at the successor search anchor."""
+        target_id = successor_anchor_target_id(plan, target)
         return self._acquire_with_identity(plan, target, target_id, validate_membership=False)
 
     def _acquire_with_identity(  # noqa: C901
@@ -497,6 +519,7 @@ class SuccessorTargetAcquisitionService:
                 evidence.width,
                 evidence.height,
                 evidence.warnings,
+                evidence.timing_precision_status.value,
             )
         finally:
             try:
@@ -549,6 +572,32 @@ def _validate_midpoint_target(plan: MultiSegmentCoarsePlan, target: CoarseTarget
         and target.requested_time_utc == coverage.end_utc
     )
     if not inside_coverage and not at_search_end:
+        raise SuccessorAcquisitionContractError
+
+
+def _validate_anchor_target(plan: MultiSegmentCoarsePlan, target: CoarseTargetAssignment) -> None:
+    if (
+        target.requested_time_utc != plan.anchor_time_utc
+        or target.sequence != 1
+        or (
+            target.availability is TargetAvailability.AVAILABLE
+            and (
+                target.segment_id is None
+                or not any(
+                    item.segment_id == target.segment_id
+                    and item.start_utc <= plan.anchor_time_utc < item.end_utc
+                    for item in plan.segments
+                )
+            )
+        )
+        or (
+            target.availability is TargetAvailability.UNAVAILABLE
+            and (
+                target.gap is None
+                or not (target.gap.start_utc <= plan.anchor_time_utc <= target.gap.end_utc)
+            )
+        )
+    ):
         raise SuccessorAcquisitionContractError
 
 
@@ -636,6 +685,7 @@ __all__ = (
     "SuccessorTargetAcquisitionService",
     "SuccessorTargetStatus",
     "build_successor_target_window",
+    "successor_anchor_target_id",
     "successor_midpoint_target_id",
     "successor_target_id",
 )

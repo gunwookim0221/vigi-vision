@@ -53,6 +53,7 @@ _SAFE_REASON_CODES = frozenset(
         "midpoint_classification_unavailable",
         "no_progress",
         "cancelled",
+        "historical_baseline_boundary",
     }
 )
 
@@ -202,7 +203,18 @@ class SuccessorBinaryNarrowingService:
         completion = SuccessorNarrowingCompletion.NARROWED
         reason_code = "target_width_reached"
 
+        # The historical Phase 6 baseline may precede the successor plan's
+        # acquisition horizon.  No midpoint before the anchor can be acquired
+        # without fabricating source coverage, so retain that honest bracket
+        # rather than converting it into a gap failure.
+        if left.frame_utc is not None and left.frame_utc < plan.anchor_time_utc:
+            completion = SuccessorNarrowingCompletion.NARROWED
+            reason_code = "historical_baseline_boundary"
+
         while (
+            completion is SuccessorNarrowingCompletion.NARROWED
+            and reason_code == "target_width_reached"
+        ) and (
             _width_seconds(left, right) > self.policy.target_width_seconds
             and iterations < self.policy.maximum_iterations
         ):
@@ -261,11 +273,13 @@ class SuccessorBinaryNarrowingService:
                 reason_code = "target_width_reached"
                 break
         else:
-            completion = SuccessorNarrowingCompletion.NARROWED
-            reason_code = "target_width_reached"
+            if reason_code == "target_width_reached":
+                completion = SuccessorNarrowingCompletion.NARROWED
+                reason_code = "target_width_reached"
 
         if (
             completion is SuccessorNarrowingCompletion.NARROWED
+            and reason_code == "target_width_reached"
             and _width_seconds(left, right) > self.policy.target_width_seconds
         ):
             completion = SuccessorNarrowingCompletion.ITERATION_LIMIT
