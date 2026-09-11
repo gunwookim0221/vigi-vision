@@ -117,6 +117,18 @@ function loadedConfirmation() {
   };
 }
 
+function loadedFutureBaselineConfirmation() {
+  const payload = loadedConfirmation();
+  return {
+    ...payload,
+    confirmation: {
+      ...payload.confirmation,
+      candidate_offset_seconds: 60,
+      requested_time_utc: "2026-07-20T03:35:18Z",
+    },
+  };
+}
+
 test("confirmed workflow submits only the closed start body and blocks a double click", async () => {
   const post = deferred();
   const requests = [];
@@ -395,6 +407,77 @@ test("restored search defaults to a 30-minute range and exposes keyboard quick r
     assert.equal(harness.recordingSearchEnd.value, value);
     assert.equal(harness.recordingSearchQuickButtons[index].attributes["aria-pressed"], "true");
   });
+});
+
+test("confirmed future baseline admits minute input only after the effective start", async () => {
+  const harness = createHarness(() => Promise.resolve({ ok: true, status: 202, json: async () => accepted() }), undefined, {
+    confirmation: true,
+    search: true,
+  });
+  harness.window.dispatchEvent({
+    type: "vigi:investigation-confirmed",
+    detail: {
+      investigationId: INVESTIGATION_ID,
+      anchorTimeUtc: "2026-07-20T03:34:18Z",
+      baselineTimeUtc: "2026-07-20T03:35:18Z",
+      sourceTimezone: "Asia/Seoul",
+      schemaVersion: 3,
+    },
+  });
+
+  harness.recordingSearchEnd.value = "2026-07-20T13:47";
+  harness.recordingSearchEnd.listeners.input();
+  assert.equal(harness.recordingSearchStart.disabled, false);
+
+  harness.recordingSearchEnd.value = "2026-07-20T12:35:18";
+  harness.recordingSearchEnd.listeners.input();
+  assert.equal(harness.recordingSearchStart.disabled, true);
+  assert.equal(harness.recordingSearchStart.dataset.state, "invalid");
+  assert.match(harness.recordingSearchStatus.textContent, /기준 프레임 중 늦은 시각 이후/);
+});
+
+test("minute input is canonicalized before one successor admission POST", async () => {
+  const requests = [];
+  const harness = createHarness((url, options) => {
+    requests.push({ url, options });
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => status("RUNNING") });
+  }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
+  harness.window.dispatchEvent({
+    type: "vigi:investigation-confirmed",
+    detail: {
+      investigationId: INVESTIGATION_ID,
+      anchorTimeUtc: "2026-07-20T03:34:18Z",
+      baselineTimeUtc: "2026-07-20T03:35:18Z",
+      sourceTimezone: "Asia/Seoul",
+      schemaVersion: 3,
+    },
+  });
+  harness.recordingSearchEnd.value = "2026-07-20T13:47";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+
+  const startRequests = requests.filter((entry) => entry.url === "/api/v1/recording-searches");
+  assert.equal(startRequests.length, 1);
+  assert.equal(JSON.parse(startRequests[0].options.body).search_end, "2026-07-20T13:47:00");
+});
+
+test("reopened confirmation restores a future baseline as the effective start", async () => {
+  const location = `http://127.0.0.1/?investigation_id=${INVESTIGATION_ID}`;
+  const harness = createHarness((url) => {
+    if (url.startsWith("/api/v1/investigation-confirmations/")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => loadedFutureBaselineConfirmation() });
+    }
+    throw new Error("status must not be polled without a run");
+  }, undefined, { confirmation: true, search: true, location });
+  await settle();
+
+  assert.equal(harness.recordingSearchEnd.value, "2026-07-20T13:05:18");
+  assert.equal(harness.recordingSearchStart.disabled, false);
+  assert.equal(harness.recordingSearchStart.dataset.state, "ready");
 });
 
 test("successor range bounds accept 30 minutes through two hours and reject unsafe ends", async () => {

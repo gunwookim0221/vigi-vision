@@ -394,6 +394,26 @@ def test_historical_baseline_and_actual_anchor_are_durable_and_narrowable(tmp_pa
     assert result.last_present_time_utc < result.first_absent_time_utc
 
 
+def test_future_baseline_moves_successor_effective_start(tmp_path: Path) -> None:
+    service = _service(tmp_path, ANCHOR + timedelta(minutes=15))
+    confirmed = replace(
+        _confirmed(tmp_path),
+        requested_time_utc=ANCHOR + timedelta(seconds=60),
+        requested_time_text="2026-09-04T14:18:32",
+    )
+
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+
+    assert prepared.plan.anchor_time_utc == ANCHOR + timedelta(seconds=60)
+    assert prepared.request.anchor_time_utc == ANCHOR + timedelta(seconds=60)
+    assert prepared.request.duration_seconds == 1_740
+
+
 def test_visual_indeterminate_reason_is_not_collapsed_in_terminal(tmp_path: Path) -> None:
     segment = _segment(ANCHOR + timedelta(minutes=30, seconds=1))
     planner = _Planner(segment)

@@ -40,6 +40,7 @@ from vigi_vision.recording_search_successor import (
     SuccessorPlanRequest,
     SuccessorPlanService,
     TargetAvailability,
+    effective_search_start_utc,
 )
 from vigi_vision.recording_search_successor_acquisition import (
     SuccessorTargetAcquisitionResult,
@@ -370,9 +371,13 @@ class SuccessorExecutionService:
         run_id: str,
         now_utc: datetime,
     ) -> SuccessorPreparedExecution:
+        effective_start = effective_search_start_utc(
+            confirmed.anchor_time_utc,
+            confirmed.requested_time_utc,
+        )
         request = SuccessorPlanRequest.from_text(
             channel_id=confirmed.channel_id,
-            anchor_time_utc=confirmed.anchor_time_utc,
+            anchor_time_utc=effective_start,
             search_end_time_text=search_end_time_text,
             source_timezone=confirmed.source_timezone,
             now_utc=now_utc,
@@ -396,7 +401,7 @@ class SuccessorExecutionService:
                 confirmed.investigation_id,
                 run_id,
                 confirmed.channel_id,
-                confirmed.anchor_time_utc,
+                effective_start,
                 request.search_end_utc,
                 confirmed.source_timezone,
             ),

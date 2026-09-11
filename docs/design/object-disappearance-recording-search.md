@@ -270,6 +270,14 @@ planner. Existing legacy Schema 5–7 runs remain reopenable through their
 original repository. For legacy execution, exactly one SDK segment must satisfy
 `segment_start <= S < E <= segment_end`. A touching next segment is never read.
 
+The effective search start for a newly admitted request is
+`max(anchor_time_utc, selected_baseline_time_utc)`, where the selected Phase 6
+baseline is the confirmation's `requested_time_utc`. Browser and backend
+validation use this same lower bound, so a baseline selected after the
+investigation anchor cannot be searched before it. Native `datetime-local`
+values with minute precision are interpreted as whole-second values at
+`second = 0`.
+
 The Phase 6 schema-3 confirmation supplies the historical baseline and
 source-pixel ROI. Start validates its resource through the existing strict
 confirmation loader, reads the JPEG once, and verifies path confinement,

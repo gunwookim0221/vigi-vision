@@ -417,6 +417,7 @@
         detail: Object.freeze({
           investigationId: payload.investigation_id,
           anchorTimeUtc,
+          baselineTimeUtc: payload.confirmation.requested_time_utc,
           sourceTimezone: payload.confirmation.source_timezone,
           schemaVersion: payload.schema_version,
         }),

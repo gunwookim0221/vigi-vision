@@ -150,6 +150,27 @@ test("review flow posts the exact Phase 6 body and locks after confirmation", as
   assert.equal(harness.window.vigiVisionReferenceFrameRoi.getState().readOnly, true);
 });
 
+test("schema 3 confirmation event preserves the selected baseline timestamp", async () => {
+  const harness = await selectedHarness((url, options) => {
+    if (url.startsWith("/api/v1/investigation-confirmations/") && options?.method !== "POST") {
+      return Promise.resolve({ ok: false, status: 404, json: async () => ({ error: { code: "investigation_not_found" } }) });
+    }
+    if (url === "/api/v1/investigation-confirmations") {
+      return Promise.resolve({ ok: true, status: 201, json: async () => schemaThreeConfirmationResponse() });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => candidateSet([candidate(-10)]) });
+  });
+  commitRoi(harness);
+  let confirmedEvent;
+  harness.window.addEventListener("vigi:investigation-confirmed", (event) => {
+    confirmedEvent = event;
+  });
+  harness.confirmationAction.listeners.click({ preventDefault() {} });
+  await settle();
+
+  assert.equal(confirmedEvent.detail.baselineTimeUtc, "2026-07-20T03:34:08Z");
+});
+
 test("a late channel refresh cannot unlock or replace a confirmed control", async () => {
   let channelCalls = 0;
   const lateChannelResponse = deferred();

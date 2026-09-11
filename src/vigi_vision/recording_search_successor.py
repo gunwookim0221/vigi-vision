@@ -33,6 +33,13 @@ class SuccessorPlanError(ValueError):
     """Raised when a successor plan cannot be represented safely."""
 
 
+def effective_search_start_utc(anchor_time_utc: datetime, baseline_time_utc: datetime) -> datetime:
+    """Return the earliest safe search instant for a confirmed baseline."""
+    if not _is_whole_utc(anchor_time_utc) or not _is_whole_utc(baseline_time_utc):
+        raise SuccessorPlanError
+    return max(anchor_time_utc, baseline_time_utc)
+
+
 class TargetAvailability(str, Enum):
     """Closed availability state for one planned coarse target."""
 
@@ -440,4 +447,5 @@ __all__ = (
     "SuccessorPlanningPolicy",
     "TargetAvailability",
     "build_successor_plan",
+    "effective_search_start_utc",
 )

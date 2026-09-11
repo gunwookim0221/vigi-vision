@@ -67,6 +67,7 @@ from vigi_vision.recording_search_successor import (
     SuccessorPlanError,
     SuccessorPlanRequest,
     SuccessorPlanService,
+    effective_search_start_utc,
 )
 from vigi_vision.recording_search_successor_execution import (
     SuccessorB4Classifier,
@@ -506,6 +507,14 @@ class Phase7EPublicService:
         if source_timezone is not None and source_timezone != confirmed.source_timezone:
             raise Phase7EPublicError("invalid_request")
         now_utc = self.now_utc()
+        baseline_time = getattr(confirmed, "requested_time_utc", confirmed.anchor_time_utc)
+        try:
+            effective_start = effective_search_start_utc(
+                confirmed.anchor_time_utc,
+                baseline_time,
+            )
+        except (TypeError, ValueError):
+            raise Phase7EPublicError("confirmation_corrupt") from None
         try:
             end = parse_reference_frame_request(
                 channel_id=confirmed.channel_id,
@@ -513,7 +522,7 @@ class Phase7EPublicService:
                 source_timezone=confirmed.source_timezone,
                 now_utc=now_utc,
             ).requested_time_utc
-            duration_seconds = (end - confirmed.anchor_time_utc).total_seconds()
+            duration_seconds = (end - effective_start).total_seconds()
         except Exception as error:
             raise Phase7EPublicError("invalid_request") from error
         if duration_seconds != int(duration_seconds) or duration_seconds <= 0:
@@ -523,7 +532,7 @@ class Phase7EPublicService:
             try:
                 successor_request = SuccessorPlanRequest.from_text(
                     channel_id=confirmed.channel_id,
-                    anchor_time_utc=confirmed.anchor_time_utc,
+                    anchor_time_utc=effective_start,
                     search_end_time_text=search_end_time_text,
                     source_timezone=confirmed.source_timezone,
                     now_utc=successor_now_utc,
@@ -550,7 +559,10 @@ class Phase7EPublicService:
                 raise Phase7EPublicError("acquisition_failed") from error
             except Exception as error:
                 raise Phase7EPublicError("successor_unavailable") from error
-            if successor.plan.search_end_utc != successor_request.search_end_utc:
+            if (
+                successor.plan.anchor_time_utc != successor_request.anchor_time_utc
+                or successor.plan.search_end_utc != successor_request.search_end_utc
+            ):
                 raise Phase7EPublicError("request_conflict")
             return Phase7EPreparedRequest(
                 successor.request,
@@ -570,7 +582,7 @@ class Phase7EPublicService:
             investigation_id,
             run_id,
             confirmed.channel_id,
-            confirmed.anchor_time_utc,
+            effective_start,
             end,
             CommonSessionPolicy.from_payload(self.policy.payload),
         )

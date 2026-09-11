@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +24,7 @@ from vigi_vision.recording_search_7e_public import (
     approved_phase7e_policy,
     build_phase7e_service,
 )
+from vigi_vision.recording_search_successor import SuccessorPlanRequest
 from vigi_vision.reference_frame_api import create_reference_frame_app
 
 
@@ -175,6 +176,116 @@ def test_new_ten_minute_request_does_not_fall_back_to_legacy_executor() -> None:
             "12345678-1234-4234-8234-123456789abc",
         )
     assert raised.value.code == "successor_unavailable"
+
+
+def test_future_selected_baseline_is_the_public_effective_search_start() -> None:
+    anchor = datetime(2026, 7, 20, 3, 34, 28, tzinfo=timezone.utc)
+    baseline = anchor + timedelta(seconds=60)
+    confirmed = SimpleNamespace(
+        investigation_id="object-disappearance-v3-ch1-20260720T033428Z",
+        channel_id=1,
+        anchor_time_utc=anchor,
+        requested_time_utc=baseline,
+        source_timezone="Asia/Seoul",
+    )
+
+    class _Confirmation:
+        def load_confirmed(self, investigation_id: str) -> object:
+            assert investigation_id == "object-disappearance-v3-ch1-20260720T033428Z"
+            return confirmed
+
+    policy, classifier_policy, object_policy = approved_phase7e_policy()
+    service = Phase7EPublicService(
+        SimpleNamespace(),
+        SimpleNamespace(),
+        _Confirmation(),
+        object(),
+        object(),
+        policy,
+        classifier_policy,
+        object_policy,
+        SimpleNamespace(),
+        lambda: datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc),
+    )
+
+    prepared = service.prepare_http(
+        confirmed.investigation_id,
+        "2026-07-20T12:44:28",
+        "12345678-1234-4234-8234-123456789abc",
+    )
+
+    assert prepared.request.start_utc == baseline
+    assert prepared.request.duration_seconds == 540
+
+
+def test_future_selected_baseline_reaches_successor_admission_with_same_start() -> None:
+    anchor = datetime(2026, 7, 20, 3, 34, 28, tzinfo=timezone.utc)
+    baseline = anchor + timedelta(seconds=60)
+    confirmed = SimpleNamespace(
+        investigation_id="object-disappearance-v3-ch1-20260720T033428Z",
+        channel_id=1,
+        anchor_time_utc=anchor,
+        requested_time_utc=baseline,
+        source_timezone="Asia/Seoul",
+    )
+
+    class _Confirmation:
+        def load_confirmed(self, investigation_id: str) -> object:
+            assert investigation_id == confirmed.investigation_id
+            return confirmed
+
+    class _Successor:
+        def prepare(
+            self,
+            loaded: object,
+            *,
+            search_end_time_text: str,
+            run_id: str,
+            now_utc: datetime,
+        ) -> object:
+            effective = max(loaded.anchor_time_utc, loaded.requested_time_utc)
+            plan = SuccessorPlanRequest.from_text(
+                channel_id=loaded.channel_id,
+                anchor_time_utc=effective,
+                search_end_time_text=search_end_time_text,
+                source_timezone=loaded.source_timezone,
+                now_utc=now_utc,
+            )
+            return SimpleNamespace(
+                request=SimpleNamespace(
+                    investigation_id=loaded.investigation_id,
+                    run_id=run_id,
+                    channel_id=loaded.channel_id,
+                    anchor_time_utc=effective,
+                    end_utc=plan.search_end_utc,
+                    source_timezone=loaded.source_timezone,
+                ),
+                plan=plan,
+            )
+
+    policy, classifier_policy, object_policy = approved_phase7e_policy()
+    service = Phase7EPublicService(
+        SimpleNamespace(),
+        SimpleNamespace(),
+        _Confirmation(),
+        None,
+        None,
+        policy,
+        classifier_policy,
+        object_policy,
+        SimpleNamespace(),
+        lambda: datetime(2026, 7, 20, 5, 0, tzinfo=timezone.utc),
+        successor_execution=_Successor(),
+    )
+
+    prepared = service.prepare_http(
+        confirmed.investigation_id,
+        "2026-07-20T13:04:28",
+        "12345678-1234-4234-8234-123456789abc",
+    )
+
+    assert prepared.successor is not None
+    assert prepared.successor.plan.anchor_time_utc == baseline
 
 
 def test_successor_unavailable_is_a_safe_http_503_not_input_422() -> None:

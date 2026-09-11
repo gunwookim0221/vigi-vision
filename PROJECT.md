@@ -287,6 +287,9 @@ The historical-baseline correction preserves the selected Phase 6 frame time,
 classifies a real search-anchor frame, and persists target-level timing,
 acquisition, classifier, digest, ROI, policy, and safe-reason evidence without
 changing the public Schema 8 projection.
+Search admission now uses the same effective start in the browser and backend:
+the later of the investigation anchor and selected baseline time; minute-level
+native `datetime-local` search-end values are accepted as whole seconds.
 Only the final human real-NVR acceptance remains future work.
 Correction B adds a bounded Windows-spawn process boundary around production
 Phase 7E B4 classification; timeout/cancellation terminate and reap the child,

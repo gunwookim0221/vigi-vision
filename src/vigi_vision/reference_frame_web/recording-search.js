@@ -25,7 +25,7 @@
   const INVESTIGATION_PATTERN = /^object-disappearance-v3-ch[1-9][0-9]*-[0-9]{8}T[0-9]{6}Z$/;
   const RUN_PATTERN = /^search-run-[0-9a-f]{32}$/;
   const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-  const LOCAL_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/;
+  const LOCAL_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/;
   const TERMINAL = new Set(["FOUND", "NOT_FOUND", "INCONCLUSIVE", "FAILED", "INTERRUPTED", "CORRUPT"]);
   const REQUEST_TIMEOUT_MS = 15_000;
   // The backend invocation ceiling is 2,520 seconds; retain a bounded
@@ -274,15 +274,34 @@
     return Number.isNaN(parsed.getTime()) ? null : parsed;
   }
 
-  function validSearchEnd() {
-    if (confirmation === null) return false;
+  function canonicalLocalTime(value) {
+    return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value) ? `${value}:00` : value;
+  }
+
+  function effectiveSearchStartUtc() {
+    if (confirmation === null) return null;
+    const anchor = new Date(confirmation.anchorTimeUtc);
+    const baseline = new Date(confirmation.baselineTimeUtc ?? confirmation.anchorTimeUtc);
+    if (Number.isNaN(anchor.getTime()) || Number.isNaN(baseline.getTime())) return null;
+    return new Date(Math.max(anchor.getTime(), baseline.getTime()));
+  }
+
+  function searchEndValidation() {
+    if (confirmation === null) return { valid: false, reason: "pending" };
     const end = utcFromLocal(endInput.value, confirmation.sourceTimezone);
-    if (end === null) return false;
-    const duration = (end.getTime() - new Date(confirmation.anchorTimeUtc).getTime()) / 1000;
-    return Number.isInteger(duration)
-      && duration > 0
-      && duration <= MAX_SEARCH_DURATION_SECONDS
-      && end.getTime() <= Date.now();
+    const start = effectiveSearchStartUtc();
+    if (end === null || start === null) return { valid: false, reason: "invalid" };
+    if (end.getTime() <= start.getTime()) return { valid: false, reason: "before_start" };
+    const duration = (end.getTime() - start.getTime()) / 1000;
+    if (!Number.isInteger(duration) || duration > MAX_SEARCH_DURATION_SECONDS) {
+      return { valid: false, reason: "too_long" };
+    }
+    if (end.getTime() > Date.now()) return { valid: false, reason: "future" };
+    return { valid: true, reason: null };
+  }
+
+  function validSearchEnd() {
+    return searchEndValidation().valid;
   }
 
   function storage() {
@@ -330,8 +349,9 @@
   function durationFromSearchEnd(value) {
     if (confirmation === null) return null;
     const end = utcFromLocal(value, confirmation.sourceTimezone);
-    if (end === null) return null;
-    const duration = (end.getTime() - new Date(confirmation.anchorTimeUtc).getTime()) / 1000;
+    const start = effectiveSearchStartUtc();
+    if (end === null || start === null) return null;
+    const duration = (end.getTime() - start.getTime()) / 1000;
     return Number.isInteger(duration) && duration > 0 && duration <= MAX_SEARCH_DURATION_SECONDS
       ? duration
       : null;
@@ -344,7 +364,23 @@
   }
 
   function renderInput() {
-    startAction.disabled = submitting || (activeRun !== null && !terminalReady) || !validSearchEnd();
+    const validation = searchEndValidation();
+    const pending = confirmation === null || submitting || (activeRun !== null && !terminalReady);
+    startAction.disabled = pending || !validation.valid;
+    startAction.dataset.state = pending ? "pending" : validation.valid ? "ready" : "invalid";
+    if (confirmation !== null && !submitting && (activeRun === null || terminalReady)) {
+      if (validation.valid && ["ready", "invalid"].includes(status.dataset.state)) {
+        setStatus("검색 종료 시각을 검토한 뒤 검색을 시작하세요.", "ready");
+      } else if (!validation.valid) {
+        const messages = {
+          invalid: "검색 종료 시각 형식을 확인하세요.",
+          before_start: "검색 종료 시각은 확인된 조사 시각과 선택한 기준 프레임 중 늦은 시각 이후여야 합니다.",
+          too_long: "검색 범위는 최대 2시간까지 입력할 수 있습니다.",
+          future: "검색 종료 시각은 현재보다 미래일 수 없습니다.",
+        };
+        setStatus(messages[validation.reason] ?? "검색 종료 시각을 확인하세요.", "invalid");
+      }
+    }
   }
 
   function setQuickRangePressed(seconds) {
@@ -357,8 +393,9 @@
 
   function setSearchEndForDuration(seconds) {
     if (confirmation === null || !Number.isInteger(seconds) || seconds <= 0) return;
-    const anchor = new Date(confirmation.anchorTimeUtc).getTime();
-    const target = Math.min(anchor + seconds * 1_000, Date.now());
+    const start = effectiveSearchStartUtc();
+    if (start === null) return;
+    const target = Math.min(start.getTime() + seconds * 1_000, Date.now());
     endInput.value = localFromUtc(new Date(target).toISOString(), confirmation.sourceTimezone);
     setQuickRangePressed(seconds);
     renderInput();
@@ -386,7 +423,7 @@
       setQuickRangePressed(stored.duration_seconds);
     } else if (!LOCAL_TIME_PATTERN.test(endInput.value)) {
       const suggested = new Date(Math.min(
-        new Date(value.anchorTimeUtc).getTime() + DEFAULT_SEARCH_DURATION_SECONDS * 1_000,
+        effectiveSearchStartUtc().getTime() + DEFAULT_SEARCH_DURATION_SECONDS * 1_000,
         Date.now(),
       ));
       endInput.value = localFromUtc(suggested.toISOString(), value.sourceTimezone);
@@ -417,6 +454,7 @@
     return {
       investigationId: payload.investigation_id,
       anchorTimeUtc: anchor.toISOString().replace(".000Z", "Z"),
+      baselineTimeUtc: value.requested_time_utc,
       sourceTimezone: value.source_timezone,
     };
   }
@@ -496,7 +534,9 @@
     const expected = {
       requestId,
       investigationId: confirmation.investigationId,
-      searchEnd: endInput.value,
+      // Native datetime-local controls may omit seconds.  Keep the UI value
+      // intact, but send the transport's canonical whole-second form.
+      searchEnd: canonicalLocalTime(endInput.value),
     };
     const owner = createLifecycle();
     const requestController = requestControllerFor(owner, "start");
@@ -754,7 +794,9 @@
       || !validUtc(detail.anchorTimeUtc) || !["Asia/Seoul", "UTC"].includes(detail.sourceTimezone)) {
       return;
     }
-    showConfirmation(detail);
+    const baselineTimeUtc = detail.baselineTimeUtc ?? detail.anchorTimeUtc;
+    if (!validUtc(baselineTimeUtc)) return;
+    showConfirmation({ ...detail, baselineTimeUtc });
   }
 
   function loadFromLocation() {

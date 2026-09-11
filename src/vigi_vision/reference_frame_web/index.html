@@ -260,7 +260,7 @@
       <section id="recording-search-panel" class="panel recording-search-panel" aria-labelledby="recording-search-title" hidden>
         <div class="section-heading">
           <h2 id="recording-search-title">녹화 기록 검색</h2>
-          <p>확인된 조사 시각 이후 기본 30분, 최대 2시간 범위에서 대상이 사라진 시점을 검색합니다.</p>
+          <p>확인된 조사 시각과 선택한 기준 프레임 중 늦은 시각 이후 기본 30분, 최대 2시간 범위에서 대상이 사라진 시점을 검색합니다.</p>
         </div>
         <dl class="candidate-facts recording-search-facts">
           <div class="candidate-fact"><dt>확인된 조사 시각</dt><dd id="recording-search-confirmed-time" class="mono"></dd></div>
@@ -269,7 +269,7 @@
         <div class="field recording-search-field">
           <label for="recording-search-end">검색 종료 날짜 및 시각</label>
           <input id="recording-search-end" type="datetime-local" step="1" required aria-describedby="recording-search-hint recording-search-status">
-          <p id="recording-search-hint" class="field-hint">확인된 시각보다 늦고, 최대 2시간 이내이며, 미래가 아닌 시각을 입력하세요.</p>
+          <p id="recording-search-hint" class="field-hint">확인된 조사 시각과 선택한 기준 프레임 중 늦은 시각보다 늦고, 최대 2시간 이내이며, 미래가 아닌 시각을 입력하세요.</p>
           <div id="recording-search-quick-ranges" class="recording-search-quick-ranges" role="group" aria-label="빠른 검색 범위">
             <span class="field-hint">빠른 범위</span>
             <button type="button" data-search-duration-seconds="600">10분</button>
