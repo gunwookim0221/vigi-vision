@@ -3,9 +3,10 @@
 import logging
 import subprocess
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from threading import Lock, Thread
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import TextIO, final
 
 _MAX_PROGRESS_LINE_LENGTH = 256
@@ -56,7 +57,7 @@ class ReplayProgressDiagnostics:
             self._record_field(key, value, now)
 
     def _record_field(self, key: str, value: str, now: float) -> None:
-        match key:  # noqa: MATCH_OK - protocol keys are untrusted open input.
+        match key:  # protocol keys are untrusted open input.
             case "frame":
                 self._record_frame(_parse_nonnegative(value))
             case "total_size":
@@ -120,6 +121,12 @@ class ReplayProgressDiagnostics:
 ReplayProgressRunner = Callable[
     [tuple[str, ...], float, ReplayProgressDiagnostics], subprocess.CompletedProcess[str]
 ]
+TargetReplayProgressRunner = Callable[
+    [tuple[str, ...], float, ReplayProgressDiagnostics, float], subprocess.CompletedProcess[str]
+]
+
+_TARGET_POLL_SECONDS = 0.05
+_GRACEFUL_STOP_SECONDS = 3.0
 
 
 def run_ffmpeg_with_progress(
@@ -161,6 +168,80 @@ def run_ffmpeg_with_progress(
     finally:
         progress_reader.join()
         stderr_reader.join()
+    return subprocess.CompletedProcess(arguments, returncode, "", "".join(stderr_chunks))
+
+
+def run_ffmpeg_until_target(
+    arguments: tuple[str, ...],
+    timeout_seconds: float,
+    diagnostics: ReplayProgressDiagnostics,
+    target_coverage_seconds: float,
+) -> subprocess.CompletedProcess[str]:
+    """Finalize FFmpeg once progress proves bounded post-target transport context."""
+    process = subprocess.Popen(  # noqa: S603
+        arguments,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if process.stdin is None or process.stdout is None or process.stderr is None:
+        process.kill()
+        _ = process.wait()
+        raise OSError
+    stderr_chunks: list[str] = []
+    progress_reader = Thread(
+        target=_drain_progress,
+        args=(process.stdout, diagnostics),
+        name="vigi-replay-progress",
+    )
+    stderr_reader = Thread(
+        target=_drain_stderr,
+        args=(process.stderr, stderr_chunks),
+        name="vigi-replay-stderr",
+    )
+    progress_reader.start()
+    stderr_reader.start()
+    deadline = perf_counter() + timeout_seconds
+    try:
+        while process.poll() is None:
+            now = perf_counter()
+            summary = diagnostics.summary(now=now)
+            if summary.highest_media_time_us is not None and summary.highest_media_time_us >= round(
+                target_coverage_seconds * 1_000_000
+            ):
+                try:
+                    _ = process.stdin.write("q\n")
+                    process.stdin.flush()
+                except OSError:
+                    pass
+                try:
+                    returncode = process.wait(_GRACEFUL_STOP_SECONDS)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    _ = process.wait()
+                    raise subprocess.TimeoutExpired(arguments, timeout_seconds) from None
+                break
+            if now >= deadline:
+                process.kill()
+                _ = process.wait()
+                raise subprocess.TimeoutExpired(arguments, timeout_seconds)
+            sleep(min(_TARGET_POLL_SECONDS, max(0.0, deadline - now)))
+        else:
+            returncode = process.returncode
+        if returncode is None:
+            returncode = process.wait()
+    except KeyboardInterrupt:
+        process.kill()
+        _ = process.wait()
+        raise
+    finally:
+        with suppress(OSError):
+            process.stdin.close()
+        progress_reader.join()
+        stderr_reader.join()
+        process.stdout.close()
+        process.stderr.close()
     return subprocess.CompletedProcess(arguments, returncode, "", "".join(stderr_chunks))
 
 

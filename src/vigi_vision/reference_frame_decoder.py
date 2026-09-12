@@ -278,6 +278,21 @@ def select_nearest_candidate(
                     candidate.local_pts_seconds,
                 ),
             )
+        case FrameSelectionPolicy.LATEST_DECODED_FRAME_AT_OR_BEFORE:
+            target = Decimal(str(target_offset_seconds))
+            eligible = tuple(
+                candidate for candidate in candidates if candidate.local_pts_seconds <= target
+            )
+            if not eligible:
+                raise ReferenceFrameNoCandidateError
+            exact = tuple(
+                candidate for candidate in eligible if candidate.local_pts_seconds == target
+            )
+            if exact:
+                return exact[0]
+            if not any(candidate.local_pts_seconds > target for candidate in candidates):
+                raise ReferenceFrameNoCandidateError
+            return max(eligible, key=lambda candidate: candidate.local_pts_seconds)
 
 
 def _candidates(frames: tuple[_ProbeFrame, ...]) -> tuple[DecodedFrameCandidate, ...]:

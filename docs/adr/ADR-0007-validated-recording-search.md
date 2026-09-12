@@ -30,6 +30,10 @@ post-rename failures are identity-bound cleaned up, and publication failures
 emit one closed process-local diagnostic. The browser accepts the documented
 Phase 8 status vocabulary, including `NOT_REQUESTED`, while preserving the
 Phase 7 terminal state.
+Successor short-target acquisition separates semantic search bounds from raw
+segment transport bounds. A bounded post-target sentinel may finalize replay
+transport, but only a decoded frame at or before the requested target is
+admitted as observation evidence; terminal timing remains semantic.
 
 ## Context
 

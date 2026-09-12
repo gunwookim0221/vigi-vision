@@ -25,12 +25,15 @@ from vigi_vision.recording import ReplayRequest
 from vigi_vision.replay_progress import (
     ReplayProgressDiagnostics,
     ReplayProgressRunner,
+    TargetReplayProgressRunner,
     log_progress_timeout,
+    run_ffmpeg_until_target,
     run_ffmpeg_with_progress,
 )
 
 _STARTUP_ALLOWANCE_SECONDS = 30.0
 _FINALIZATION_MARGIN_SECONDS = 10.0
+_TARGET_SENTINEL_CONTEXT_SECONDS = 1.0
 _REPLAY_TIMEOUT_MULTIPLIER = 3.0
 _PROGRESS_POLL_INTERVAL_SECONDS = 0.5
 _PROGRESS_SAMPLE_INTERVAL_SECONDS = 10.0
@@ -363,17 +366,48 @@ class ReplayExtractor:
     progress_diagnostics: bool = field(default=False, repr=False)
     runner: ReplayRunner = field(default=_run_ffmpeg, repr=False)
     progress_runner: ReplayProgressRunner = field(default=run_ffmpeg_with_progress, repr=False)
+    target_progress_runner: TargetReplayProgressRunner = field(
+        default=run_ffmpeg_until_target, repr=False
+    )
 
     def extract(self, request: ReplayRequest) -> ReplayClip:
         """Extract one bounded MP4 from a credential-free replay request."""
         return self.extract_with_timeout(request, None)
 
-    def extract_with_timeout(  # noqa: C901, PLR0912, PLR0915
+    def extract_for_target(
+        self, request: ReplayRequest, target_offset_seconds: float
+    ) -> ReplayClip:
+        """Extract successor media and finalize after post-target context arrives."""
+        if (
+            not math.isfinite(target_offset_seconds)
+            or target_offset_seconds < 0
+            or target_offset_seconds >= request.window.duration_seconds
+        ):
+            raise ReplayExtractionError
+        return self._extract(
+            request,
+            None,
+            target_coverage_seconds=min(
+                float(request.window.duration_seconds),
+                target_offset_seconds + _TARGET_SENTINEL_CONTEXT_SECONDS,
+            ),
+        )
+
+    def extract_with_timeout(
         self,
         request: ReplayRequest,
         timeout_seconds: float | None,
     ) -> ReplayClip:
         """Extract with an optional stricter invocation-owned timeout ceiling."""
+        return self._extract(request, timeout_seconds, target_coverage_seconds=None)
+
+    def _extract(  # noqa: C901, PLR0912, PLR0915
+        self,
+        request: ReplayRequest,
+        timeout_seconds: float | None,
+        *,
+        target_coverage_seconds: float | None,
+    ) -> ReplayClip:
         if timeout_seconds is not None and (
             not math.isfinite(timeout_seconds) or timeout_seconds <= 0
         ):
@@ -385,12 +419,14 @@ class ReplayExtractor:
         started_at = perf_counter()
         diagnostics: ReplayProgressDiagnostics | None = (
             ReplayProgressDiagnostics(request.window.duration_seconds)
-            if self.progress_diagnostics
+            if self.progress_diagnostics or target_coverage_seconds is not None
             else None
         )
         lifecycle: _ReplayLifecycle | None = None
         try:
-            arguments = self._arguments(request, output_path)
+            arguments = self._arguments(
+                request, output_path, target_aware=target_coverage_seconds is not None
+            )
             normal_timeout = effective_replay_timeout_seconds(
                 request.window.duration_seconds,
                 request.window.duration_seconds
@@ -404,7 +440,12 @@ class ReplayExtractor:
             )
             lifecycle = _ReplayLifecycle(request, output_path, effective_timeout, diagnostics)
             lifecycle.start()
-            completed = self._run(arguments, effective_timeout, diagnostics)
+            completed = self._run(
+                arguments,
+                effective_timeout,
+                diagnostics,
+                target_coverage_seconds=target_coverage_seconds,
+            )
         except subprocess.TimeoutExpired:
             if lifecycle is not None:
                 lifecycle.timeout_started()
@@ -493,7 +534,15 @@ class ReplayExtractor:
         arguments: tuple[str, ...],
         timeout_seconds: float,
         diagnostics: ReplayProgressDiagnostics | None,
+        *,
+        target_coverage_seconds: float | None,
     ) -> subprocess.CompletedProcess[str]:
+        if target_coverage_seconds is not None:
+            if diagnostics is None:
+                raise ReplayExtractionError
+            return self.target_progress_runner(
+                arguments, timeout_seconds, diagnostics, target_coverage_seconds
+            )
         if diagnostics is None:
             return self.runner(arguments, timeout_seconds)
         return self.progress_runner(arguments, timeout_seconds, diagnostics)
@@ -528,7 +577,9 @@ class ReplayExtractor:
         finally:
             _remove_partial(output_path)
 
-    def _arguments(self, request: ReplayRequest, output_path: Path) -> tuple[str, ...]:
+    def _arguments(
+        self, request: ReplayRequest, output_path: Path, *, target_aware: bool = False
+    ) -> tuple[str, ...]:
         authenticated_url = authenticated_replay_url(
             request.replay_url,
             self.username,
@@ -536,7 +587,7 @@ class ReplayExtractor:
         )
         progress_arguments = (
             ("-progress", "pipe:1", "-nostats", "-stats_period", "0.5")
-            if self.progress_diagnostics
+            if self.progress_diagnostics or target_aware
             else ()
         )
         return (
@@ -544,7 +595,7 @@ class ReplayExtractor:
             "-hide_banner",
             "-loglevel",
             "error",
-            "-nostdin",
+            *(("-nostdin",) if not target_aware else ()),
             *progress_arguments,
             "-rtsp_transport",
             "tcp",

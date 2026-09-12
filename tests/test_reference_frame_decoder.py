@@ -75,6 +75,43 @@ def test_select_nearest_candidate_resolves_duplicate_pts_by_probe_order() -> Non
     assert selected.index == 10
 
 
+def test_latest_at_or_before_uses_sentinel_only_to_close_selection() -> None:
+    candidates = (
+        DecodedFrameCandidate(Decimal("4.9"), 1),
+        DecodedFrameCandidate(Decimal("5.1"), 2),
+    )
+
+    selected = select_nearest_candidate(
+        candidates,
+        5.0,
+        FrameSelectionPolicy.LATEST_DECODED_FRAME_AT_OR_BEFORE,
+    )
+
+    assert selected.local_pts_seconds == Decimal("4.9")
+
+
+def test_latest_at_or_before_rejects_sentinel_only_media() -> None:
+    candidates = (DecodedFrameCandidate(Decimal("5.1"), 1),)
+
+    with pytest.raises(ReferenceFrameNoCandidateError):
+        _ = select_nearest_candidate(
+            candidates,
+            5.0,
+            FrameSelectionPolicy.LATEST_DECODED_FRAME_AT_OR_BEFORE,
+        )
+
+
+def test_latest_at_or_before_rejects_media_that_never_crosses_target() -> None:
+    candidates = (DecodedFrameCandidate(Decimal("4.9"), 1),)
+
+    with pytest.raises(ReferenceFrameNoCandidateError):
+        _ = select_nearest_candidate(
+            candidates,
+            5.0,
+            FrameSelectionPolicy.LATEST_DECODED_FRAME_AT_OR_BEFORE,
+        )
+
+
 def test_ffmpeg_decoder_probes_pts_dimensions_and_writes_selected_jpeg(tmp_path: Path) -> None:
     # Given
     clip_path = tmp_path / "clip.mp4"

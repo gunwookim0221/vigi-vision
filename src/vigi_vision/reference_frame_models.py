@@ -28,6 +28,7 @@ class FrameSelectionPolicy(str, Enum):
     """The supported deterministic decoded-frame selection policy."""
 
     NEAREST_DECODED_FRAME = "nearest_decoded_frame"
+    LATEST_DECODED_FRAME_AT_OR_BEFORE = "latest_decoded_frame_at_or_before"
 
 
 @final

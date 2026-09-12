@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 from typing_extensions import override
 
 from vigi_vision.recording_models import RecordingSegment, RecordingWindow, ReplayRequest
@@ -34,9 +35,11 @@ from vigi_vision.reference_frame_models import (
 from vigi_vision.replay import (
     ReplayClip,
     ReplayExtractionError,
+    ReplayExtractor,
     ReplayTimeoutError,
     ReplayUnavailableError,
 )
+from vigi_vision.replay_progress import ReplayProgressDiagnostics
 
 UTC = timezone.utc
 ANCHOR = datetime(2026, 9, 4, 5, 17, 32, tzinfo=UTC)
@@ -170,14 +173,39 @@ def test_window_clips_to_segment_start_and_end() -> None:
 
 
 def test_final_target_window_clips_to_search_end() -> None:
-    plan = _plan(duration_seconds=600)
+    search_end = ANCHOR + timedelta(seconds=600)
+    plan = _plan((_segment(ANCHOR, search_end + timedelta(minutes=2)),), duration_seconds=600)
     target = plan.targets[-1]
 
     window = build_successor_target_window(plan, target)
 
     assert window is not None
     assert window.start_utc == target.requested_time_utc - timedelta(seconds=5)
-    assert window.end_utc == plan.search_end_utc
+    assert window.end_utc == plan.search_end_utc + timedelta(seconds=5)
+
+
+def test_transport_window_never_exceeds_raw_segment_end() -> None:
+    search_end = ANCHOR + timedelta(seconds=600)
+    raw_end = search_end + timedelta(seconds=2)
+    plan = _plan((_segment(ANCHOR, raw_end),), duration_seconds=600)
+
+    window = build_successor_target_window(plan, plan.targets[-1])
+
+    assert window is not None
+    assert window.end_utc == raw_end
+    assert plan.segments[-1].end_utc == search_end
+    assert plan.segments[-1].raw_end_utc == raw_end
+
+
+def test_target_without_post_target_segment_margin_does_not_call_replay(tmp_path: Path) -> None:
+    plan = _plan(duration_seconds=600)
+    service, planner, extractor = _service(tmp_path)
+
+    result = service.acquire(plan, plan.targets[-1])
+
+    assert result.status is SuccessorTargetStatus.DECODE_UNAVAILABLE
+    assert not planner.windows
+    assert not extractor.calls
 
 
 def test_gap_target_never_calls_replay(tmp_path: Path) -> None:
@@ -219,6 +247,17 @@ def test_nearest_actual_pts_and_offset_are_retained(tmp_path: Path) -> None:
     assert not extractor.paths[0].exists()
 
 
+def test_selected_frame_after_semantic_target_is_rejected(tmp_path: Path) -> None:
+    plan = _plan()
+    service, _, extractor = _service(tmp_path, decoder=_FakeDecoder(5.25))
+
+    result = service.acquire(plan, plan.targets[0])
+
+    assert result.status is SuccessorTargetStatus.DECODE_UNAVAILABLE
+    assert result.frame_bytes is None
+    assert not extractor.paths[0].exists()
+
+
 def test_decoder_without_frames_is_explicitly_unavailable(tmp_path: Path) -> None:
     class NoFrameDecoder(_FakeDecoder):
         @override
@@ -257,7 +296,8 @@ def test_replay_failures_are_target_local(
 
 
 def test_one_target_failure_does_not_stop_other_targets(tmp_path: Path) -> None:
-    plan = _plan()
+    search_end = ANCHOR + timedelta(minutes=30)
+    plan = _plan((_segment(ANCHOR, search_end + timedelta(seconds=5)),))
     service, _, extractor = _service(tmp_path, outcomes=[ReplayUnavailableError()])
 
     results = service.acquire_plan(plan)
@@ -304,7 +344,7 @@ def test_production_decoder_selects_actual_pts_from_short_media(tmp_path: Path) 
             "-i",
             "testsrc=size=64x48:rate=10",
             "-t",
-            "1",
+            "6.5",
             "-pix_fmt",
             "yuv420p",
             "-y",
@@ -342,6 +382,78 @@ def test_production_decoder_selects_actual_pts_from_short_media(tmp_path: Path) 
     assert result.status is SuccessorTargetStatus.FRAME_AVAILABLE
     assert result.frame_pts_seconds is not None
     assert result.frame_utc is not None
-    assert result.frame_utc != result.requested_time_utc
+    assert result.frame_utc <= result.requested_time_utc
     assert result.frame_size_bytes == len(result.frame_bytes or b"")
     assert not clip_path.exists()
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="ffmpeg and ffprobe are required for the production-shaped finalization check",
+)
+def test_stalled_nine_second_media_is_validated_and_selects_pre_target_frame(
+    tmp_path: Path,
+) -> None:
+    ffmpeg = Path(shutil.which("ffmpeg") or "ffmpeg")
+    ffprobe = Path(shutil.which("ffprobe") or "ffprobe")
+    fixture = tmp_path / "source.mp4"
+    generated = subprocess.run(  # noqa: S603
+        (
+            str(ffmpeg),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x48:rate=10",
+            "-t",
+            "6.5",
+            "-pix_fmt",
+            "yuv420p",
+            "-y",
+            str(fixture),
+        ),
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=15,
+    )
+    assert generated.returncode == 0
+    observed: list[tuple[float, float]] = []
+
+    def stalled_runner(
+        arguments: tuple[str, ...],
+        timeout_seconds: float,
+        diagnostics: ReplayProgressDiagnostics,
+        target_coverage_seconds: float,
+    ) -> subprocess.CompletedProcess[str]:
+        assert "-nostdin" not in arguments
+        assert "-progress" in arguments
+        observed.append((timeout_seconds, target_coverage_seconds))
+        _ = shutil.copyfile(fixture, Path(arguments[-1]))
+        diagnostics.observe_line("out_time_us=9340000", now=1.0)
+        diagnostics.observe_line("progress=continue", now=1.0)
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    plan = _plan()
+    service = SuccessorTargetAcquisitionService(
+        _FakePlanner(),
+        ReplayExtractor(
+            executable=ffmpeg,
+            username="operator",
+            password=SecretStr("password"),
+            temporary_directory=tmp_path / "replays",
+            target_progress_runner=stalled_runner,
+        ),
+        FfmpegReferenceFrameDecoder(ffmpeg, ffprobe),
+        temporary_directory=tmp_path / "frames",
+    )
+
+    result = service.acquire(plan, plan.targets[0])
+
+    assert result.status is SuccessorTargetStatus.FRAME_AVAILABLE
+    assert result.frame_utc is not None
+    assert result.frame_utc <= result.requested_time_utc
+    assert observed == [(50.0, 6.0)]
+    assert not tuple((tmp_path / "replays").glob("*.mp4"))

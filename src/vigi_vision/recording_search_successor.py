@@ -151,6 +151,8 @@ class SegmentCoverage:
     channel_id: int
     start_utc: datetime
     end_utc: datetime
+    raw_start_utc: datetime
+    raw_end_utc: datetime
 
     def __post_init__(self) -> None:
         """Validate one clipped whole-second coverage interval."""
@@ -160,6 +162,11 @@ class SegmentCoverage:
             or not _is_whole_utc(self.start_utc)
             or not _is_whole_utc(self.end_utc)
             or self.end_utc <= self.start_utc
+            or not _is_whole_utc(self.raw_start_utc)
+            or not _is_whole_utc(self.raw_end_utc)
+            or self.raw_end_utc <= self.raw_start_utc
+            or self.start_utc < self.raw_start_utc
+            or self.end_utc > self.raw_end_utc
         ):
             raise SuccessorPlanError
 
@@ -310,6 +317,8 @@ def build_successor_plan(
                 "channel_id": item.channel_id,
                 "start_utc": _timestamp(item.start_utc),
                 "end_utc": _timestamp(item.end_utc),
+                "raw_start_utc": _timestamp(item.raw_start_utc),
+                "raw_end_utc": _timestamp(item.raw_end_utc),
             }
             for item in normalized
         ],
@@ -365,7 +374,14 @@ def _normalize_segments(
         end = min(request.search_end_utc, segment.end_utc)
         if start >= end:
             continue
-        coverage = SegmentCoverage(segment_identity(segment), segment.channel_id, start, end)
+        coverage = SegmentCoverage(
+            segment_identity(segment),
+            segment.channel_id,
+            start,
+            end,
+            segment.start_utc,
+            segment.end_utc,
+        )
         values[(coverage.segment_id, coverage.start_utc, coverage.end_utc)] = coverage
     return tuple(
         sorted(values.values(), key=lambda item: (item.start_utc, item.end_utc, item.segment_id))

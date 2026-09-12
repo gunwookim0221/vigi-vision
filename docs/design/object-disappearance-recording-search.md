@@ -195,6 +195,18 @@ per-target timing, acquisition, classifier, digest, ROI, and policy facts.
 Target-local unavailable and visual-indeterminate reasons remain distinct in
 terminal evidence. Final human real-NVR acceptance remains unimplemented:
 
+Slice 2 separates the semantic observation horizon from its replay transport
+window. Each normalized coverage item retains its raw assigned segment bounds;
+when that segment permits, acquisition requests up to five bounded seconds after
+the target even when the target is the semantic search end. FFmpeg progress is
+only a trigger for a cross-platform bounded graceful stop after one second of
+post-target transport context. The resulting MP4 is still accepted only after
+ffprobe-backed frame enumeration and JPEG decode succeed. Classification receives
+the latest decoded frame at or before the target; post-target sentinel frames can
+close selection but can never become observations or extend the terminal observed
+range. A target without any raw post-target margin, a clip without a frame at or
+before the target, corrupt media, or failed finalization remains unavailable.
+
 | Slice | User-visible outcome | Minimum tests | Acceptance criterion | Deferred hardening |
 | --- | --- | --- | --- | --- |
 | 1. Segment discovery and target scheduling | A two-hour request exposes ordered targets and honest gaps. | Adjacent/overlapping segments, gaps, boundaries, different segment sizes, deterministic target identities. | Every target is mapped to coverage or an explicit gap without whole-horizon download. | Multi-process discovery races and long-term segment cache. |

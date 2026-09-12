@@ -287,6 +287,10 @@ The historical-baseline correction preserves the selected Phase 6 frame time,
 classifies a real search-anchor frame, and persists target-level timing,
 acquisition, classifier, digest, ROI, policy, and safe-reason evidence without
 changing the public Schema 8 projection.
+Successor acquisition now preserves raw segment bounds separately from semantic
+coverage, uses bounded post-target replay context to finalize short RTSP media,
+and admits only a decoded frame at or before the requested target. Sentinel
+frames never extend the search result's observed range.
 Search admission now uses the same effective start in the browser and backend:
 the later of the investigation anchor and selected baseline time; minute-level
 native `datetime-local` search-end values are accepted as whole seconds.

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from vigi_vision.recording import RecordingUnavailableError
 from vigi_vision.recording_models import RecordingSegment, RecordingWindow, ReplayRequest
@@ -43,6 +43,7 @@ from vigi_vision.replay import (
 
 DEFAULT_TARGET_PADDING_SECONDS = 5
 MAXIMUM_TARGET_WINDOW_SECONDS = 10
+POST_TARGET_SENTINEL_SECONDS = 5
 MAXIMUM_FRAME_BYTES = 16 * 1024 * 1024
 _SHA256_HEX_LENGTH = 64
 
@@ -78,7 +79,9 @@ class SuccessorTargetAcquisitionPolicy:
     target_padding_seconds: int = DEFAULT_TARGET_PADDING_SECONDS
     maximum_window_seconds: int = MAXIMUM_TARGET_WINDOW_SECONDS
     maximum_frame_bytes: int = MAXIMUM_FRAME_BYTES
-    frame_selection_policy: FrameSelectionPolicy = FrameSelectionPolicy.NEAREST_DECODED_FRAME
+    frame_selection_policy: FrameSelectionPolicy = (
+        FrameSelectionPolicy.LATEST_DECODED_FRAME_AT_OR_BEFORE
+    )
 
     def __post_init__(self) -> None:
         """Validate bounded target acquisition limits."""
@@ -188,6 +191,16 @@ class SuccessorReplayExtractionBoundary(Protocol):
         ...
 
 
+class SuccessorTargetAwareReplayBoundary(Protocol):
+    """Optional target-aware replay finalization supplied by production extraction."""
+
+    def extract_for_target(
+        self, request: ReplayRequest, target_offset_seconds: float
+    ) -> ReplayClip:
+        """Extract until bounded post-target transport context is available."""
+        ...
+
+
 def successor_target_id(plan: MultiSegmentCoarsePlan, target: CoarseTargetAssignment) -> str:
     """Return a deterministic identity for one plan-owned coarse target."""
     _validate_target_membership(plan, target)
@@ -260,9 +273,8 @@ def _build_successor_target_window(
         target.requested_time_utc - timedelta(seconds=selected_policy.target_padding_seconds),
     )
     end = min(
-        coverage.end_utc,
-        plan.search_end_utc,
-        target.requested_time_utc + timedelta(seconds=selected_policy.target_padding_seconds),
+        coverage.raw_end_utc,
+        target.requested_time_utc + timedelta(seconds=POST_TARGET_SENTINEL_SECONDS),
     )
     if end <= start or (end - start).total_seconds() > selected_policy.maximum_window_seconds:
         raise SuccessorAcquisitionContractError
@@ -313,7 +325,7 @@ class SuccessorTargetAcquisitionService:
         target_id = successor_anchor_target_id(plan, target)
         return self._acquire_with_identity(plan, target, target_id, validate_membership=False)
 
-    def _acquire_with_identity(  # noqa: C901
+    def _acquire_with_identity(  # noqa: C901, PLR0912
         self,
         plan: MultiSegmentCoarsePlan,
         target: CoarseTargetAssignment,
@@ -339,6 +351,15 @@ class SuccessorTargetAcquisitionService:
                 None,
                 SuccessorTargetStatus.UNAVAILABLE_GAP,
             )
+        if window.end_utc <= target.requested_time_utc:
+            return self._unavailable_result(
+                plan,
+                target,
+                target_id,
+                acquisition_id,
+                window,
+                SuccessorTargetStatus.DECODE_UNAVAILABLE,
+            )
         coverage = _assigned_coverage(plan, target)
         replay_request: ReplayRequest
         try:
@@ -359,7 +380,16 @@ class SuccessorTargetAcquisitionService:
         clip: ReplayClip | None = None
         try:
             try:
-                clip = self.replay_extractor.extract(replay_request)
+                target_offset_seconds = (
+                    target.requested_time_utc - window.start_utc
+                ).total_seconds()
+                if callable(getattr(self.replay_extractor, "extract_for_target", None)):
+                    target_replay = cast(
+                        "SuccessorTargetAwareReplayBoundary", cast("object", self.replay_extractor)
+                    )
+                    clip = target_replay.extract_for_target(replay_request, target_offset_seconds)
+                else:
+                    clip = self.replay_extractor.extract(replay_request)
             except ReplayUnavailableError:
                 result = self._unavailable_result(
                     plan,
@@ -487,7 +517,11 @@ class SuccessorTargetAcquisitionService:
                     SuccessorTargetStatus.DECODE_UNAVAILABLE,
                 )
             frame_utc = window.start_utc + timedelta(seconds=evidence.local_pts_seconds)
-            if frame_utc < window.start_utc or frame_utc > window.end_utc:
+            if (
+                frame_utc < window.start_utc
+                or frame_utc > window.end_utc
+                or frame_utc > target.requested_time_utc
+            ):
                 return self._unavailable_result(
                     plan,
                     target,
@@ -610,11 +644,11 @@ def _assigned_coverage(
 def _recording_segment(coverage: SegmentCoverage) -> RecordingSegment:
     return RecordingSegment(
         coverage.channel_id,
-        coverage.start_utc.date(),
-        int(coverage.start_utc.timestamp()),
-        int(coverage.end_utc.timestamp()),
-        coverage.start_utc,
-        coverage.end_utc,
+        coverage.raw_start_utc.date(),
+        int(coverage.raw_start_utc.timestamp()),
+        int(coverage.raw_end_utc.timestamp()),
+        coverage.raw_start_utc,
+        coverage.raw_end_utc,
     )
 
 

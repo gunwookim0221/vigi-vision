@@ -1,4 +1,5 @@
 import json
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,7 +10,10 @@ from pydantic import SecretStr
 
 from vigi_vision.recording import RecordingWindow, ReplayRequest
 from vigi_vision.replay import ReplayExtractor, ReplayTimeoutError
-from vigi_vision.replay_progress import ReplayProgressDiagnostics
+from vigi_vision.replay_progress import (
+    ReplayProgressDiagnostics,
+    run_ffmpeg_until_target,
+)
 
 
 def _lifecycle_events(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
@@ -70,6 +74,45 @@ def test_progress_diagnostics_prefers_microsecond_time_and_detects_end() -> None
     assert summary.highest_media_time_us == 6_000_000
     assert summary.reached_requested_duration is True
     assert summary.progress_end_seen is True
+
+
+def test_target_runner_requests_cross_platform_graceful_stop_after_context() -> None:
+    diagnostics = ReplayProgressDiagnostics(requested_duration_seconds=10)
+    child = (
+        "import sys,time;"
+        "print('out_time_us=9340000',flush=True);"
+        "print('progress=continue',flush=True);"
+        "value=sys.stdin.readline();"
+        "sys.exit(0 if value=='q\\n' else 3)"
+    )
+
+    completed = run_ffmpeg_until_target(
+        (sys.executable, "-c", child),
+        2.0,
+        diagnostics,
+        6.0,
+    )
+
+    assert completed.returncode == 0
+    assert diagnostics.summary(now=time.perf_counter()).highest_media_time_us == 9_340_000
+
+
+def test_target_runner_fails_closed_when_progress_never_reaches_target() -> None:
+    diagnostics = ReplayProgressDiagnostics(requested_duration_seconds=10)
+    child = (
+        "import time;"
+        "print('out_time_us=4000000',flush=True);"
+        "print('progress=continue',flush=True);"
+        "time.sleep(5)"
+    )
+
+    with pytest.raises(TimeoutExpired):
+        _ = run_ffmpeg_until_target(
+            (sys.executable, "-c", child),
+            0.2,
+            diagnostics,
+            6.0,
+        )
 
 
 def test_enabled_progress_adds_machine_protocol_and_logs_only_aggregates(
