@@ -191,6 +191,27 @@ test("successor admission failure is shown as a safe configuration message", asy
   assert.equal(harness.window.vigiVisionRecordingSearch.getState().polling, false);
 });
 
+test("frontend reason vocabulary covers every successor terminal reason", () => {
+  const harness = createHarness(() => Promise.resolve({ ok: true, status: 200, json: async () => status("RUNNING") }), undefined, {
+    confirmation: true,
+    search: true,
+    requestId: REQUEST_ID,
+  });
+  const expected = [
+    "disappearance_confirmed", "complete_present_coverage", "no_present_absent_bracket",
+    "incomplete_coverage", "indeterminate_observation", "insufficient_visual_evidence",
+    "invalid_frame_or_roi", "frame_decode_failed", "frame_resolution_mismatch",
+    "target_unavailable_gap", "target_recording_unavailable", "target_replay_timeout",
+    "target_replay_failed", "target_decode_timeout", "target_decode_unavailable",
+    "classifier_timeout", "classifier_failed", "midpoint_gap",
+    "midpoint_acquisition_unavailable", "midpoint_indeterminate",
+    "midpoint_classification_unavailable", "no_progress", "cancelled",
+    "abandoned_after_restart", "internal_error",
+  ];
+  const actual = new Set(harness.window.vigiVisionRecordingSearch.getReasonCodes());
+  expected.forEach((reason) => assert.equal(actual.has(reason), true, reason));
+});
+
 test("recording-unavailable terminal reason is rendered with its fixed explanation", async () => {
   const harness = createHarness((url) => {
     if (url === "/api/v1/recording-searches") {

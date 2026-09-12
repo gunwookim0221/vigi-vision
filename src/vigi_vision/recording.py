@@ -37,6 +37,12 @@ __all__ = (
 _RECORDING_TIMEZONE = timezone(timedelta(hours=9), "KST")
 _REPLAY_TIME_FORMAT = "%Y%m%dt%H%M%Sz"
 _RESULT_PAGE_SIZE = 100
+# A 15-second NVR segment cadence yields 5,760 segments per day.  Keep a
+# small margin while bounding malformed/repeating SDK pagination responses.
+_MAX_RECORDING_SEGMENTS_PER_DAY = 6_000
+_MAX_RECORDING_RESULT_PAGES = (
+    _MAX_RECORDING_SEGMENTS_PER_DAY + _RESULT_PAGE_SIZE - 1
+) // _RESULT_PAGE_SIZE
 
 
 class RecordingApi(Protocol):
@@ -223,8 +229,13 @@ class RecordingPlanner:
         self, channel_id: int, process_id: int, recording_day: date
     ) -> tuple[RecordingSegment, ...]:
         segments: list[RecordingSegment] = []
+        identities: set[tuple[int, datetime, datetime]] = set()
         start_index = 0
+        page_count = 0
         while True:
+            page_count += 1
+            if page_count > _MAX_RECORDING_RESULT_PAGES:
+                raise RecordingDataError
             response = self.client.records.list_results(
                 channel_id,
                 process_id,
@@ -232,12 +243,20 @@ class RecordingPlanner:
                 start_index,
                 start_index + _RESULT_PAGE_SIZE - 1,
             )
-            segments.extend(
+            page_segments = tuple(
                 RecordingSegment.from_sdk(channel_id, recording_day, segment)
                 for segment in response.results
             )
+            for segment in page_segments:
+                identity = (segment.channel_id, segment.start_utc, segment.end_utc)
+                if identity in identities:
+                    raise RecordingDataError
+                identities.add(identity)
+            segments.extend(page_segments)
             if len(response.results) < _RESULT_PAGE_SIZE:
                 return tuple(segments)
+            if page_count == _MAX_RECORDING_RESULT_PAGES:
+                raise RecordingDataError
             start_index += _RESULT_PAGE_SIZE
 
 

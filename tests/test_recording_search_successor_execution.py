@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.request import Request, urlopen
 
+import pytest
 from anyio import CapacityLimiter
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -44,6 +45,7 @@ from vigi_vision.recording_search_successor_classification import (
     SuccessorCoarseClassificationService,
 )
 from vigi_vision.recording_search_successor_execution import (
+    SuccessorExecutionError,
     SuccessorExecutionService,
     SuccessorTerminalRepository,
 )
@@ -55,7 +57,7 @@ from vigi_vision.reference_frame_models import (
     TimingPrecisionStatus,
 )
 from vigi_vision.reference_frame_web_ui import install_reference_frame_web_ui
-from vigi_vision.replay import ReplayClip
+from vigi_vision.replay import ReplayClip, ReplayTimeoutError
 
 UTC = timezone.utc
 ANCHOR = datetime(2026, 9, 4, 5, 17, 32, tzinfo=UTC)
@@ -114,9 +116,11 @@ class _Extractor:
         self.root = root
         self.absent_after = absent_after
         self.calls = 0
+        self.requests: list[ReplayRequest] = []
 
     def extract(self, request: ReplayRequest) -> ReplayClip:
         self.calls += 1
+        self.requests.append(request)
         path = self.root / f"replay-{self.calls}.mp4"
         marker = b"absent" if request.window.end_utc >= self.absent_after else b"present"
         path.write_bytes(marker)
@@ -128,6 +132,45 @@ class _Extractor:
             path,
             request.window.duration_seconds,
         )
+
+
+class _LateTargetTimeoutExtractor(_Extractor):
+    """Fail only targets well after the first coarse bracket."""
+
+    def extract(self, request: ReplayRequest) -> ReplayClip:
+        if request.window.start_utc >= ANCHOR + timedelta(minutes=15):
+            self.calls += 1
+            self.requests.append(request)
+            raise ReplayTimeoutError
+        return super().extract(request)
+
+
+class _FirstCoarseTimeoutExtractor(_Extractor):
+    """Fail the first post-anchor target before any bracket can be formed."""
+
+    def extract(self, request: ReplayRequest) -> ReplayClip:
+        if request.window.start_utc > ANCHOR + timedelta(seconds=1):
+            self.calls += 1
+            self.requests.append(request)
+            raise ReplayTimeoutError
+        return super().extract(request)
+
+
+class _ClassificationProxy:
+    """Record coarse classification calls while delegating production behavior."""
+
+    def __init__(self, delegate: SuccessorCoarseClassificationService) -> None:
+        self.delegate = delegate
+        self.coarse_sequences: list[int] = []
+
+    def classify_anchor_target(self, *args: object, **kwargs: object) -> object:
+        return self.delegate.classify_anchor_target(*args, **kwargs)  # type: ignore[arg-type]
+
+    def classify_coarse_target(
+        self, plan: object, target: object, *args: object, **kwargs: object
+    ) -> object:
+        self.coarse_sequences.append(target.sequence)  # type: ignore[union-attr]
+        return self.delegate.classify_coarse_target(plan, target, *args, **kwargs)  # type: ignore[arg-type]
 
 
 class _FrameDecoder:
@@ -394,6 +437,77 @@ def test_historical_baseline_and_actual_anchor_are_durable_and_narrowable(tmp_pa
     assert result.last_present_time_utc < result.first_absent_time_utc
 
 
+def test_first_coarse_bracket_stops_later_replay_and_classification(tmp_path: Path) -> None:
+    segment = _segment(ANCHOR + timedelta(minutes=30, seconds=1))
+    planner = _Planner(segment)
+    extractor = _LateTargetTimeoutExtractor(tmp_path, ANCHOR + timedelta(minutes=10))
+    acquisition = SuccessorTargetAcquisitionService(
+        planner,
+        extractor,
+        _FrameDecoder(),
+        temporary_directory=tmp_path / "temporary",
+    )
+    classification = SuccessorCoarseClassificationService(_Classifier(), _MediaDecoder())
+    proxy = _ClassificationProxy(classification)
+    service = SuccessorExecutionService(
+        SuccessorPlanService(planner),
+        acquisition,
+        proxy,  # type: ignore[arg-type]
+        SuccessorBinaryNarrowingService(acquisition, classification),
+        _MediaDecoder(),
+        SuccessorTerminalRepository(tmp_path / "successor"),
+    )
+    prepared = service.prepare(
+        _confirmed(tmp_path),
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-stopafterbracket00000000000000",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+
+    result = service.execute(prepared)
+
+    assert result.status == "FOUND"
+    assert proxy.coarse_sequences == [1]
+    assert all(
+        call.window.start_utc < ANCHOR + timedelta(minutes=15) for call in extractor.requests
+    )
+
+
+def test_coarse_timeout_before_bracket_publishes_safe_inconclusive(
+    tmp_path: Path,
+) -> None:
+    segment = _segment(ANCHOR + timedelta(minutes=30, seconds=1))
+    planner = _Planner(segment)
+    extractor = _FirstCoarseTimeoutExtractor(tmp_path, ANCHOR + timedelta(hours=2))
+    acquisition = SuccessorTargetAcquisitionService(
+        planner,
+        extractor,
+        _FrameDecoder(),
+        temporary_directory=tmp_path / "temporary",
+    )
+    classification = SuccessorCoarseClassificationService(_Classifier(), _MediaDecoder())
+    service = SuccessorExecutionService(
+        SuccessorPlanService(planner),
+        acquisition,
+        classification,
+        SuccessorBinaryNarrowingService(acquisition, classification),
+        _MediaDecoder(),
+        SuccessorTerminalRepository(tmp_path / "successor"),
+    )
+    prepared = service.prepare(
+        _confirmed(tmp_path),
+        search_end_time_text="2026-09-04T14:27:32",
+        run_id="search-run-timeoutbeforebracket000000000",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+
+    result = service.execute(prepared)
+
+    assert result.status == "INCONCLUSIVE"
+    assert result.reason_code == "target_replay_timeout"
+    assert len(extractor.requests) == 2
+
+
 def test_future_baseline_moves_successor_effective_start(tmp_path: Path) -> None:
     service = _service(tmp_path, ANCHOR + timedelta(minutes=15))
     confirmed = replace(
@@ -465,6 +579,87 @@ def test_successor_durable_running_state_recovers_as_interrupted(tmp_path: Path)
     recovered = repository.read(prepared.request.investigation_id, prepared.request.run_id)
     assert recovered is not None
     assert recovered["status"] == "INTERRUPTED"
+
+
+def test_schema8_reopen_rejects_coercion_and_malformed_lists(tmp_path: Path) -> None:
+    service = _service(tmp_path, ANCHOR + timedelta(minutes=15))
+    prepared = service.prepare(
+        _confirmed(tmp_path),
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-strictterminal0000000000000000",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    _ = service.execute(prepared)
+    path = (
+        tmp_path
+        / "successor"
+        / prepared.request.investigation_id
+        / prepared.request.run_id
+        / "terminal.json"
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["coverage_complete"] = "false"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(SuccessorExecutionError, match="successor_publication_corrupt"):
+        service.publisher.read(prepared.request.investigation_id, prepared.request.run_id)
+
+    payload["coverage_complete"] = False
+    payload["coarse_target_ids"] = [1]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(SuccessorExecutionError, match="successor_publication_corrupt"):
+        service.publisher.read(prepared.request.investigation_id, prepared.request.run_id)
+
+
+def test_schema8_reopen_rejects_timestamp_identity_and_phase8_corruption(tmp_path: Path) -> None:
+    service = _service(tmp_path, ANCHOR + timedelta(minutes=15))
+    prepared = service.prepare(
+        _confirmed(tmp_path),
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-stricttime0000000000000000000",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    _ = service.execute(prepared)
+    path = (
+        tmp_path
+        / "successor"
+        / prepared.request.investigation_id
+        / prepared.request.run_id
+        / "terminal.json"
+    )
+    baseline = json.loads(path.read_text(encoding="utf-8"))
+    mutations = (
+        {"observed_start_time_utc": "not-a-timestamp"},
+        {"investigation_id": "foreign-investigation"},
+        {"phase8_status": "READY", "phase8_reason": None},
+        {"reason_code": 7},
+    )
+    for mutation in mutations:
+        candidate = {**baseline, **mutation}
+        path.write_text(json.dumps(candidate), encoding="utf-8")
+        with pytest.raises(SuccessorExecutionError, match="successor_publication_corrupt"):
+            service.publisher.read(prepared.request.investigation_id, prepared.request.run_id)
+    reduced = {
+        key: value
+        for key, value in baseline.items()
+        if key
+        not in {
+            "phase8_status",
+            "phase8_reason",
+            "policy_version",
+            "requested_end_time_utc",
+            "narrowing_id",
+            "coverage",
+            "gaps",
+            "coarse_observation_ids",
+            "coarse_target_ids",
+            "target_statuses",
+            "coarse_observations",
+        }
+    }
+    path.write_text(json.dumps(reduced), encoding="utf-8")
+    reopened = service.publisher.read(prepared.request.investigation_id, prepared.request.run_id)
+    assert reopened is not None
+    assert reopened["status"] == "FOUND"
 
 
 def test_successor_runs_through_http_background_and_restart_status(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -35,6 +36,12 @@ _PROGRESS_POLL_INTERVAL_SECONDS = 0.5
 _PROGRESS_SAMPLE_INTERVAL_SECONDS = 10.0
 _MAX_OUTPUT_PROGRESS_EVENTS = 16
 _OUTPUT_GROWTH_THRESHOLD_BYTES = 4 * 1024
+_RTSP_METHODS = r"(?:OPTIONS|DESCRIBE|SETUP|PLAY|PAUSE|TEARDOWN|ANNOUNCE|RECORD)"
+_RTSP_STATUS_CONTEXT_PREFIX = (
+    rf"(?i)(?:\brtsp\b|\b{_RTSP_METHODS}\b|\bserver\s+returned\b)[^\r\n]{{0,96}}"
+)
+_RTSP_STATUS_CONTEXT = re.compile(rf"{_RTSP_STATUS_CONTEXT_PREFIX}\b(?P<status>401|454)\b")
+_RTSP_STATUS_LINE = re.compile(r"(?im)^\s*(?:RTSP|HTTP)/\d(?:\.\d)?\s+(?P<status>401|454)\b")
 _LOGGER = logging.getLogger(__name__)
 _PROGRESS_LOGGER = logging.getLogger("uvicorn.error.vigi_vision.phase7e")
 
@@ -569,11 +576,18 @@ def _is_nonempty_file(path: Path) -> bool:
 
 
 def _process_error(stderr: str) -> ReplayError:
-    if "401" in stderr:
+    status = _status_from_error_context(stderr)
+    if status == "401":
         return ReplayAuthenticationError()
-    if "454" in stderr:
+    if status == "454":
         return ReplayUnavailableError()
     return ReplayExtractionError()
+
+
+def _status_from_error_context(stderr: str) -> str | None:
+    """Read RTSP/HTTP status only when a protocol context is present."""
+    match = _RTSP_STATUS_LINE.search(stderr) or _RTSP_STATUS_CONTEXT.search(stderr)
+    return None if match is None else match.group("status")
 
 
 def authenticated_replay_url(replay_url: str, username: str, password: str) -> str:

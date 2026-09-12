@@ -278,8 +278,11 @@ def test_same_input_has_stable_target_and_acquisition_identity(tmp_path: Path) -
 
     assert successor_target_id(plan, target) == first.target_id == second.target_id
     assert first.acquisition_id == second.acquisition_id
-    assert first is second
-    assert len(extractor.calls) == 1
+    assert first is not second
+    assert first.status is second.status is SuccessorTargetStatus.FRAME_AVAILABLE
+    assert first.frame_sha256 == second.frame_sha256
+    assert len(extractor.calls) == 2
+    assert not hasattr(service, "_cache")
 
 
 @pytest.mark.skipif(

@@ -271,7 +271,13 @@ def _build_successor_target_window(
 
 @dataclass(slots=True)
 class SuccessorTargetAcquisitionService:
-    """Acquire each target once through replay and local nearest-PTS decoding."""
+    """Acquire targets through replay and local nearest-PTS decoding.
+
+    Results are intentionally caller-owned.  The service is reused by the
+    application, but it never retains frame bytes or target outcomes across
+    invocations; duplicate work is therefore only reusable when a caller
+    explicitly retains the returned result for the current invocation.
+    """
 
     recording_planner: SuccessorRecordingReplayBoundary
     replay_extractor: SuccessorReplayExtractionBoundary
@@ -280,9 +286,6 @@ class SuccessorTargetAcquisitionService:
         default_factory=SuccessorTargetAcquisitionPolicy
     )
     temporary_directory: Path | None = field(default=None, repr=False)
-    _cache: dict[str, SuccessorTargetAcquisitionResult] = field(
-        default_factory=dict, init=False, repr=False
-    )
 
     def acquire_plan(
         self, plan: MultiSegmentCoarsePlan
@@ -325,11 +328,8 @@ class SuccessorTargetAcquisitionService:
             validate_membership=validate_membership,
         )
         acquisition_id = _acquisition_id(plan, target, window, self.policy, target_id)
-        cached = self._cache.get(acquisition_id)
-        if cached is not None:
-            return cached
         if window is None:
-            result = SuccessorTargetAcquisitionResult(
+            return SuccessorTargetAcquisitionResult(
                 plan.plan_id,
                 target_id,
                 acquisition_id,
@@ -339,8 +339,6 @@ class SuccessorTargetAcquisitionService:
                 None,
                 SuccessorTargetStatus.UNAVAILABLE_GAP,
             )
-            self._cache[acquisition_id] = result
-            return result
         coverage = _assigned_coverage(plan, target)
         replay_request: ReplayRequest
         try:
@@ -348,7 +346,7 @@ class SuccessorTargetAcquisitionService:
                 _recording_segment(coverage), window
             )
         except RecordingUnavailableError:
-            result = self._unavailable_result(
+            return self._unavailable_result(
                 plan,
                 target,
                 target_id,
@@ -356,8 +354,6 @@ class SuccessorTargetAcquisitionService:
                 window,
                 SuccessorTargetStatus.RECORDING_UNAVAILABLE,
             )
-            self._cache[acquisition_id] = result
-            return result
         if replay_request.window != window:
             raise SuccessorAcquisitionContractError
         clip: ReplayClip | None = None
@@ -399,7 +395,6 @@ class SuccessorTargetAcquisitionService:
                 ):
                     raise SuccessorAcquisitionContractError
                 result = self._decode_target(plan, target, target_id, acquisition_id, window, clip)
-            self._cache[acquisition_id] = result
             return result
         finally:
             if clip is not None:

@@ -83,6 +83,63 @@
     search_run_not_found: "접수된 검색 실행을 찾을 수 없습니다.",
     internal_error: "검색 작업을 안전하게 완료할 수 없습니다.",
   });
+  const RESULT_REASON_MESSAGES = Object.freeze({
+    disappearance_confirmed: "대상이 사라진 구간이 확인되었습니다.",
+    complete_present_coverage: "관측 가능한 검색 범위에서는 대상이 계속 존재했습니다.",
+    no_present_absent_bracket: "관측 가능한 증거에서 소실 전환 구간을 찾지 못했습니다.",
+    unavailable_gap: "녹화 공백 또는 확인되지 않은 범위가 있어 결론을 낼 수 없습니다.",
+    incomplete_coverage: "일부 검색 범위를 확인하지 못해 결론을 낼 수 없습니다.",
+    INCOMPLETE_MEDIA_COVERAGE: "사용 가능한 녹화가 요청 종료 전 끝나 전체 구간을 판단할 수 없습니다.",
+    VISUAL_INDETERMINATE: "사용 가능한 화면만으로 대상의 존재 여부를 신뢰성 있게 판단할 수 없습니다.",
+    INCOMPLETE_VISUAL_EVIDENCE: "판정에 필요한 화면 증거가 충분하지 않습니다.",
+    BASELINE_ONLY_LOWER_BOUND: "기준 화면 이후의 존재 증거가 충분하지 않습니다.",
+    indeterminate_observation: "일부 관측 프레임에서 대상의 존재 여부를 신뢰성 있게 판단할 수 없습니다.",
+    insufficient_visual_evidence: "판정에 필요한 시각 증거가 충분하지 않습니다.",
+    invalid_frame_or_roi: "판정 프레임 또는 ROI가 유효하지 않습니다.",
+    frame_decode_failed: "관측 프레임을 안전하게 디코딩할 수 없습니다.",
+    frame_resolution_mismatch: "관측 프레임의 해상도가 기준과 일치하지 않습니다.",
+    target_unavailable_gap: "대상 시각에 녹화 공백이 있습니다.",
+    target_recording_unavailable: "대상 시각의 녹화 기록을 확인할 수 없습니다.",
+    target_replay_timeout: "대상 시각의 녹화 재생이 제한 시간 안에 끝나지 않았습니다.",
+    target_replay_failed: "대상 시각의 녹화 재생에 실패했습니다.",
+    target_decode_timeout: "대상 프레임 디코딩이 제한 시간 안에 끝나지 않았습니다.",
+    target_decode_unavailable: "대상 프레임을 디코딩할 수 없습니다.",
+    classifier_timeout: "화면 판정이 제한 시간 안에 끝나지 않았습니다.",
+    classifier_failed: "화면 판정에 실패했습니다.",
+    midpoint_gap: "소실 구간을 좁히는 중 녹화 공백이 확인되었습니다.",
+    midpoint_acquisition_unavailable: "소실 구간을 좁힐 프레임을 가져올 수 없습니다.",
+    midpoint_indeterminate: "소실 구간을 좁히는 중 화면 판정이 불확실했습니다.",
+    midpoint_classification_unavailable: "소실 구간을 좁히는 화면 판정을 완료할 수 없습니다.",
+    no_progress: "소실 구간을 더 좁힐 수 있는 관측이 부족합니다.",
+    cancelled: "검색이 취소되었습니다.",
+    abandoned_after_restart: "서버 재시작으로 검색이 중단되었습니다.",
+    recording_unavailable: "해당 검색 범위의 녹화 기록을 충분히 확인할 수 없습니다.",
+    successor_unavailable: "장시간 녹화 검색 기능을 준비할 수 없습니다. 서버 설정을 확인하세요.",
+    media_probe_failed: "녹화 미디어를 검증할 수 없습니다.",
+    media_probe_timeout: "녹화 미디어 검증이 제한 시간 안에 끝나지 않았습니다.",
+    decoder_timeout: "녹화 프레임 디코딩이 제한 시간 안에 끝나지 않았습니다.",
+    decoder_failed: "녹화 프레임 디코딩에 실패했습니다.",
+    replay_authentication: "녹화 재생 인증에 실패했습니다.",
+    replay_unavailable: "요청한 시각의 녹화를 사용할 수 없습니다.",
+    replay_timeout: "녹화 재생이 제한 시간 안에 끝나지 않았습니다.",
+    replay_failed: "녹화 재생에 실패했습니다.",
+    acquisition_failed: "녹화 프레임 획득에 실패했습니다.",
+    missing_pts: "녹화 프레임 시간 정보를 확인할 수 없습니다.",
+    nonmonotonic_pts: "녹화 프레임 시간 순서가 유효하지 않습니다.",
+    timestamp_reset: "녹화 프레임 시간 기준이 재설정되었습니다.",
+    recording_gap: "녹화 구간 사이에 공백이 있습니다.",
+    segment_boundary: "녹화 구간 경계를 안전하게 확인할 수 없습니다.",
+    target_unavailable: "판정에 사용할 녹화 프레임이 없습니다.",
+    insufficient_support: "판정에 필요한 지지 프레임이 부족합니다.",
+    duplicate_frame: "중복 프레임 때문에 판정할 수 없습니다.",
+    media_resource_exceeded: "녹화 미디어 자원 한도를 초과했습니다.",
+    capacity_exhausted: "검색 처리 용량을 초과했습니다.",
+    invocation_deadline_exhausted: "검색 전체 제한 시간을 초과했습니다.",
+    successor_publication_corrupt: "검색 결과 기록이 손상되었습니다.",
+    successor_publication_readback_failed: "검색 결과 기록을 다시 확인할 수 없습니다.",
+    recording_search_execution_unavailable: "녹화 검색 실행기를 사용할 수 없습니다.",
+    internal_error: "검색 작업을 안전하게 완료할 수 없습니다.",
+  });
   let confirmation = null;
   let activeRun = null;
   let controller = null;
@@ -627,21 +684,11 @@
     terminalReady = true;
     setStatus("녹화 기록 검색이 종료되었습니다.", "complete");
     resultKind.textContent = terminalText(payload.status);
-    const reasons = {
-      disappearance_confirmed: "대상이 사라진 구간이 확인되었습니다.",
-      complete_present_coverage: "관측 가능한 검색 범위에서는 대상이 계속 존재했습니다.",
-      no_present_absent_bracket: "관측 가능한 증거에서 소실 전환 구간을 찾지 못했습니다.",
-      unavailable_gap: "녹화 공백 또는 확인되지 않은 범위가 있어 결론을 낼 수 없습니다.",
-      incomplete_coverage: "일부 검색 범위를 확인하지 못해 결론을 낼 수 없습니다.",
-      INCOMPLETE_MEDIA_COVERAGE: "사용 가능한 녹화가 요청 종료 전 끝나 전체 구간을 판단할 수 없습니다.",
-      VISUAL_INDETERMINATE: "사용 가능한 화면만으로 대상의 존재 여부를 신뢰성 있게 판단할 수 없습니다.",
-      INCOMPLETE_VISUAL_EVIDENCE: "판정에 필요한 화면 증거가 충분하지 않습니다.",
-      BASELINE_ONLY_LOWER_BOUND: "기준 화면 이후의 존재 증거가 충분하지 않습니다.",
-      indeterminate_observation: "일부 관측 프레임에서 대상의 존재 여부를 신뢰성 있게 판단할 수 없습니다.",
-      recording_unavailable: "해당 검색 범위의 녹화 기록을 충분히 확인할 수 없습니다.",
-      successor_unavailable: "장시간 녹화 검색 기능을 준비할 수 없습니다. 서버 설정을 확인하세요.",
-    };
-    resultReason.textContent = reasons[payload.reason_code]
+    const mappedReason = Object.prototype.hasOwnProperty.call(
+      RESULT_REASON_MESSAGES,
+      payload.reason_code,
+    ) ? RESULT_REASON_MESSAGES[payload.reason_code] : null;
+    resultReason.textContent = mappedReason
       ?? (payload.reason_code === null ? "서버가 추가 사유를 제공하지 않았습니다." : "서버가 제공한 안전한 결과 사유가 있습니다.");
     const details = payload.terminal_details;
     if ((activeRun?.searchEnd === null || activeRun?.searchEnd === undefined)
@@ -835,6 +882,7 @@
       submitting,
       polling: lifecycle !== null,
     }),
+    getReasonCodes: () => Object.keys(RESULT_REASON_MESSAGES),
   });
   loadFromLocation();
 }());

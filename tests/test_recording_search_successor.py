@@ -65,6 +65,20 @@ def test_one_segment_covers_full_range_and_anchor_is_not_a_target() -> None:
     assert all(item.requested_time_utc != ANCHOR for item in plan.targets)
 
 
+@pytest.mark.parametrize(
+    ("duration_seconds", "target_count"),
+    [(600, 1), (1_800, 3), (3_600, 6), (7_200, 12)],
+)
+def test_supported_successor_horizons_keep_deterministic_coarse_grid(
+    duration_seconds: int, target_count: int
+) -> None:
+    request = _request(duration_seconds)
+    plan = build_successor_plan(request, (_segment(ANCHOR, request.search_end_utc),))
+
+    assert len(plan.targets) == target_count
+    assert plan.targets[-1].requested_time_utc == request.search_end_utc
+
+
 def test_adjacent_segments_cover_range_without_gap() -> None:
     request = _request()
     segments = tuple(

@@ -467,6 +467,26 @@ class SuccessorCoarseClassificationService:
             _candidate_bracket(renumbered),
         )
 
+    def classify_coarse_target(
+        self,
+        plan: MultiSegmentCoarsePlan,
+        target: CoarseTargetAssignment,
+        acquisition: SuccessorTargetAcquisitionResult,
+        authority: SuccessorClassificationAuthority,
+    ) -> SuccessorObservation:
+        """Classify one chronological coarse target without requiring a full plan."""
+        self._validate_authority(plan, authority)
+        if (
+            target not in plan.targets
+            or acquisition.plan_id != plan.plan_id
+            or acquisition.target_id != successor_target_id(plan, target)
+            or acquisition.sequence != target.sequence
+            or acquisition.requested_time_utc != target.requested_time_utc
+            or acquisition.assigned_segment_id != target.segment_id
+        ):
+            raise SuccessorClassificationContractError
+        return self._classify_target(plan, target, acquisition, authority)
+
     def classify_target(
         self,
         plan: MultiSegmentCoarsePlan,

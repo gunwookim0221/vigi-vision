@@ -43,7 +43,6 @@ from vigi_vision.recording_search_successor import (
     effective_search_start_utc,
 )
 from vigi_vision.recording_search_successor_acquisition import (
-    SuccessorTargetAcquisitionResult,
     SuccessorTargetAcquisitionService,
     SuccessorTargetStatus,
 )
@@ -75,6 +74,36 @@ SUCCESSOR_RECORD_VERSION = "phase7e-successor-terminal-v1"
 _RUNNING = "RUNNING"
 _TERMINAL = frozenset({"FOUND", "NOT_FOUND", "INCONCLUSIVE", "FAILED", "INTERRUPTED"})
 _MAX_RECOVERY_RECORDS = 1024
+_SUCCESSOR_TERMINAL_REASONS = frozenset(
+    {
+        "disappearance_confirmed",
+        "complete_present_coverage",
+        "incomplete_coverage",
+        "no_present_absent_bracket",
+        "indeterminate_observation",
+        "insufficient_visual_evidence",
+        "invalid_frame_or_roi",
+        "frame_decode_failed",
+        "frame_resolution_mismatch",
+        "target_unavailable_gap",
+        "target_recording_unavailable",
+        "target_replay_timeout",
+        "target_replay_failed",
+        "target_decode_timeout",
+        "target_decode_unavailable",
+        "classifier_timeout",
+        "classifier_failed",
+        "midpoint_gap",
+        "midpoint_acquisition_unavailable",
+        "midpoint_indeterminate",
+        "midpoint_classification_unavailable",
+        "no_progress",
+        "cancelled",
+        "abandoned_after_restart",
+        "internal_error",
+    }
+)
+_PHASE8_NOT_REQUESTED_REASON = "successor_slice5_does_not_create_handoffs"
 
 
 class SuccessorExecutionError(RuntimeError):
@@ -204,6 +233,8 @@ class SuccessorTerminalRepository:
                 raise SuccessorExecutionError("successor_publication_corrupt")
             if value.get("status") not in {_RUNNING, *_TERMINAL}:
                 raise SuccessorExecutionError("successor_publication_corrupt")
+            if value.get("status") in _TERMINAL:
+                _validate_terminal_record(value)
             return value
 
     def publish_running(self, prepared: SuccessorPreparedExecution) -> None:
@@ -275,6 +306,10 @@ class SuccessorTerminalRepository:
                     False,
                     str(value.get("source_timezone")),
                     None,
+                )
+                terminal = replace(
+                    terminal,
+                    requested_end_time_utc=str(value.get("request_end_utc")),
                 )
                 self.publish_terminal(terminal)
                 recovered += 1
@@ -421,7 +456,6 @@ class SuccessorExecutionService:
     ) -> SuccessorTerminal:
         self.publisher.publish_running(prepared)
         try:
-            acquisitions: list[SuccessorTargetAcquisitionResult] = []
             if cancellation is not None and cancellation():
                 return self._publish_interrupted(prepared)
             anchor_target = _anchor_target(prepared.plan)
@@ -429,41 +463,48 @@ class SuccessorExecutionService:
             anchor_observation = self.classification.classify_anchor_target(
                 prepared.plan, anchor_target, anchor_acquisition, prepared.authority
             )
-            for target in prepared.plan.targets:
-                if cancellation is not None and cancellation():
-                    return self._publish_interrupted(prepared)
-                acquisitions.append(self.acquisition.acquire(prepared.plan, target))
-            acquired = tuple(acquisitions)
-            coarse = self.classification.classify_plan(prepared.plan, acquired, prepared.authority)
+            coarse_observations: list[SuccessorObservation] = []
+            coarse = _coarse_snapshot(prepared, coarse_observations)
             augmented = _with_anchor_observation(prepared, coarse, anchor_observation)
-            if any(
-                item.state
-                not in {SuccessorObservationState.PRESENT, SuccessorObservationState.ABSENT}
-                for item in augmented.observations
-            ):
+            if augmented.candidate_bracket is not None:
+                return self._narrow_or_publish(prepared, augmented)
+            if anchor_observation.state not in {
+                SuccessorObservationState.PRESENT,
+                SuccessorObservationState.ABSENT,
+            }:
                 return self._publish_inconclusive(
                     prepared,
                     _inconclusive_reason(prepared.plan, augmented.observations),
                     augmented,
                 )
-            bracket = augmented.candidate_bracket
-            if bracket is None:
-                if prepared.plan.gaps:
-                    return self._publish_inconclusive(prepared, "incomplete_coverage", augmented)
-                if all(
-                    item.state is SuccessorObservationState.PRESENT
-                    for item in augmented.observations
-                ):
-                    return self._publish_not_found(prepared, augmented)
-                return self._publish_inconclusive(prepared, "no_present_absent_bracket", augmented)
-            if _bracket_intersects_gap(prepared.plan, bracket):
-                return self._publish_inconclusive(prepared, "incomplete_coverage", augmented)
-            narrowed = self.narrowing.narrow(prepared.plan, augmented, prepared.authority)
-            if narrowed.completion is not SuccessorNarrowingCompletion.NARROWED:
-                return self._publish_inconclusive(
-                    prepared, narrowed.reason_code, augmented, narrowed
+            for target in prepared.plan.targets:
+                if cancellation is not None and cancellation():
+                    return self._publish_interrupted(prepared)
+                acquisition = self.acquisition.acquire(prepared.plan, target)
+                observation = self.classification.classify_coarse_target(
+                    prepared.plan, target, acquisition, prepared.authority
                 )
-            return self._publish_found(prepared, augmented, narrowed)
+                coarse_observations.append(observation)
+                coarse = _coarse_snapshot(prepared, coarse_observations)
+                augmented = _with_anchor_observation(prepared, coarse, anchor_observation)
+                if augmented.candidate_bracket is not None:
+                    return self._narrow_or_publish(prepared, augmented)
+                if observation.state not in {
+                    SuccessorObservationState.PRESENT,
+                    SuccessorObservationState.ABSENT,
+                }:
+                    return self._publish_inconclusive(
+                        prepared,
+                        _inconclusive_reason(prepared.plan, augmented.observations),
+                        augmented,
+                    )
+            if prepared.plan.gaps:
+                return self._publish_inconclusive(prepared, "incomplete_coverage", augmented)
+            if all(
+                item.state is SuccessorObservationState.PRESENT for item in augmented.observations
+            ):
+                return self._publish_not_found(prepared, augmented)
+            return self._publish_inconclusive(prepared, "no_present_absent_bracket", augmented)
         except SuccessorExecutionError:
             raise
         except Exception as error:
@@ -485,6 +526,22 @@ class SuccessorExecutionService:
             failed = replace(failed, terminal_result_id=_digest_terminal(failed.as_record()))
             _ = self.publisher.publish_terminal(failed)
             raise SuccessorExecutionError("internal_error") from error
+
+    def _narrow_or_publish(
+        self,
+        prepared: SuccessorPreparedExecution,
+        augmented: SuccessorCoarseClassificationResult,
+    ) -> SuccessorTerminal:
+        """Narrow the first bracket or preserve its safe coverage boundary."""
+        bracket = augmented.candidate_bracket
+        if bracket is None:
+            raise SuccessorExecutionError("internal_error")
+        if _bracket_intersects_gap(prepared.plan, bracket):
+            return self._publish_inconclusive(prepared, "incomplete_coverage", augmented)
+        narrowed = self.narrowing.narrow(prepared.plan, augmented, prepared.authority)
+        if narrowed.completion is not SuccessorNarrowingCompletion.NARROWED:
+            return self._publish_inconclusive(prepared, narrowed.reason_code, augmented, narrowed)
+        return self._publish_found(prepared, augmented, narrowed)
 
     def _publish_found(
         self,
@@ -613,6 +670,19 @@ class SuccessorExecutionService:
                 for item in prepared.plan.gaps
             ),
         )
+
+
+def _coarse_snapshot(
+    prepared: SuccessorPreparedExecution,
+    observations: list[SuccessorObservation],
+) -> SuccessorCoarseClassificationResult:
+    """Build the immutable coarse snapshot available at this point in time."""
+    return SuccessorCoarseClassificationResult(
+        prepared.plan.plan_id,
+        prepared.authority.authority_identity,
+        tuple(observations),
+        None,
+    )
 
 
 def _with_anchor_observation(
@@ -796,6 +866,7 @@ def _terminal_identity(value: Mapping[str, object]) -> str | None:
 
 
 def _terminal_from_record(value: Mapping[str, object]) -> SuccessorTerminal:
+    _validate_terminal_record(value)
     coverage = _record_dicts(value.get("coverage"))
     gaps = _record_dicts(value.get("gaps"))
     observation_ids = _strings(value.get("coarse_observation_ids"))
@@ -834,21 +905,209 @@ def _terminal_from_record(value: Mapping[str, object]) -> SuccessorTerminal:
 
 
 def _record_dicts(value: object) -> tuple[dict[str, str], ...]:
-    if not isinstance(value, (list, tuple)):
+    if value is None:
         return ()
-    return tuple(item for item in value if isinstance(item, dict))
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    return tuple(cast("dict[str, str]", item) for item in value)
 
 
 def _record_objects(value: object) -> tuple[dict[str, object], ...]:
-    if not isinstance(value, (list, tuple)):
+    if value is None:
         return ()
-    return tuple(item for item in value if isinstance(item, dict))
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    return tuple(cast("dict[str, object]", item) for item in value)
 
 
 def _strings(value: object) -> tuple[str, ...]:
-    if not isinstance(value, (list, tuple)):
+    if value is None:
         return ()
-    return tuple(item for item in value if isinstance(item, str))
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    return tuple(value)
+
+
+def _validate_terminal_record(value: Mapping[str, object]) -> None:
+    """Strictly validate one persisted Schema 8 terminal projection."""
+    _validate_terminal_core(value)
+    status, _ = _validate_terminal_status(value)
+    _validate_terminal_timing(value, status)
+    _validate_terminal_optional_fields(value)
+    _validate_terminal_lists(value)
+
+
+def _validate_terminal_core(value: Mapping[str, object]) -> None:
+    required = {
+        "record_version",
+        "schema_version",
+        "investigation_id",
+        "run_id",
+        "plan_id",
+        "status",
+        "reason_code",
+        "terminal_result_id",
+        "observed_start_time_utc",
+        "observed_end_time_utc",
+        "coverage_complete",
+        "source_timezone",
+    }
+    if not required.issubset(value):
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    if value.get("record_version") != SUCCESSOR_RECORD_VERSION:
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    if (
+        type(value.get("schema_version")) is not int
+        or value["schema_version"] != SUCCESSOR_SCHEMA_VERSION
+    ):
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    for key in ("investigation_id", "run_id", "plan_id", "source_timezone"):
+        if not isinstance(value.get(key), str) or not value[key]:
+            raise SuccessorExecutionError("successor_publication_corrupt")
+    plan_id = cast("str", value["plan_id"])
+    if not plan_id.startswith("successor-plan-v1-"):
+        raise SuccessorExecutionError("successor_publication_corrupt")
+
+
+def _validate_terminal_status(value: Mapping[str, object]) -> tuple[str, str]:
+    status = value.get("status")
+    reason = value.get("reason_code")
+    if not isinstance(status, str) or status not in _TERMINAL:
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    if not isinstance(reason, str) or reason not in _SUCCESSOR_TERMINAL_REASONS:
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    expected_reasons = {
+        "FOUND": {"disappearance_confirmed"},
+        "NOT_FOUND": {"complete_present_coverage"},
+        "INTERRUPTED": {"cancelled", "abandoned_after_restart"},
+        "FAILED": {"internal_error"},
+    }
+    if status in expected_reasons and reason not in expected_reasons[status]:
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    terminal_result_id = value.get("terminal_result_id")
+    if not isinstance(terminal_result_id, str) or not terminal_result_id.startswith(
+        "successor-terminal-v1-"
+    ):
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    return status, reason
+
+
+def _validate_terminal_timing(value: Mapping[str, object], status: str) -> None:
+    observed_start = _strict_utc_timestamp(value["observed_start_time_utc"])
+    observed_end = _strict_utc_timestamp(value["observed_end_time_utc"])
+    if observed_end < observed_start:
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    for key in ("last_present_time_utc", "first_absent_time_utc"):
+        candidate = value.get(key)
+        if candidate is not None and not isinstance(candidate, str):
+            raise SuccessorExecutionError("successor_publication_corrupt")
+    last_present = value.get("last_present_time_utc")
+    first_absent = value.get("first_absent_time_utc")
+    if status == "FOUND":
+        if not isinstance(last_present, str) or not isinstance(first_absent, str):
+            raise SuccessorExecutionError("successor_publication_corrupt")
+        present_time = _strict_utc_timestamp(last_present)
+        absent_time = _strict_utc_timestamp(first_absent)
+        if not observed_start <= present_time < absent_time <= observed_end:
+            raise SuccessorExecutionError("successor_publication_corrupt")
+    elif last_present is not None or first_absent is not None:
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    if type(value.get("coverage_complete")) is not bool:
+        raise SuccessorExecutionError("successor_publication_corrupt")
+
+
+def _validate_terminal_optional_fields(value: Mapping[str, object]) -> None:
+    _validate_optional_string(value, "narrowing_id")
+    _validate_optional_string(value, "policy_version")
+    _validate_optional_timestamp(value, "requested_end_time_utc")
+    phase8_status = value.get("phase8_status", "NOT_REQUESTED")
+    phase8_reason = value.get("phase8_reason")
+    if not isinstance(phase8_status, str) or phase8_status != "NOT_REQUESTED":
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    if phase8_reason is not None and (
+        not isinstance(phase8_reason, str) or phase8_reason != _PHASE8_NOT_REQUESTED_REASON
+    ):
+        raise SuccessorExecutionError("successor_publication_corrupt")
+
+
+def _validate_terminal_lists(value: Mapping[str, object]) -> None:
+    _validate_list_field(value, "coverage", _validate_coverage_item)
+    _validate_list_field(value, "gaps", _validate_gap_item)
+    _validate_list_field(value, "coarse_observation_ids", _validate_string_item)
+    _validate_list_field(value, "coarse_target_ids", _validate_string_item)
+    _validate_list_field(value, "target_statuses", _validate_string_item)
+    _validate_list_field(value, "coarse_observations", _validate_object_item)
+
+
+def _validate_optional_string(value: Mapping[str, object], key: str) -> None:
+    if key in value and value[key] is not None and (not isinstance(value[key], str)):
+        raise SuccessorExecutionError("successor_publication_corrupt")
+
+
+def _validate_optional_timestamp(value: Mapping[str, object], key: str) -> None:
+    if key in value and value[key] is not None:
+        if not isinstance(value[key], str):
+            raise SuccessorExecutionError("successor_publication_corrupt")
+        _strict_utc_timestamp(value[key])
+
+
+def _strict_utc_timestamp(value: object) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise SuccessorExecutionError("successor_publication_corrupt") from error
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    return parsed
+
+
+def _validate_list_field(
+    value: Mapping[str, object],
+    key: str,
+    validator: Callable[[object], None],
+) -> None:
+    if key not in value:
+        return
+    items = value[key]
+    if not isinstance(items, list):
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    for item in items:
+        validator(item)
+
+
+def _validate_string_item(item: object) -> None:
+    if not isinstance(item, str) or not item:
+        raise SuccessorExecutionError("successor_publication_corrupt")
+
+
+def _validate_object_item(item: object) -> None:
+    if not isinstance(item, dict):
+        raise SuccessorExecutionError("successor_publication_corrupt")
+
+
+def _validate_coverage_item(item: object) -> None:
+    if not isinstance(item, dict) or any(
+        not isinstance(item.get(key), str) or not item[key]
+        for key in ("segment_id", "start_utc", "end_utc")
+    ):
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    start = _strict_utc_timestamp(item["start_utc"])
+    end = _strict_utc_timestamp(item["end_utc"])
+    if end <= start:
+        raise SuccessorExecutionError("successor_publication_corrupt")
+
+
+def _validate_gap_item(item: object) -> None:
+    if not isinstance(item, dict) or any(
+        not isinstance(item.get(key), str) or not item[key] for key in ("start_utc", "end_utc")
+    ):
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    start = _strict_utc_timestamp(item["start_utc"])
+    end = _strict_utc_timestamp(item["end_utc"])
+    if end <= start:
+        raise SuccessorExecutionError("successor_publication_corrupt")
 
 
 def _digest_terminal(value: Mapping[str, object]) -> str:

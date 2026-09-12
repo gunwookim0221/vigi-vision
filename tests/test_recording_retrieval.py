@@ -19,6 +19,7 @@ from vigi import (
 
 from vigi_vision.nvr import NvrRequestError
 from vigi_vision.recording import (
+    RecordingDataError,
     RecordingPlanner,
     RecordingUnavailableError,
     RecordingWindow,
@@ -30,6 +31,7 @@ from vigi_vision.replay import (
     ReplayExtractor,
     ReplayTimeoutError,
     ReplayUnavailableError,
+    _process_error,
 )
 
 
@@ -61,6 +63,27 @@ class FakeRecords:
     ) -> RecordSearchResultsResponse:
         self.results_calls.append((channel_id, process_id, day, start_index, end_index))
         return RecordSearchResultsResponse(results=self.results, error_code=0)
+
+
+class PagedRecords(FakeRecords):
+    def __init__(self, pages: tuple[tuple[SdkRecordSegment, ...], ...]) -> None:
+        super().__init__(pages[0] if pages else ())
+        self.pages = pages
+
+    def list_results(
+        self,
+        channel_id: int,
+        process_id: int,
+        day: str,
+        start_index: int = 0,
+        end_index: int = 99,
+    ) -> RecordSearchResultsResponse:
+        self.results_calls.append((channel_id, process_id, day, start_index, end_index))
+        page = start_index // 100
+        return RecordSearchResultsResponse(
+            results=self.pages[page] if page < len(self.pages) else (),
+            error_code=0,
+        )
 
 
 @final
@@ -112,6 +135,51 @@ def test_recording_planner_builds_utc_replay_request_for_overlapping_segment() -
     )
     assert records.days_calls == [(1, "202607", "202607")]
     assert records.results_calls == [(1, 3, "20260701", 0, 99)]
+
+
+def _sdk_segments(count: int, *, offset: int = 0) -> tuple[SdkRecordSegment, ...]:
+    base = 1782835200 + offset * 20
+    return tuple(
+        SdkRecordSegment(start_time=str(base + index * 20), end_time=str(base + (index + 1) * 20))
+        for index in range(count)
+    )
+
+
+def test_recording_planner_accepts_multiple_pages_and_limit_boundary() -> None:
+    first = _sdk_segments(100)
+    second = _sdk_segments(1, offset=100)
+    records = PagedRecords((first, second))
+    planner = RecordingPlanner(FakeClient(records), "nvr.example.test")
+
+    segments = planner.find_segments_for_window(_window())
+
+    assert segments
+    assert len(records.results_calls) == 2
+
+
+def test_recording_planner_rejects_repeated_page_or_duplicate_segment() -> None:
+    full = _sdk_segments(100)
+    repeated = PagedRecords((full, full))
+    planner = RecordingPlanner(FakeClient(repeated), "nvr.example.test")
+
+    with pytest.raises(RecordingDataError, match="metadata"):
+        _ = planner.find_segments_for_window(_window())
+
+    duplicate = PagedRecords(((full[0], full[0]),))
+    planner = RecordingPlanner(FakeClient(duplicate), "nvr.example.test")
+    with pytest.raises(RecordingDataError, match="metadata"):
+        _ = planner.find_segments_for_window(_window())
+
+
+def test_recording_planner_fails_closed_when_page_capacity_is_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("vigi_vision.recording._MAX_RECORDING_RESULT_PAGES", 2)
+    pages = (_sdk_segments(100), _sdk_segments(100, offset=100), _sdk_segments(1, offset=200))
+    planner = RecordingPlanner(FakeClient(PagedRecords(pages)), "nvr.example.test")
+
+    with pytest.raises(RecordingDataError, match="metadata"):
+        _ = planner.find_segments_for_window(_window())
 
 
 def test_recording_planner_raises_when_no_segment_overlaps_requested_window() -> None:
@@ -310,6 +378,20 @@ def test_replay_extractor_classifies_rtsp_failure_without_persisting_partial_fil
         _ = extractor.extract(planner.plan(_window()))
 
     assert not tuple(tmp_path.glob("*.mp4"))
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "frame=401 fps=25",
+        "out_time_ms=454000",
+        "Error while decoding frame 401",
+        "codec=hevc (454)",
+        "",
+    ],
+)
+def test_replay_error_numbers_without_protocol_context_are_generic(stderr: str) -> None:
+    assert isinstance(_process_error(stderr), ReplayExtractionError)
 
 
 def test_replay_extractor_timeout_redacts_credentials_and_removes_partial_file(
