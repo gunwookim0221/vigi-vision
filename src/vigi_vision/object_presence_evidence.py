@@ -56,13 +56,13 @@ class RawComparison(BaseModel):
         """Reject non-finite values and every forbidden field combination."""
         _validate_metrics(self)
         _validate_consistency(self)
-        if self.comparison_mode not in {None, "baseline_support_v1"}:
+        if self.comparison_mode not in {None, "baseline_support_v1", "baseline_support_v2"}:
             raise ValueError
         match self.visual_status:
             case VisualStatus.COMPARABLE:
                 if self.unusable_reason is not None:
                     raise ValueError
-                if self.comparison_mode == "baseline_support_v1":
+                if self.comparison_mode in {"baseline_support_v1", "baseline_support_v2"}:
                     _require_complete_baseline_support(self)
                 else:
                     _require_complete_comparable(self)

@@ -204,11 +204,35 @@ def test_matching_regions_are_present() -> None:
 def test_baseline_support_reclassifies_removed_shoe_as_absent() -> None:
     result = _support_classifier().classify(_support_input(_support_scene(shoe=False)))
     assert result.outcome is ClassificationOutcome.ABSENT
-    assert result.comparison.comparison_mode == "baseline_support_v1"
+    assert result.comparison.comparison_mode == "baseline_support_v2"
+    assert result.comparison.baseline_support_background_change_ratio == 0.0
     assert result.comparison.baseline_support_change_ratio is not None
     assert result.comparison.baseline_support_change_ratio >= 0.7
     assert result.comparison.baseline_support_foreground_retention is not None
     assert result.comparison.baseline_support_foreground_retention <= 0.3
+
+
+def test_baseline_support_v2_accepts_floor_exposure_metrics_from_preserved_run() -> None:
+    baseline = _support_classifier().compare(_support_input(_support_scene(shoe=False)))
+    exposed_floor = baseline.model_copy(
+        update={
+            "baseline_support_luma_similarity": 0.844027,
+            "baseline_support_luma_ncc": 0.119746,
+            "baseline_support_change_ratio": 0.522446,
+            "baseline_support_foreground_retention": 0.0,
+            "baseline_support_background_change_ratio": 0.0,
+            "comparison_mode": "baseline_support_v2",
+        }
+    )
+    assert (
+        _support_classifier().policy.decide(exposed_floor).outcome is ClassificationOutcome.ABSENT
+    )
+    assert (
+        _support_classifier()
+        .policy.decide(exposed_floor.model_copy(update={"comparison_mode": "baseline_support_v1"}))
+        .outcome
+        is ClassificationOutcome.INDETERMINATE
+    )
 
 
 def test_baseline_support_keeps_shoe_present_through_global_exposure_shift() -> None:
@@ -217,6 +241,21 @@ def test_baseline_support_keeps_shoe_present_through_global_exposure_shift() -> 
     )
     assert result.outcome is ClassificationOutcome.PRESENT
     assert result.comparison.baseline_support_luma_ncc == 1.0
+
+
+def test_baseline_support_keeps_shoe_present_through_small_compression_noise() -> None:
+    baseline = _support_scene()
+    rows = [list(row) for row in baseline.pixels]
+    for y, row in enumerate(rows):
+        for x, pixel in enumerate(row):
+            noise = 3 if (x + 2 * y) % 5 == 0 else -2 if (x + y) % 7 == 0 else 0
+            rows[y][x] = tuple(max(0, min(255, channel + noise)) for channel in pixel)
+    result = _support_classifier().classify(
+        _support_input(DecodedRgbImage.from_rows(tuple(tuple(row) for row in rows)))
+    )
+    assert result.outcome is ClassificationOutcome.PRESENT
+    assert result.comparison.baseline_support_background_change_ratio is not None
+    assert result.comparison.baseline_support_background_change_ratio <= 0.1
 
 
 def test_baseline_support_fails_closed_for_partial_occlusion() -> None:
@@ -272,6 +311,14 @@ def test_baseline_support_rejects_large_camera_motion_as_unstable_background() -
     assert result.outcome is ClassificationOutcome.INDETERMINATE
     assert result.comparison.baseline_support_background_change_ratio is not None
     assert result.comparison.baseline_support_background_change_ratio > 0.10
+
+
+def test_persisted_v1_support_rows_keep_original_gate_semantics() -> None:
+    classifier = _support_classifier()
+    comparison = classifier.compare(_support_input(_support_scene()))
+    v1 = comparison.model_copy(update={"comparison_mode": "baseline_support_v1"})
+    result = classifier.policy.decide(v1)
+    assert result.outcome is ClassificationOutcome.PRESENT
 
 
 def test_disjoint_masks_are_absent_when_luma_is_different() -> None:

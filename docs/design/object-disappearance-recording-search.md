@@ -199,7 +199,7 @@ latest available observation. Final human real-NVR acceptance remains
 unimplemented:
 
 Successor classification uses the additive
-`efficient-sam-ti-baseline-support-v1` policy. Each probe is compared at the
+`efficient-sam-ti-baseline-support-v2` policy. Each probe is compared at the
 immutable confirmed baseline-mask coordinates with bounded background-based
 normalization and records support appearance, NCC, edge, change,
 foreground-retention, and background-stability metrics. The independently predicted probe mask remains

@@ -50,6 +50,9 @@ class ClassifierInput:
 
 
 _SUPPORT_CHANGE_THRESHOLD: Final[float] = 32.0
+_FOREGROUND_CONTRAST_THRESHOLD: Final[float] = 40.0
+_STABILITY_DILATION_PIXELS: Final[int] = 4
+_BACKGROUND_GRADIENT_CHANGE_THRESHOLD: Final[float] = 32.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,10 +253,11 @@ def _compare_with_baseline_support(
         for index, present in enumerate(value for row in baseline_mask for value in row)
         if present
     )
+    stability_mask = _dilated_exclusion_mask(baseline_mask, _STABILITY_DILATION_PIXELS)
     background_indices = tuple(
         index
-        for index, present in enumerate(value for row in baseline_mask for value in row)
-        if not present
+        for index, excluded in enumerate(value for row in stability_mask for value in row)
+        if not excluded
     )
     support_baseline = tuple(baseline_luma[index] for index in support_indices)
     support_probe = tuple(probe_luma[index] for index in support_indices)
@@ -274,6 +278,7 @@ def _compare_with_baseline_support(
         support_probe,
         background_baseline,
         background_probe,
+        (background_indices, values.roi.width),
     )
     edge_similarity = _support_edge_similarity(
         baseline_luma,
@@ -319,7 +324,7 @@ def _compare_with_baseline_support(
         roi_luma_ncc=roi_ncc,
         visual_status=VisualStatus.COMPARABLE,
         unusable_reason=None,
-        comparison_mode="baseline_support_v1",
+        comparison_mode="baseline_support_v2",
         baseline_support_pixel_count=baseline_count,
         baseline_support_luma_similarity=support_luma_similarity,
         baseline_support_luma_ncc=support_luma_ncc,
@@ -335,6 +340,7 @@ def _support_luma_metrics(
     probe: tuple[float, ...],
     baseline_background: tuple[float, ...],
     probe_background: tuple[float, ...],
+    stability: tuple[tuple[int, ...], int],
 ) -> tuple[float | None, float | None, float | None, float | None, tuple[float, ...]]:
     if (
         not baseline
@@ -378,29 +384,94 @@ def _support_luma_metrics(
         abs(left - right) > _SUPPORT_CHANGE_THRESHOLD
         for left, right in zip(baseline, normalized, strict=True)
     )
-    background_changed = sum(
-        abs(left - right) > _SUPPORT_CHANGE_THRESHOLD
-        for left, right in zip(baseline_background, normalized_background, strict=True)
+    background_indices, width = stability
+    background_changed = _stable_background_change_ratio(
+        baseline_background,
+        normalized_background,
+        background_indices,
+        width,
     )
-    baseline_contrast = sum(abs(value - baseline_background_mean) for value in baseline) / len(
-        baseline
+    baseline_contrast = tuple(value - baseline_background_mean for value in baseline)
+    # The normalized probe is centered on its own fixed-background ring before
+    # being mapped to the baseline scale.  This makes exposed flooring low
+    # contrast even when its absolute luma is brighter than the old object.
+    probe_contrast = tuple(value - baseline_background_mean for value in normalized)
+    baseline_foreground = tuple(
+        index
+        for index, value in enumerate(baseline_contrast)
+        if abs(value) >= _FOREGROUND_CONTRAST_THRESHOLD
     )
-    probe_contrast = sum(abs(value - baseline_background_mean) for value in normalized) / len(
-        normalized
-    )
-    if baseline_contrast <= 0.0 or not math.isfinite(probe_contrast):
+    if not baseline_foreground or not all(math.isfinite(value) for value in probe_contrast):
         foreground_retention = None
     else:
         foreground_retention = quantize_metric(
-            min(1.0, max(0.0, probe_contrast / baseline_contrast))
+            sum(
+                1
+                for index in baseline_foreground
+                if abs(probe_contrast[index]) >= _FOREGROUND_CONTRAST_THRESHOLD
+                and abs(probe_contrast[index]) >= abs(baseline_contrast[index]) * 0.25
+            )
+            / len(baseline_foreground)
         )
     return (
         similarity,
         quantize_metric(changed / len(baseline)),
         foreground_retention,
-        quantize_metric(background_changed / len(baseline_background)),
+        background_changed,
         normalized,
     )
+
+
+def _dilated_exclusion_mask(
+    support: tuple[tuple[bool, ...], ...], radius: int
+) -> tuple[tuple[bool, ...], ...]:
+    """Exclude immutable support and its local reveal ring from stability pixels."""
+    height = len(support)
+    width = len(support[0]) if height else 0
+    return tuple(
+        tuple(
+            any(
+                0 <= y + dy < height and 0 <= x + dx < width and support[y + dy][x + dx]
+                for dy in range(-radius, radius + 1)
+                for dx in range(-radius, radius + 1)
+            )
+            for x in range(width)
+        )
+        for y in range(height)
+    )
+
+
+def _stable_background_change_ratio(
+    baseline: tuple[float, ...],
+    probe: tuple[float, ...],
+    indices: tuple[int, ...],
+    width: int,
+) -> float | None:
+    """Measure luma and local-gradient changes only on fixed background pixels."""
+    if not indices or width <= 0 or len(baseline) != len(probe):
+        return None
+    stable = set(indices)
+    baseline_by_index = dict(zip(indices, baseline, strict=True))
+    probe_by_index = dict(zip(indices, probe, strict=True))
+    changed = {
+        index
+        for index in indices
+        if abs(baseline_by_index[index] - probe_by_index[index]) > _SUPPORT_CHANGE_THRESHOLD
+    }
+    for index in indices:
+        x = index % width
+        for neighbor in (
+            (index + 1) if x + 1 < width else -1,
+            (index + width) if width and index + width in stable else -1,
+        ):
+            if neighbor not in stable:
+                continue
+            baseline_gradient = abs(baseline_by_index[index] - baseline_by_index[neighbor])
+            probe_gradient = abs(probe_by_index[index] - probe_by_index[neighbor])
+            if abs(baseline_gradient - probe_gradient) > _BACKGROUND_GRADIENT_CHANGE_THRESHOLD:
+                changed.add(index)
+                changed.add(neighbor)
+    return quantize_metric(len(changed) / len(indices))
 
 
 def _support_edge_similarity(

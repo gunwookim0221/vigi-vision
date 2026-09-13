@@ -162,7 +162,7 @@ class ObjectPresenceDecisionPolicy(BaseModel):
             )
         if comparison.visual_status is not VisualStatus.COMPARABLE:
             raise ValueError
-        if comparison.comparison_mode == "baseline_support_v1":
+        if comparison.comparison_mode in {"baseline_support_v1", "baseline_support_v2"}:
             if not self.baseline_support_mode:
                 raise ValueError
             return _decide_baseline_support(self, comparison)
@@ -274,12 +274,21 @@ def _decide_baseline_support(
         return ClassificationResult(
             outcome=ClassificationOutcome.PRESENT, reason_code=None, comparison=comparison
         )
+    # v2 treats local-background foreground loss plus low support NCC as the
+    # independent absence evidence.  Similarity/change remain diagnostic and
+    # are intentionally not required to agree when newly exposed flooring has
+    # a similar luma distribution to the former object support.
     if (
         background_stable
-        and similarity <= policy.baseline_support_absent_similarity_maximum
         and ncc <= policy.baseline_support_absent_ncc_maximum
-        and change >= policy.baseline_support_absent_change_minimum
         and foreground <= policy.baseline_support_absent_foreground_maximum
+        and (
+            comparison.comparison_mode == "baseline_support_v2"
+            or (
+                similarity <= policy.baseline_support_absent_similarity_maximum
+                and change >= policy.baseline_support_absent_change_minimum
+            )
+        )
     ):
         return ClassificationResult(
             outcome=ClassificationOutcome.ABSENT, reason_code=None, comparison=comparison

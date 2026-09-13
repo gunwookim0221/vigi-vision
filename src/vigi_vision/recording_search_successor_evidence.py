@@ -636,7 +636,7 @@ def _valid_comparison(value: object) -> bool:  # noqa: PLR0911
         return False
     if unusable_reason is not None and unusable_reason not in _UNUSABLE_REASONS:
         return False
-    if comparison_mode not in {None, "baseline_support_v1"}:
+    if comparison_mode not in {None, "baseline_support_v1", "baseline_support_v2"}:
         return False
     for key, item in value.items():
         if key in {"visual_status", "unusable_reason", "comparison_mode"}:
@@ -645,7 +645,7 @@ def _valid_comparison(value: object) -> bool:  # noqa: PLR0911
             continue
         if type(item) not in {int, float} or not math.isfinite(item):
             return False
-    if comparison_mode == "baseline_support_v1":
+    if comparison_mode in {"baseline_support_v1", "baseline_support_v2"}:
         required = {
             "baseline_mask_pixel_count",
             "baseline_support_pixel_count",

@@ -255,7 +255,7 @@ RawComparison
   mask_iou: finite decimal | null
   effective_comparison_area: positive integer | null
   roi_luma_ncc: finite decimal | null
-  comparison_mode: null | baseline_support_v1
+  comparison_mode: null | baseline_support_v1 | baseline_support_v2
   baseline_support_pixel_count: integer | null
   baseline_support_luma_similarity: finite decimal | null
   baseline_support_luma_ncc: finite decimal | null
@@ -269,8 +269,8 @@ RawComparison
 
 ### Successor baseline-support comparison
 
-Schema 8 successor observations use the versioned `baseline_support_v1` mode
-(`efficient-sam-ti-baseline-support-v1`). The confirmed baseline mask is an
+Schema 8 successor observations use the versioned `baseline_support_v2` mode
+(`efficient-sam-ti-baseline-support-v2`). The confirmed baseline mask is an
 immutable spatial support for the target. A probe's independently predicted
 mask is retained only as diagnostic context; its occupancy or IoU cannot make
 the target appear present.
@@ -278,10 +278,17 @@ the target appear present.
 The comparator maps probe pixels at the baseline support coordinates after
 bounded background-based brightness/contrast normalization. It records support
 luma similarity, support luma NCC, edge similarity, pixel change ratio,
-foreground-retention ratio, and background-change ratio. `PRESENT` requires the positive support similarity,
+local-background foreground-retention ratio, and a structural background-change
+ratio. Foreground retention counts baseline support pixels whose probe values
+retain a bounded contrast against the normalized fixed-background ring; it does
+not treat newly exposed flooring (which matches that ring) as foreground. The stability region excludes the
+baseline support and a four-pixel dilation ring, and combines luma and local
+gradient changes so object removal does not become a scene-change veto while
+camera motion remains fail-closed. `PRESENT` requires the positive support similarity,
 NCC, edge, low-change, and foreground-retention gates together. `ABSENT`
-requires low support similarity and NCC, high pixel change, low foreground
-retention, and a stable background together. Any conflict, occlusion, registration uncertainty, or
+in v2 requires low support NCC and low local-background foreground retention plus a
+stable background; similarity and pixel-change remain diagnostic because exposed
+flooring can preserve their aggregate values. Any conflict, occlusion, registration uncertainty, or
 insufficient support remains `INDETERMINATE` with
 `insufficient_visual_evidence`. These metrics describe the actual
 baseline-coordinate pixels and are not a reinterpretation of legacy Schema
@@ -290,18 +297,26 @@ baseline-coordinate pixels and are not a reinterpretation of legacy Schema
 The deterministic fixture matrix fixes the successor gates at support
 similarity `>= 0.70`, support NCC `>= 0.50`, edge similarity `>= 0.60`,
 foreground retention `>= 0.70`, and change ratio `<= 0.30` for `PRESENT`.
-`ABSENT` requires support similarity `<= 0.60`, support NCC `<= 0.20`,
-foreground retention `<= 0.30`, and change ratio `>= 0.70`; edge similarity is
+`ABSENT` v2 requires support NCC `<= 0.20` and local-background foreground
+retention `<= 0.30`;
+support similarity and change ratio remain recorded diagnostics. Edge similarity is
 retained as diagnostic evidence because a stationary background can preserve
 edge energy after the target is removed. Both states require background change
 ratio `<= 0.10`; a larger change is treated as camera motion or scene
 instability. The separated bands leave partial
 occlusion and similar-object replacement in the indeterminate region.
 
+The local foreground floor is 40 luma levels, paired with the existing 32-level
+change detector; this is a contrast-occupancy definition, not a relaxed result
+threshold. It is covered by the deterministic removal, exposure, noise,
+occlusion, replacement, and camera-motion fixtures.
+
 The legacy `efficient-sam-ti-roi-ncc-v1` policy and its independent-mask
 contract remain unchanged for reopening existing Schema 5–7 runs; inactive
-successor fields are excluded from that legacy identity. A policy identity
-change is required before a successor run can use the support-space comparison.
+successor fields are excluded from that legacy identity. Persisted v1 support
+rows remain reopenable under their original all-gates semantics; a v2 policy
+identity is required before a new successor run can use local-background
+retention and dilated-ring stability.
 
 Every `RawComparison` key is required; a field that is not valid for the selected
 variant is JSON `null` (the schema has no optional omission). Counts are bounded

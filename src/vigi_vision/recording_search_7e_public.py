@@ -960,8 +960,8 @@ def approved_phase7e_policy() -> tuple[
 def approved_successor_object_presence_policy() -> ObjectPresenceDecisionPolicy:
     """Return the versioned baseline-support policy for successor runs."""
     return ObjectPresenceDecisionPolicy(
-        classifier_policy_version="efficient-sam-ti-baseline-support-v1",
-        classifier_preprocessing_version="phase7e-baseline-support-v1",
+        classifier_policy_version="efficient-sam-ti-baseline-support-v2",
+        classifier_preprocessing_version="phase7e-baseline-support-v2",
         baseline_support_mode=True,
         minimum_mask_overlap_for_comparison=0.1,
     )
