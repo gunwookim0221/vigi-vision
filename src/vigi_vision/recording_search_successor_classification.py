@@ -9,7 +9,7 @@ delegated to the existing process-isolated B4 EfficientSAM boundary.
 # The classifier boundary intentionally keeps the complete input explicit;
 # suppress only style rules that would obscure those contract fields.
 # ruff: noqa: D102, D105, D107, EM101, PLR0913, RUF021
-# pyright: reportPrivateUsage=false, reportUnnecessaryIsInstance=false, reportUnreachable=false
+# pyright: reportPrivateUsage=false, reportUnnecessaryIsInstance=false, reportUnreachable=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportAttributeAccessIssue=false, reportAny=false
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from time import perf_counter
 from typing import TYPE_CHECKING, Protocol
 
 from vigi_vision.investigation_confirmation_models import (
@@ -28,7 +29,7 @@ from vigi_vision.investigation_confirmation_models import (
     ConfirmedInvestigationInput,
     is_investigation_id,
 )
-from vigi_vision.object_presence_evidence import ClassificationResult
+from vigi_vision.object_presence_evidence import ClassificationResult, RawComparison
 from vigi_vision.object_presence_values import ClassificationOutcome
 from vigi_vision.recording_search_7e_b4_process import (
     B4ProcessError,
@@ -213,6 +214,9 @@ class SuccessorClassifierResult:
 
     outcome: ClassificationOutcome
     reason_code: str | None = None
+    comparison: RawComparison | None = field(default=None, repr=False)
+    stage: str = "completed"
+    elapsed_ms: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.outcome, ClassificationOutcome):
@@ -223,6 +227,12 @@ class SuccessorClassifierResult:
             if self.reason_code is not None:
                 raise SuccessorClassificationContractError
         elif self.reason_code is None:
+            raise SuccessorClassificationContractError
+        if self.stage not in {"completed", "timeout", "failed"}:
+            raise SuccessorClassificationContractError
+        if self.elapsed_ms is not None and (
+            type(self.elapsed_ms) is not int or self.elapsed_ms < 0
+        ):
             raise SuccessorClassificationContractError
 
 
@@ -278,6 +288,7 @@ class EfficientSamSuccessorClassifier:
         roi: ConfirmationRoi,
         correlation_id: str,
     ) -> SuccessorClassifierResult:
+        started = perf_counter()
         try:
             result = run_b4_in_process(
                 baseline_image=baseline_image,
@@ -297,9 +308,13 @@ class EfficientSamSuccessorClassifier:
             raise SuccessorClassificationError("classifier_failed") from error
         if not isinstance(result, ClassificationResult):
             raise SuccessorClassificationContractError
+        elapsed_ms = max(0, round((perf_counter() - started) * 1000))
         return SuccessorClassifierResult(
             result.outcome,
             None if result.reason_code is None else result.reason_code.value,
+            result.comparison,
+            "completed",
+            elapsed_ms,
         )
 
 
@@ -327,6 +342,13 @@ class SuccessorObservation:
     timing_precision_status: str | None = None
     timing_warnings: tuple[str, ...] = ()
     frame_sha256: str | None = None
+    frame_bytes: bytes | None = field(default=None, repr=False, compare=False)
+    frame_width: int | None = None
+    frame_height: int | None = None
+    comparison: dict[str, object] | None = None
+    classifier_stage: str | None = None
+    classifier_elapsed_ms: int | None = None
+    assigned_segment_id: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -357,6 +379,18 @@ class SuccessorObservation:
             and self.timing_precision_status not in _TIMING_PRECISION_CODES
             or self.frame_sha256 is not None
             and _SHA256.fullmatch(self.frame_sha256) is None
+            or self.frame_bytes is not None
+            and (not isinstance(self.frame_bytes, bytes) or not self.frame_bytes)
+            or self.frame_width is not None
+            and (type(self.frame_width) is not int or self.frame_width <= 0)
+            or self.frame_height is not None
+            and (type(self.frame_height) is not int or self.frame_height <= 0)
+            or self.classifier_stage is not None
+            and self.classifier_stage not in {"completed", "timeout", "failed"}
+            or self.classifier_elapsed_ms is not None
+            and (type(self.classifier_elapsed_ms) is not int or self.classifier_elapsed_ms < 0)
+            or self.assigned_segment_id is not None
+            and not self.assigned_segment_id
         ):
             raise SuccessorClassificationContractError
         if (
@@ -607,6 +641,7 @@ class SuccessorCoarseClassificationService:
                 "frame_resolution_mismatch",
                 self.classifier.policy_identity,
             )
+        classifier_started = perf_counter()
         try:
             classified = self.classifier.classify(
                 authority.baseline_image,
@@ -630,6 +665,8 @@ class SuccessorCoarseClassificationService:
                 state,
                 error.reason,
                 self.classifier.policy_identity,
+                classifier_stage="timeout" if error.reason == "classifier_timeout" else "failed",
+                classifier_elapsed_ms=max(0, round((perf_counter() - classifier_started) * 1000)),
             )
         if not isinstance(classified, SuccessorClassifierResult):
             raise SuccessorClassificationContractError
@@ -641,6 +678,9 @@ class SuccessorCoarseClassificationService:
             SuccessorObservationState(classified.outcome.value),
             classified.reason_code,
             self.classifier.policy_identity,
+            comparison=_safe_comparison(classified.comparison),
+            classifier_stage=classified.stage,
+            classifier_elapsed_ms=classified.elapsed_ms,
         )
 
 
@@ -655,6 +695,10 @@ def _observation(
     frame_utc: datetime | None = None,
     frame_pts_seconds: float | None = None,
     frame_offset_seconds: float | None = None,
+    *,
+    comparison: dict[str, object] | None = None,
+    classifier_stage: str | None = None,
+    classifier_elapsed_ms: int | None = None,
 ) -> SuccessorObservation:
     if acquisition.frame_utc is not None:
         frame_utc = acquisition.frame_utc
@@ -678,6 +722,7 @@ def _observation(
         "reason_code": reason_code,
         "timing_precision_status": acquisition.timing_precision_status,
         "frame_sha256": acquisition.frame_sha256,
+        "assigned_segment_id": acquisition.assigned_segment_id,
     }
     identity = _digest_identity("successor-observation-v1-", payload)
     return SuccessorObservation(
@@ -701,6 +746,13 @@ def _observation(
         acquisition.timing_precision_status,
         acquisition.frame_warnings,
         acquisition.frame_sha256,
+        acquisition.frame_bytes,
+        acquisition.frame_width,
+        acquisition.frame_height,
+        comparison,
+        classifier_stage,
+        classifier_elapsed_ms,
+        acquisition.assigned_segment_id,
     )
 
 
@@ -726,6 +778,13 @@ def _with_ordinal(item: SuccessorObservation, ordinal: int) -> SuccessorObservat
         item.timing_precision_status,
         item.timing_warnings,
         item.frame_sha256,
+        item.frame_bytes,
+        item.frame_width,
+        item.frame_height,
+        item.comparison,
+        item.classifier_stage,
+        item.classifier_elapsed_ms,
+        item.assigned_segment_id,
     )
 
 
@@ -750,6 +809,7 @@ def reidentify_observation(
         "reason_code": item.reason_code,
         "timing_precision_status": item.timing_precision_status,
         "frame_sha256": item.frame_sha256,
+        "assigned_segment_id": item.assigned_segment_id,
     }
     return SuccessorObservation(
         item.plan_id,
@@ -772,6 +832,13 @@ def reidentify_observation(
         item.timing_precision_status,
         item.timing_warnings,
         item.frame_sha256,
+        item.frame_bytes,
+        item.frame_width,
+        item.frame_height,
+        item.comparison,
+        item.classifier_stage,
+        item.classifier_elapsed_ms,
+        item.assigned_segment_id,
     )
 
 
@@ -812,6 +879,28 @@ def _digest_identity(prefix: str, payload: object) -> str:
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode()
     return f"{prefix}{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _safe_comparison(comparison: object) -> dict[str, object] | None:
+    """Keep only the bounded numeric classifier evidence matrix."""
+    if comparison is None or not hasattr(comparison, "model_dump"):
+        return None
+    raw = comparison.model_dump(mode="json")
+    allowed = {
+        "baseline_mask_pixel_count",
+        "probe_mask_pixel_count",
+        "roi_pixel_count",
+        "mask_intersection_pixel_count",
+        "mask_union_pixel_count",
+        "baseline_mask_coverage",
+        "probe_mask_coverage",
+        "mask_iou",
+        "effective_comparison_area",
+        "roi_luma_ncc",
+        "visual_status",
+        "unusable_reason",
+    }
+    return {key: raw[key] for key in sorted(allowed) if key in raw}
 
 
 def _is_utc(value: datetime) -> bool:

@@ -69,6 +69,10 @@ from vigi_vision.recording_search_successor import (
     SuccessorPlanService,
     effective_search_start_utc,
 )
+from vigi_vision.recording_search_successor_evidence import (
+    SuccessorEvidenceError,
+    SuccessorEvidenceRepository,
+)
 from vigi_vision.recording_search_successor_execution import (
     SuccessorB4Classifier,
     SuccessorExecutionError,
@@ -438,6 +442,26 @@ class Phase7EPublicService:
     media_probe: object | None = None
     successor_execution: SuccessorExecutionService | None = None
     successor_readiness: str = _SUCCESSOR_UNAVAILABLE
+
+    def evidence(self, investigation_id: str, run_id: str) -> dict[str, object] | None:
+        """Return additive visual evidence for a reopened successor run."""
+        if self.successor_execution is None or self.successor_execution.evidence_repository is None:
+            return None
+        try:
+            return self.successor_execution.evidence_repository.read(investigation_id, run_id)
+        except SuccessorEvidenceError as error:
+            raise Phase7EPublicError("evidence_corrupt") from error
+
+    def evidence_frame(self, investigation_id: str, run_id: str, digest: str) -> bytes | None:
+        """Return one digest-addressed evidence JPEG."""
+        if self.successor_execution is None or self.successor_execution.evidence_repository is None:
+            return None
+        try:
+            return self.successor_execution.evidence_repository.read_frame(
+                investigation_id, run_id, digest
+            )
+        except SuccessorEvidenceError as error:
+            raise Phase7EPublicError("evidence_unavailable") from error
 
     def execute(
         self,
@@ -999,6 +1023,7 @@ def build_phase7e_service(
                 ),
                 InMemoryRgbDecoder(ffmpeg),
                 SuccessorTerminalRepository(root / ".successor"),
+                SuccessorEvidenceRepository(root / ".successor"),
             )
             successor_readiness = _SUCCESSOR_CONFIGURED
             successor_failure_stage = "none"

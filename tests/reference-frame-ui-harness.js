@@ -267,6 +267,33 @@ function createHarness(
     ["#recording-search-interval", new FakeElement("dd")],
     ["#recording-search-observed-range", new FakeElement("dd")],
   ]);
+  if (options.evidence) {
+    [
+      ["#recording-search-evidence", "section"],
+      ["#recording-search-evidence-status", "p"],
+      ["#recording-search-baseline-image", "img"],
+      ["#recording-search-baseline-roi", "img"],
+      ["#recording-search-baseline-time", "p"],
+      ["#recording-search-baseline-highlight", "span"],
+      ["#recording-search-end-image", "img"],
+      ["#recording-search-end-roi", "img"],
+      ["#recording-search-end-time", "p"],
+      ["#recording-search-end-highlight", "span"],
+      ["#recording-search-evidence-metrics", "dl"],
+      ["#recording-search-coarse-evidence", "details"],
+      ["#recording-search-coarse-list", "div"],
+      ["#recording-search-found-evidence", "div"],
+      ["#recording-search-last-present-image", "img"],
+      ["#recording-search-last-present-roi", "img"],
+      ["#recording-search-last-present-time", "p"],
+      ["#recording-search-last-present-highlight", "span"],
+      ["#recording-search-first-absent-image", "img"],
+      ["#recording-search-first-absent-roi", "img"],
+      ["#recording-search-first-absent-time", "p"],
+      ["#recording-search-first-absent-highlight", "span"],
+      ["#recording-search-review-clip-status", "p"],
+    ].forEach(([selector, tagName]) => elements.set(selector, new FakeElement(tagName)));
+  }
   elements.get("#channel-id").value = "1";
   elements.get("#source-timezone").value = "Asia/Seoul";
   const kstOption = new FakeElement("option");
@@ -305,6 +332,12 @@ function createHarness(
   elements.get("#recording-search-result").hidden = true;
   elements.get("#recording-search-result-timing").hidden = true;
   elements.get("#recording-search-error").hidden = true;
+  if (options.evidence) {
+    elements.get("#recording-search-evidence").hidden = true;
+    elements.get("#recording-search-found-evidence").hidden = true;
+    elements.get("#recording-search-coarse-evidence").hidden = true;
+    elements.get("#recording-search-review-clip-status").hidden = true;
+  }
   elements.get("#roi-status").textContent = "Select a candidate first.";
   elements.get("#roi-status").dataset.state = "disabled";
   elements.get("#roi-status").setAttribute("aria-busy", "false");
@@ -489,6 +522,16 @@ function createHarness(
     recordingSearchFirstAbsent: elements.get("#recording-search-first-absent"),
     recordingSearchInterval: elements.get("#recording-search-interval"),
     recordingSearchObservedRange: elements.get("#recording-search-observed-range"),
+    recordingSearchEvidence: elements.get("#recording-search-evidence"),
+    recordingSearchEvidenceStatus: elements.get("#recording-search-evidence-status"),
+    recordingSearchBaselineImage: elements.get("#recording-search-baseline-image"),
+    recordingSearchBaselineRoi: elements.get("#recording-search-baseline-roi"),
+    recordingSearchEndImage: elements.get("#recording-search-end-image"),
+    recordingSearchEndRoi: elements.get("#recording-search-end-roi"),
+    recordingSearchFoundEvidence: elements.get("#recording-search-found-evidence"),
+    recordingSearchLastPresentImage: elements.get("#recording-search-last-present-image"),
+    recordingSearchFirstAbsentImage: elements.get("#recording-search-first-absent-image"),
+    recordingSearchReviewClipStatus: elements.get("#recording-search-review-clip-status"),
     windowListeners,
     window: context.window,
     storage: storageData,

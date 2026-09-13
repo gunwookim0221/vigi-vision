@@ -68,6 +68,14 @@ class _UnavailablePhase7EService:
             Phase7EStatus(investigation_id, run_id, 0, "UNAVAILABLE", None, None)
         )
 
+    def evidence(self, investigation_id: str, run_id: str) -> dict[str, object] | None:
+        _ = investigation_id, run_id
+        return None
+
+    def evidence_frame(self, investigation_id: str, run_id: str, digest: str) -> bytes | None:
+        _ = investigation_id, run_id, digest
+        return None
+
 
 def test_public_request_is_closed_and_strict() -> None:
     request = Phase7EPublicRequest(
@@ -141,6 +149,42 @@ def test_phase7e_post_accepts_the_closed_browser_contract_and_validation_is_safe
     assert malformed.json()["error"]["code"] == "invalid_request"
     assert status_response.status_code == 404
     assert "phase8" not in status_response.text
+
+
+def test_visual_evidence_routes_are_additive_and_identity_scoped() -> None:
+    class _EvidencePhase7EService(_UnavailablePhase7EService):
+        def evidence(self, investigation_id: str, run_id: str) -> dict[str, object] | None:
+            assert investigation_id == "object-disappearance-v3-ch1-20260720T033428Z"
+            assert run_id == "search-run-" + "a" * 32
+            return {
+                "version": "phase7e-successor-evidence-v1",
+                "run_id": run_id,
+            }
+
+        def evidence_frame(self, investigation_id: str, run_id: str, digest: str) -> bytes | None:
+            assert investigation_id == "object-disappearance-v3-ch1-20260720T033428Z"
+            assert run_id == "search-run-" + "a" * 32
+            return b"jpeg-bytes" if digest == "b" * 64 else None
+
+    app = create_reference_frame_app(
+        _UnusedReferenceFrameService(),
+        _UnusedResources(),
+        phase7e_service=_EvidencePhase7EService(),
+    )
+    prefix = (
+        "/api/v1/recording-searches/object-disappearance-v3-ch1-20260720T033428Z/search-run-"
+        + "a" * 32
+    )
+    with TestClient(app) as client:
+        manifest = client.get(prefix + "/evidence")
+        frame = client.get(prefix + "/evidence/" + "b" * 64)
+        missing = client.get(prefix + "/evidence/" + "c" * 64)
+    assert manifest.status_code == 200
+    assert manifest.json()["version"] == "phase7e-successor-evidence-v1"
+    assert frame.status_code == 200
+    assert frame.headers["content-type"] == "image/jpeg"
+    assert frame.content == b"jpeg-bytes"
+    assert missing.status_code == 404
 
 
 def test_new_ten_minute_request_does_not_fall_back_to_legacy_executor() -> None:

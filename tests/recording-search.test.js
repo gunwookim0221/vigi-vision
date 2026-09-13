@@ -95,6 +95,116 @@ function foundStatusWithTiming() {
   };
 }
 
+function evidenceEntry(overrides = {}) {
+  return {
+    role: "observation",
+    plan_id: "successor-plan-v1-test",
+    observation_id: "successor-observation-v1-" + "1".repeat(64),
+    target_id: "successor-target-v1-test",
+    acquisition_id: "successor-acquisition-v1-test",
+    assigned_segment_id: "segment-v1-test",
+    requested_time_utc: "2026-07-20T03:34:40Z",
+    frame_utc: "2026-07-20T03:34:40Z",
+    frame_pts_seconds: 12.5,
+    frame_ordinal: 2,
+    frame_offset_seconds: 0,
+    digest: "b".repeat(64),
+    width: 2560,
+    height: 1440,
+    authority_identity: "successor-authority-v1-test",
+    reference_frame_resource_id: "resource--10",
+    roi_identity: "successor-roi-v1-test",
+    classifier_policy_identity: "classifier-policy-v1-test",
+    acquisition_status: "FRAME_AVAILABLE",
+    state: "PRESENT",
+    reason_code: null,
+    comparison: {
+      baseline_mask_pixel_count: 100,
+      probe_mask_pixel_count: 100,
+      roi_pixel_count: 43200,
+      mask_intersection_pixel_count: 100,
+      mask_union_pixel_count: 100,
+      baseline_mask_coverage: 0.01,
+      probe_mask_coverage: 0.01,
+      mask_iou: 1,
+      effective_comparison_area: 100,
+      roi_luma_ncc: 1,
+      visual_status: "COMPARABLE",
+      unusable_reason: null,
+    },
+    classifier_stage: "completed",
+    classifier_elapsed_ms: 42,
+    path: "frames/" + "b".repeat(64) + ".jpg",
+    roi_path: "frames/" + "d".repeat(64) + ".jpg",
+    roi_digest: "d".repeat(64),
+    ...overrides,
+  };
+}
+
+function evidenceManifest(statusKind = "FOUND") {
+  const baselineDigest = "a".repeat(64);
+  const presentId = "successor-observation-v1-" + "1".repeat(64);
+  const absentId = "successor-observation-v1-" + "2".repeat(64);
+  const present = evidenceEntry({ observation_id: presentId, digest: "b".repeat(64), path: "frames/" + "b".repeat(64) + ".jpg" });
+  const absent = evidenceEntry({
+    observation_id: absentId,
+    requested_time_utc: "2026-07-20T03:34:41Z",
+    frame_utc: "2026-07-20T03:34:41Z",
+    digest: "c".repeat(64),
+    path: "frames/" + "c".repeat(64) + ".jpg",
+    state: "ABSENT",
+    comparison: { ...present.comparison, mask_iou: 0, roi_luma_ncc: 0 },
+    roi_path: "frames/" + "e".repeat(64) + ".jpg",
+    roi_digest: "e".repeat(64),
+  });
+  const baseline = {
+    role: "baseline",
+    plan_id: "successor-plan-v1-test",
+    observation_id: null,
+    target_id: "historical-baseline",
+    acquisition_id: null,
+    assigned_segment_id: null,
+    requested_time_utc: "2026-07-20T03:34:08Z",
+    frame_utc: "2026-07-20T03:34:08Z",
+    frame_pts_seconds: 0,
+    frame_ordinal: 1,
+    frame_offset_seconds: null,
+    digest: baselineDigest,
+    width: 2560,
+    height: 1440,
+    authority_identity: "successor-authority-v1-test",
+    reference_frame_resource_id: "resource--10",
+    roi_identity: "successor-roi-v1-test",
+    classifier_policy_identity: null,
+    acquisition_status: "FRAME_AVAILABLE",
+    state: "PRESENT",
+    reason_code: null,
+    comparison: null,
+    classifier_stage: null,
+    classifier_elapsed_ms: null,
+    path: "frames/" + baselineDigest + ".jpg",
+    roi_path: "frames/" + "f".repeat(64) + ".jpg",
+    roi_digest: "f".repeat(64),
+  };
+  return {
+    version: "phase7e-successor-evidence-v1",
+    investigation_id: INVESTIGATION_ID,
+    run_id: RUN_ID,
+    plan_id: "successor-plan-v1-test",
+    authority_identity: "successor-authority-v1-test",
+    roi_identity: "successor-roi-v1-test",
+    roi: { x: 120, y: 80, width: 240, height: 180, coordinate_space: "source_pixels", provenance: "manual" },
+    source_width: 2560,
+    source_height: 1440,
+    terminal_status: statusKind,
+    terminal_reason: statusKind === "FOUND" ? "disappearance_confirmed" : "indeterminate_observation",
+    last_present_observation_id: statusKind === "FOUND" ? presentId : null,
+    first_absent_observation_id: statusKind === "FOUND" ? absentId : null,
+    review_clip: { status: "UNAVAILABLE", reason: "phase8_not_requested" },
+    entries: [baseline, present, ...(statusKind === "FOUND" ? [absent] : [])],
+  };
+}
+
 function loadedConfirmation() {
   return {
     investigation_id: INVESTIGATION_ID,
@@ -282,7 +392,10 @@ test("real Schema 8 INCONCLUSIVE terminal payload is accepted", async () => {
   assert.equal(statusCalls, 1);
   assert.equal(harness.recordingSearchStatus.textContent, "녹화 기록 검색이 종료되었습니다.");
   assert.equal(harness.recordingSearchResult.hidden, false);
-  assert.match(harness.recordingSearchResultKind.textContent, /확정할 수 없습니다/);
+  assert.equal(
+    harness.recordingSearchResultKind.textContent,
+    "자동 판정이 불확실합니다. 기준 시점과 종료 시점을 직접 비교하세요.",
+  );
   assert.match(harness.recordingSearchResultReason.textContent, /신뢰성 있게 판단할 수 없습니다/);
   assert.equal(harness.recordingSearchLastPresent.textContent, "해당 없음");
   assert.equal(harness.recordingSearchFirstAbsent.textContent, "해당 없음");
@@ -593,6 +706,12 @@ for (const terminal of ["FOUND", "NOT_FOUND", "INCONCLUSIVE", "FAILED", "INTERRU
     assert.equal(harness.recordingSearchResult.hidden, false);
     assert.equal(harness.recordingSearchStart.disabled, false);
     assert.doesNotMatch(harness.recordingSearchResultKind.textContent, /theft|identity|intent|UTC/i);
+    if (terminal === "NOT_FOUND") {
+      assert.equal(harness.recordingSearchResultKind.textContent, "검색 종료 시점에도 대상이 존재합니다.");
+    }
+    if (terminal === "INCONCLUSIVE") {
+      assert.equal(harness.recordingSearchResultKind.textContent, "자동 판정이 불확실합니다. 기준 시점과 종료 시점을 직접 비교하세요.");
+    }
   });
 }
 
@@ -642,6 +761,61 @@ test("FOUND renders the honest localized disappearance interval and observed ran
   assert.match(harness.recordingSearchFirstAbsent.textContent, /2026-07-20T12:34:41.*Asia\/Seoul/);
   assert.match(harness.recordingSearchInterval.textContent, /12:34:40.*12:34:41/);
   assert.match(harness.recordingSearchObservedRange.textContent, /12:34:28.*12:35:27/);
+});
+
+test("terminal FOUND loads identity-bound visual evidence and both bracket frames", async () => {
+  const requests = [];
+  const harness = createHarness((url) => {
+    requests.push(url);
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    if (url.endsWith("/evidence")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => evidenceManifest("FOUND") });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => foundStatusWithTiming() });
+  }, undefined, { confirmation: true, search: true, evidence: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  await settle();
+
+  assert.equal(requests.filter((url) => url.endsWith("/evidence")).length, 1);
+  assert.equal(harness.recordingSearchEvidence.hidden, false);
+  assert.match(harness.recordingSearchEvidenceStatus.textContent, /비교할 수 있습니다/);
+  assert.match(harness.recordingSearchBaselineImage.src, /evidence\/a{64}$/);
+  assert.match(harness.recordingSearchEndImage.src, /evidence\/[bc]{64}$/);
+  assert.equal(harness.recordingSearchFoundEvidence.hidden, false);
+  assert.match(harness.recordingSearchLastPresentImage.src, /evidence\/b{64}$/);
+  assert.match(harness.recordingSearchFirstAbsentImage.src, /evidence\/c{64}$/);
+  assert.match(harness.recordingSearchReviewClipStatus.textContent, /사용할 수 없습니다/);
+});
+
+test("legacy terminal run without evidence remains readable with a safe unavailable message", async () => {
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    if (url.endsWith("/evidence")) {
+      return Promise.resolve({ ok: false, status: 404, json: async () => ({ error: { code: "evidence_unavailable" } }) });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => status("INCONCLUSIVE") });
+  }, undefined, { confirmation: true, search: true, evidence: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  await settle();
+
+  assert.equal(harness.recordingSearchEvidence.hidden, false);
+  assert.equal(harness.recordingSearchEvidenceStatus.textContent, "이전 실행에는 시각 증거가 보존되지 않았습니다.");
 });
 
 test("an exact missing polled run never inherits another run and is permanent", async () => {

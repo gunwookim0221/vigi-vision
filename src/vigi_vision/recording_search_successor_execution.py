@@ -18,10 +18,11 @@ import json
 import os
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
+from time import perf_counter
 from typing import TYPE_CHECKING, Protocol, cast
 
 from vigi_vision.investigation_confirmation_models import ConfirmedInvestigationInput
@@ -56,6 +57,10 @@ from vigi_vision.recording_search_successor_classification import (
     SuccessorObservation,
     SuccessorObservationState,
     reidentify_observation,
+)
+from vigi_vision.recording_search_successor_evidence import (
+    SuccessorEvidenceError,
+    SuccessorEvidenceRepository,
 )
 from vigi_vision.recording_search_successor_narrowing import (
     SuccessorBinaryNarrowingResult,
@@ -145,6 +150,7 @@ class SuccessorPreparedExecution:
     baseline_pts_seconds: float | None
     baseline_timing_precision_status: str
     baseline_warnings: tuple[str, ...]
+    baseline_jpeg_bytes: bytes | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,6 +369,7 @@ class SuccessorB4Classifier:
         roi: object,
         correlation_id: str,
     ) -> SuccessorClassifierResult:
+        started = perf_counter()
         try:
             result = run_b4_in_process(
                 baseline_image=baseline_image,
@@ -384,7 +391,14 @@ class SuccessorB4Classifier:
         if not isinstance(outcome, ClassificationOutcome):
             raise SuccessorClassificationContractError
         reason = getattr(result, "reason_code", None)
-        return SuccessorClassifierResult(outcome, None if reason is None else str(reason.value))
+        elapsed_ms = max(0, round((perf_counter() - started) * 1000))
+        return SuccessorClassifierResult(
+            outcome,
+            None if reason is None else str(reason.value),
+            getattr(result, "comparison", None),
+            "completed",
+            elapsed_ms,
+        )
 
 
 @dataclass(slots=True)
@@ -397,6 +411,7 @@ class SuccessorExecutionService:
     narrowing: SuccessorBinaryNarrowingService
     baseline_decoder: object
     publisher: SuccessorTerminalRepository
+    evidence_repository: SuccessorEvidenceRepository | None = field(default=None, repr=False)
 
     def prepare(
         self,
@@ -446,6 +461,7 @@ class SuccessorExecutionService:
             confirmed.decoded_local_pts_seconds,
             confirmed.timing_precision_status,
             confirmed.warnings,
+            baseline_payload,
         )
 
     def execute(  # noqa: C901, PLR0911
@@ -571,7 +587,7 @@ class SuccessorExecutionService:
                 {**terminal.as_record(), "terminal_result_id": None}
             ),
         )
-        return self.publisher.publish_terminal(terminal)
+        return self._publish_terminal(prepared, terminal, observations)
 
     def _publish_not_found(
         self, prepared: SuccessorPreparedExecution, coarse: SuccessorCoarseClassificationResult
@@ -599,7 +615,7 @@ class SuccessorExecutionService:
                 {**terminal.as_record(), "terminal_result_id": None}
             ),
         )
-        return self.publisher.publish_terminal(terminal)
+        return self._publish_terminal(prepared, terminal, observations)
 
     def _publish_inconclusive(
         self,
@@ -627,6 +643,19 @@ class SuccessorExecutionService:
                 {**terminal.as_record(), "terminal_result_id": None}
             ),
         )
+        return self._publish_terminal(prepared, terminal, observations)
+
+    def _publish_terminal(
+        self,
+        prepared: SuccessorPreparedExecution,
+        terminal: SuccessorTerminal,
+        observations: tuple[SuccessorObservation, ...],
+    ) -> SuccessorTerminal:
+        if self.evidence_repository is not None:
+            try:
+                self.evidence_repository.publish(prepared, observations, terminal)
+            except SuccessorEvidenceError as error:
+                raise SuccessorExecutionError("publication_failed") from error
         return self.publisher.publish_terminal(terminal)
 
     def _publish_interrupted(self, prepared: SuccessorPreparedExecution) -> SuccessorTerminal:
@@ -839,6 +868,12 @@ def _observation_record(item: SuccessorObservation) -> dict[str, object]:
         "state": item.state.value,
         "reason_code": item.reason_code,
         "frame_sha256": item.frame_sha256,
+        "frame_width": item.frame_width,
+        "frame_height": item.frame_height,
+        "comparison": item.comparison,
+        "classifier_stage": item.classifier_stage,
+        "classifier_elapsed_ms": item.classifier_elapsed_ms,
+        "assigned_segment_id": item.assigned_segment_id,
         "authority_identity": item.authority_identity,
         "reference_frame_resource_id": item.reference_frame_resource_id,
         "roi_identity": item.roi_identity,

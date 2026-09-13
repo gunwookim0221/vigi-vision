@@ -195,6 +195,20 @@ per-target timing, acquisition, classifier, digest, ROI, and policy facts.
 Target-local unavailable and visual-indeterminate reasons remain distinct in
 terminal evidence. Final human real-NVR acceptance remains unimplemented:
 
+The successor result now exposes an additive visual-evidence review projection.
+Each terminal run may publish immutable, digest-addressed baseline and observed
+JPEGs (plus bounded ROI crops), actual frame timing, source dimensions, ROI and
+classifier metrics. The read-only evidence and digest-addressed JPEG routes are
+bound to the exact investigation/run identity and strictly reopen the manifest
+before serving bytes. The browser loads that projection lazily and fails closed
+for legacy runs without evidence; it shows the baseline/end comparison for
+every terminal result, and for `FOUND` also shows the persisted last-present and
+first-absent bracket frames. Images can be opened at full size, while additional
+coarse observations remain collapsed and text-only until expanded. It does
+not alter replay, thresholds, or classification policy. FOUND review clips
+remain unavailable until the Phase 8 contract supplies one, and are explicitly
+labelled unavailable without hiding the image evidence.
+
 Slice 2 separates the semantic observation horizon from its replay transport
 window. Each normalized coverage item retains its raw assigned segment bounds;
 when that segment permits, acquisition requests up to five bounded seconds after

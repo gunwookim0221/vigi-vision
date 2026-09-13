@@ -291,6 +291,56 @@
             <div class="candidate-fact"><dt>추정 소실 구간</dt><dd id="recording-search-interval" class="mono"></dd></div>
             <div class="candidate-fact"><dt>실제 관측 범위</dt><dd id="recording-search-observed-range" class="mono"></dd></div>
           </dl>
+          <section id="recording-search-evidence" class="recording-search-evidence" aria-labelledby="recording-search-evidence-title" hidden>
+            <h4 id="recording-search-evidence-title">판정 근거</h4>
+            <p id="recording-search-evidence-status" class="field-hint">증거를 불러오는 중입니다…</p>
+            <div class="recording-search-evidence-grid">
+              <figure>
+                <figcaption>기준 프레임</figcaption>
+                <div class="recording-search-evidence-media">
+                  <img id="recording-search-baseline-image" alt="기준 프레임" loading="lazy" hidden tabindex="0">
+                  <span id="recording-search-baseline-highlight" class="recording-search-roi-highlight" aria-hidden="true"></span>
+                </div>
+                <img id="recording-search-baseline-roi" alt="기준 프레임 ROI" loading="lazy" hidden tabindex="0">
+                <p id="recording-search-baseline-time" class="mono"></p>
+              </figure>
+              <figure>
+                <figcaption>검색 종료 관측</figcaption>
+                <div class="recording-search-evidence-media">
+                  <img id="recording-search-end-image" alt="검색 종료 관측 프레임" loading="lazy" hidden tabindex="0">
+                  <span id="recording-search-end-highlight" class="recording-search-roi-highlight" aria-hidden="true"></span>
+                </div>
+                <img id="recording-search-end-roi" alt="검색 종료 관측 ROI" loading="lazy" hidden tabindex="0">
+                <p id="recording-search-end-time" class="mono"></p>
+              </figure>
+            </div>
+            <div id="recording-search-found-evidence" class="recording-search-evidence-grid" hidden>
+              <figure>
+                <figcaption>마지막 존재 관측</figcaption>
+                <div class="recording-search-evidence-media">
+                  <img id="recording-search-last-present-image" alt="마지막 존재 관측 프레임" loading="lazy" hidden tabindex="0">
+                  <span id="recording-search-last-present-highlight" class="recording-search-roi-highlight" aria-hidden="true"></span>
+                </div>
+                <img id="recording-search-last-present-roi" alt="마지막 존재 관측 ROI" loading="lazy" hidden tabindex="0">
+                <p id="recording-search-last-present-time" class="mono"></p>
+              </figure>
+              <figure>
+                <figcaption>처음 부재 관측</figcaption>
+                <div class="recording-search-evidence-media">
+                  <img id="recording-search-first-absent-image" alt="처음 부재 관측 프레임" loading="lazy" hidden tabindex="0">
+                  <span id="recording-search-first-absent-highlight" class="recording-search-roi-highlight" aria-hidden="true"></span>
+                </div>
+                <img id="recording-search-first-absent-roi" alt="처음 부재 관측 ROI" loading="lazy" hidden tabindex="0">
+                <p id="recording-search-first-absent-time" class="mono"></p>
+              </figure>
+            </div>
+            <p id="recording-search-review-clip-status" class="field-hint" hidden></p>
+            <dl id="recording-search-evidence-metrics" class="candidate-facts" hidden></dl>
+            <details id="recording-search-coarse-evidence" hidden>
+              <summary>Coarse 관측 근거</summary>
+              <div id="recording-search-coarse-list"></div>
+            </details>
+          </section>
         </div>
       </section>
     </main>

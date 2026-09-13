@@ -15,6 +15,29 @@
   const firstAbsent = document.querySelector("#recording-search-first-absent");
   const disappearanceInterval = document.querySelector("#recording-search-interval");
   const observedRange = document.querySelector("#recording-search-observed-range");
+  const evidencePanel = document.querySelector("#recording-search-evidence");
+  const evidenceStatus = document.querySelector("#recording-search-evidence-status");
+  const baselineImage = document.querySelector("#recording-search-baseline-image");
+  const baselineRoi = document.querySelector("#recording-search-baseline-roi");
+  const baselineTime = document.querySelector("#recording-search-baseline-time");
+  const baselineHighlight = document.querySelector("#recording-search-baseline-highlight");
+  const endImage = document.querySelector("#recording-search-end-image");
+  const endRoi = document.querySelector("#recording-search-end-roi");
+  const endTime = document.querySelector("#recording-search-end-time");
+  const endHighlight = document.querySelector("#recording-search-end-highlight");
+  const evidenceMetrics = document.querySelector("#recording-search-evidence-metrics");
+  const coarseEvidence = document.querySelector("#recording-search-coarse-evidence");
+  const coarseList = document.querySelector("#recording-search-coarse-list");
+  const foundEvidence = document.querySelector("#recording-search-found-evidence");
+  const lastPresentImage = document.querySelector("#recording-search-last-present-image");
+  const lastPresentRoi = document.querySelector("#recording-search-last-present-roi");
+  const lastPresentTime = document.querySelector("#recording-search-last-present-time");
+  const lastPresentHighlight = document.querySelector("#recording-search-last-present-highlight");
+  const firstAbsentImage = document.querySelector("#recording-search-first-absent-image");
+  const firstAbsentRoi = document.querySelector("#recording-search-first-absent-roi");
+  const firstAbsentTime = document.querySelector("#recording-search-first-absent-time");
+  const firstAbsentHighlight = document.querySelector("#recording-search-first-absent-highlight");
+  const reviewClipStatus = document.querySelector("#recording-search-review-clip-status");
   const candidateWorkflow = [
     "#candidate-intro",
     "#candidate-request-panel",
@@ -670,8 +693,8 @@
   function terminalText(kind) {
     return {
       FOUND: "요청한 검색 범위에서 대상이 사라진 구간을 찾았습니다.",
-      NOT_FOUND: "요청한 검색 범위에서는 대상이 사라진 구간을 찾지 못했습니다.",
-      INCONCLUSIVE: "검색 결과를 확정할 수 없습니다.",
+      NOT_FOUND: "검색 종료 시점에도 대상이 존재합니다.",
+      INCONCLUSIVE: "자동 판정이 불확실합니다. 기준 시점과 종료 시점을 직접 비교하세요.",
       FAILED: "검색이 안전하게 실패했습니다.",
       INTERRUPTED: "검색이 중단되었습니다.",
       CORRUPT: "검색 실행 기록을 안전하게 읽을 수 없습니다.",
@@ -723,8 +746,255 @@
       }
     }
     result.hidden = false;
+    void loadEvidence(payload);
     renderInput();
     result.focus?.({ preventScroll: true });
+  }
+
+  function evidenceUrl(entry) {
+    if (entry === null || typeof entry !== "object" || typeof entry.digest !== "string") return null;
+    if (!/^[0-9a-f]{64}$/.test(entry.digest) || activeRun === null) return null;
+    return `/api/v1/recording-searches/${encodeURIComponent(activeRun.investigationId)}/${encodeURIComponent(activeRun.runId)}/evidence/${entry.digest}`;
+  }
+
+  function validEvidence(payload) {
+    const manifestKeys = [
+      "version", "investigation_id", "run_id", "plan_id", "authority_identity",
+      "roi_identity", "roi", "source_width", "source_height", "terminal_status",
+      "terminal_reason", "last_present_observation_id", "first_absent_observation_id",
+      "review_clip", "entries",
+    ];
+    if (!hasExactKeys(payload, manifestKeys)
+      || payload.version !== "phase7e-successor-evidence-v1"
+      || payload.investigation_id !== activeRun?.investigationId
+      || payload.run_id !== activeRun?.runId
+      || typeof payload.plan_id !== "string" || payload.plan_id === ""
+      || typeof payload.authority_identity !== "string" || payload.authority_identity === ""
+      || typeof payload.roi_identity !== "string" || payload.roi_identity === ""
+      || !Number.isInteger(payload.source_width) || payload.source_width <= 0
+      || !Number.isInteger(payload.source_height) || payload.source_height <= 0
+      || !hasExactKeys(payload.roi, ["x", "y", "width", "height", "coordinate_space", "provenance"])
+      || payload.roi.coordinate_space !== "source_pixels"
+      || !Number.isInteger(payload.roi.x) || !Number.isInteger(payload.roi.y)
+      || !Number.isInteger(payload.roi.width) || !Number.isInteger(payload.roi.height)
+      || payload.roi.x < 0 || payload.roi.y < 0 || payload.roi.width <= 0 || payload.roi.height <= 0
+      || payload.roi.x + payload.roi.width > payload.source_width
+      || payload.roi.y + payload.roi.height > payload.source_height
+      || !["FOUND", "NOT_FOUND", "INCONCLUSIVE", "FAILED", "INTERRUPTED"].includes(payload.terminal_status)
+      || (payload.terminal_reason !== null && typeof payload.terminal_reason !== "string")
+      || (payload.last_present_observation_id !== null && typeof payload.last_present_observation_id !== "string")
+      || (payload.first_absent_observation_id !== null && typeof payload.first_absent_observation_id !== "string")
+      || !hasExactKeys(payload.review_clip, ["status", "reason"])
+      || !["UNAVAILABLE", "READY"].includes(payload.review_clip.status)
+      || typeof payload.review_clip.reason !== "string"
+      || !Array.isArray(payload.entries) || payload.entries.length === 0 || payload.entries.length > 64) {
+      return false;
+    }
+    const entryKeys = [
+      "role", "plan_id", "observation_id", "target_id", "acquisition_id",
+      "assigned_segment_id", "requested_time_utc", "frame_utc", "frame_pts_seconds",
+      "frame_ordinal", "frame_offset_seconds", "digest", "width", "height",
+      "authority_identity", "reference_frame_resource_id", "roi_identity",
+      "classifier_policy_identity", "acquisition_status", "state", "reason_code",
+      "comparison", "classifier_stage", "classifier_elapsed_ms", "path", "roi_path",
+      "roi_digest",
+    ];
+    return payload.entries.every((entry) => {
+      if (!hasExactKeys(entry, entryKeys)
+        || !["baseline", "baseline_link", "anchor", "observation"].includes(entry.role)
+        || entry.plan_id !== payload.plan_id
+        || entry.authority_identity !== payload.authority_identity
+        || entry.roi_identity !== payload.roi_identity
+        || !["FRAME_AVAILABLE", "UNAVAILABLE_GAP", "RECORDING_UNAVAILABLE", "REPLAY_TIMEOUT", "REPLAY_FAILED", "DECODE_TIMEOUT", "DECODE_UNAVAILABLE"].includes(entry.acquisition_status)
+        || !["PRESENT", "ABSENT", "INDETERMINATE", "UNAVAILABLE_GAP", "RECORDING_UNAVAILABLE", "REPLAY_TIMEOUT", "REPLAY_FAILED", "DECODE_TIMEOUT", "DECODE_UNAVAILABLE", "CLASSIFIER_TIMEOUT", "CLASSIFIER_FAILED"].includes(entry.state)) return false;
+      const validDigest = (value) => value === null || (typeof value === "string" && /^[0-9a-f]{64}$/.test(value));
+      if (!validDigest(entry.digest) || !validDigest(entry.roi_digest)) return false;
+      if ((entry.digest === null) !== (entry.path === null)
+        || (entry.digest !== null && entry.path !== `frames/${entry.digest}.jpg`)
+        || (entry.roi_digest === null) !== (entry.roi_path === null)
+        || (entry.roi_digest !== null && entry.roi_path !== `frames/${entry.roi_digest}.jpg`)) return false;
+      if (entry.acquisition_status === "FRAME_AVAILABLE"
+        && (entry.width !== payload.source_width || entry.height !== payload.source_height)) return false;
+      if (entry.acquisition_status !== "FRAME_AVAILABLE" && (entry.width !== null || entry.height !== null)) return false;
+      if (entry.comparison !== null && (typeof entry.comparison !== "object" || Array.isArray(entry.comparison))) return false;
+      return true;
+    });
+  }
+
+  function setEvidenceImage(image, src) {
+    if (image == null) return;
+    image.src = src;
+    image.hidden = false;
+  }
+
+  function setEvidenceHighlight(highlight, roi, sourceWidth, sourceHeight) {
+    if (highlight == null || roi === null || typeof roi !== "object") return;
+    if (!Number.isInteger(sourceWidth) || !Number.isInteger(sourceHeight)
+      || !Number.isInteger(roi.x) || !Number.isInteger(roi.y)
+      || !Number.isInteger(roi.width) || !Number.isInteger(roi.height)
+      || roi.x < 0 || roi.y < 0 || roi.width <= 0 || roi.height <= 0
+      || roi.x + roi.width > sourceWidth || roi.y + roi.height > sourceHeight) return;
+    highlight.style.left = `${(roi.x / sourceWidth) * 100}%`;
+    highlight.style.top = `${(roi.y / sourceHeight) * 100}%`;
+    highlight.style.width = `${(roi.width / sourceWidth) * 100}%`;
+    highlight.style.height = `${(roi.height / sourceHeight) * 100}%`;
+    highlight.hidden = false;
+  }
+
+  function renderEvidence(payload, terminalPayload) {
+    if (evidencePanel == null || !validEvidence(payload)) return;
+    const entries = payload.entries.filter((item) => item && typeof item === "object");
+    const baseline = entries.find((item) => item.role === "baseline");
+    const observed = entries.filter((item) => item.role !== "baseline"
+      && typeof item.frame_utc === "string" && typeof item.digest === "string")
+      .sort((left, right) => String(left.frame_utc).localeCompare(String(right.frame_utc)));
+    const ending = observed.at(-1) ?? null;
+    const roi = payload.roi;
+    const sourceWidth = payload.source_width;
+    const sourceHeight = payload.source_height;
+    if (baseline === undefined || ending === null) {
+      evidenceStatus.textContent = "이 실행의 시각 증거를 사용할 수 없습니다.";
+      evidencePanel.hidden = false;
+      return;
+    }
+    const baselineSrc = evidenceUrl(baseline);
+    const endingSrc = evidenceUrl(ending);
+    const baselineRoiSrc = typeof baseline.roi_digest === "string"
+      ? evidenceUrl({ digest: baseline.roi_digest }) : baselineSrc;
+    const endingRoiSrc = typeof ending.roi_digest === "string"
+      ? evidenceUrl({ digest: ending.roi_digest }) : endingSrc;
+    if (baselineSrc === null || endingSrc === null || baselineRoiSrc === null || endingRoiSrc === null) {
+      evidenceStatus.textContent = "시각 증거를 안전하게 확인할 수 없습니다.";
+      evidencePanel.hidden = false;
+      return;
+    }
+    setEvidenceImage(baselineImage, baselineSrc);
+    setEvidenceImage(baselineRoi, baselineRoiSrc);
+    setEvidenceImage(endImage, endingSrc);
+    setEvidenceImage(endRoi, endingRoiSrc);
+    baselineTime.textContent = baseline.frame_utc ?? baseline.requested_time_utc;
+    endTime.textContent = ending.frame_utc ?? ending.requested_time_utc;
+    setEvidenceHighlight(baselineHighlight, roi, sourceWidth, sourceHeight);
+    setEvidenceHighlight(endHighlight, roi, sourceWidth, sourceHeight);
+    if (foundEvidence != null) foundEvidence.hidden = true;
+    if (terminalPayload?.status === "FOUND" && foundEvidence != null) {
+      const present = entries.find((item) => item.observation_id === payload.last_present_observation_id
+        && typeof item.digest === "string");
+      const absent = entries.find((item) => item.observation_id === payload.first_absent_observation_id
+        && typeof item.digest === "string");
+      const presentSrc = evidenceUrl(present);
+      const absentSrc = evidenceUrl(absent);
+      if (present !== undefined && absent !== undefined && presentSrc !== null && absentSrc !== null) {
+        const presentRoiSrc = typeof present.roi_digest === "string"
+          ? evidenceUrl({ digest: present.roi_digest }) : presentSrc;
+        const absentRoiSrc = typeof absent.roi_digest === "string"
+          ? evidenceUrl({ digest: absent.roi_digest }) : absentSrc;
+        if (presentRoiSrc !== null && absentRoiSrc !== null) {
+          setEvidenceImage(lastPresentImage, presentSrc);
+          setEvidenceImage(lastPresentRoi, presentRoiSrc);
+          setEvidenceImage(firstAbsentImage, absentSrc);
+          setEvidenceImage(firstAbsentRoi, absentRoiSrc);
+          if (lastPresentTime != null) lastPresentTime.textContent = present.frame_utc ?? present.requested_time_utc;
+          if (firstAbsentTime != null) firstAbsentTime.textContent = absent.frame_utc ?? absent.requested_time_utc;
+          setEvidenceHighlight(lastPresentHighlight, roi, sourceWidth, sourceHeight);
+          setEvidenceHighlight(firstAbsentHighlight, roi, sourceWidth, sourceHeight);
+          foundEvidence.hidden = false;
+        }
+      }
+    }
+    evidenceStatus.textContent = "기준 프레임과 실제 관측 프레임을 비교할 수 있습니다.";
+    const comparison = ending.comparison;
+    if (comparison !== null && typeof comparison === "object" && evidenceMetrics !== null) {
+      evidenceMetrics.replaceChildren();
+      for (const [label, key] of [
+        ["Baseline mask pixels", "baseline_mask_pixel_count"],
+        ["Probe mask pixels", "probe_mask_pixel_count"],
+        ["Mask IoU", "mask_iou"],
+        ["ROI NCC", "roi_luma_ncc"],
+        ["Baseline mask coverage", "baseline_mask_coverage"],
+        ["Probe mask coverage", "probe_mask_coverage"],
+        ["Effective comparison area", "effective_comparison_area"],
+      ]) {
+        if (typeof comparison[key] !== "number") continue;
+        const row = document.createElement("div");
+        const term = document.createElement("dt");
+        const value = document.createElement("dd");
+        term.textContent = label;
+        value.textContent = Number(comparison[key]).toFixed(6);
+        row.append(term, value);
+        evidenceMetrics.append(row);
+      }
+      evidenceMetrics.hidden = evidenceMetrics.children.length === 0;
+    }
+    if (coarseEvidence !== null && coarseList !== null) {
+      coarseList.replaceChildren();
+      for (const entry of observed) {
+        const item = document.createElement("p");
+        item.textContent = `${entry.frame_utc ?? entry.requested_time_utc} — ${entry.state ?? "UNAVAILABLE"}`;
+        coarseList.append(item);
+      }
+      coarseEvidence.hidden = observed.length <= 1;
+    }
+    if (reviewClipStatus != null) {
+      const clip = payload.review_clip;
+      if (terminalPayload?.status === "FOUND") {
+        reviewClipStatus.textContent = clip?.status === "READY"
+          ? "검토 클립을 사용할 수 있습니다."
+          : "검토 클립은 현재 사용할 수 없습니다 (Phase 8에서 제공).";
+        reviewClipStatus.hidden = false;
+      } else {
+        reviewClipStatus.hidden = true;
+      }
+    }
+    evidencePanel.hidden = false;
+  }
+
+  async function loadEvidence(payload) {
+    if (evidencePanel == null || activeRun === null || !TERMINAL.has(payload?.status)) return;
+    evidencePanel.hidden = false;
+    evidenceStatus.textContent = "증거를 불러오는 중입니다…";
+    try {
+      const response = await fetch(`/api/v1/recording-searches/${encodeURIComponent(activeRun.investigationId)}/${encodeURIComponent(activeRun.runId)}/evidence`);
+      const body = await response.json().catch(() => null);
+      if (response.status === 404) {
+        evidenceStatus.textContent = "이전 실행에는 시각 증거가 보존되지 않았습니다.";
+        return;
+      }
+      if (!response.ok || !validEvidence(body)) {
+        evidenceStatus.textContent = "시각 증거를 안전하게 확인할 수 없습니다.";
+        return;
+      }
+      renderEvidence(body, payload);
+    } catch (_caught) {
+      evidenceStatus.textContent = "시각 증거를 불러오지 못했습니다.";
+    }
+  }
+
+  for (const image of [
+    baselineImage,
+    baselineRoi,
+    endImage,
+    endRoi,
+    lastPresentImage,
+    lastPresentRoi,
+    firstAbsentImage,
+    firstAbsentRoi,
+  ]) {
+    if (image == null) continue;
+    const open = () => {
+      if (typeof image.src !== "string" || image.src === "" || typeof window.open !== "function") return;
+      window.open(image.src, "_blank", "noopener,noreferrer");
+    };
+    image.addEventListener("click", open);
+    image.addEventListener("error", () => {
+      image.hidden = true;
+      if (evidenceStatus != null) evidenceStatus.textContent = "시각 증거 이미지를 안전하게 불러오지 못했습니다.";
+    });
+    image.addEventListener("keydown", (event) => {
+      if (event?.key !== "Enter" && event?.key !== " ") return;
+      event.preventDefault?.();
+      open();
+    });
   }
 
   async function poll(owner) {

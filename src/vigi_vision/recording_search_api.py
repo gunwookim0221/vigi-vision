@@ -148,7 +148,7 @@ class RecordingSearchApiDependencies:
     phase7e_manager: Phase7EBackgroundManager | None
 
 
-def install_recording_search_routes(  # noqa: C901 - explicit legacy/Phase 7E dispatch.
+def install_recording_search_routes(  # noqa: C901, PLR0915 - explicit legacy/Phase 7E dispatch.
     app: FastAPI,
     service: RecordingSearchService | None,
     limiter: anyio.CapacityLimiter,
@@ -255,6 +255,59 @@ def install_recording_search_routes(  # noqa: C901 - explicit legacy/Phase 7E di
         except Exception:  # noqa: BLE001 - HTTP boundary redacts unexpected failures.
             return _error_response(RecordingSearchError())
 
+    async def get_evidence(investigation_id: str, search_run_id: str) -> JSONResponse:
+        service7 = phase7e_service
+        if service7 is None:
+            return _unavailable()
+        try:
+            payload = await run_sync(
+                service7.evidence,
+                investigation_id,
+                search_run_id,
+                limiter=dependencies.limiter,
+            )
+        except (Phase7EPublicError, OSError, TypeError, ValueError):
+            return ReferenceFrameApiError(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                "evidence_corrupt",
+                "Visual evidence could not be read safely.",
+            ).response()
+        if payload is None:
+            return ReferenceFrameApiError(
+                status.HTTP_404_NOT_FOUND,
+                "evidence_unavailable",
+                "Visual evidence is unavailable for this run.",
+            ).response()
+        return JSONResponse(status_code=status.HTTP_200_OK, content=payload)
+
+    async def get_evidence_frame(
+        investigation_id: str, search_run_id: str, digest: str
+    ) -> Response:
+        service7 = phase7e_service
+        if service7 is None:
+            return _unavailable()
+        try:
+            payload = await run_sync(
+                service7.evidence_frame,
+                investigation_id,
+                search_run_id,
+                digest,
+                limiter=dependencies.limiter,
+            )
+        except (Phase7EPublicError, OSError, TypeError, ValueError):
+            return ReferenceFrameApiError(
+                status.HTTP_404_NOT_FOUND,
+                "evidence_unavailable",
+                "Visual evidence is unavailable for this run.",
+            ).response()
+        if payload is None:
+            return ReferenceFrameApiError(
+                status.HTTP_404_NOT_FOUND,
+                "evidence_unavailable",
+                "Visual evidence is unavailable for this run.",
+            ).response()
+        return Response(content=payload, media_type="image/jpeg")
+
     router.add_api_route(
         "",
         start_phase7e if phase7e_manager is not None else start_legacy,
@@ -291,6 +344,21 @@ def install_recording_search_routes(  # noqa: C901 - explicit legacy/Phase 7E di
             status.HTTP_500_INTERNAL_SERVER_ERROR: {"model": ReferenceFrameErrorResponse},
         },
     )
+    if phase7e_manager is not None:
+        router.add_api_route(
+            "/{investigation_id}/{search_run_id}/evidence",
+            get_evidence,
+            methods=["GET"],
+            response_model=None,
+            status_code=status.HTTP_200_OK,
+        )
+        router.add_api_route(
+            "/{investigation_id}/{search_run_id}/evidence/{digest}",
+            get_evidence_frame,
+            methods=["GET"],
+            response_model=None,
+            status_code=status.HTTP_200_OK,
+        )
     app.include_router(router)
     if phase7e_manager is not None:
         app.router.add_event_handler("startup", phase7e_manager.recover_startup)
