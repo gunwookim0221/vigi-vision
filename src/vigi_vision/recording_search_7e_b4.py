@@ -425,6 +425,20 @@ def _canonical_operational_reason(reason: ClassificationOperationalReason) -> st
 
 
 def _evidence_payload(raw: dict[str, object]) -> dict[str, object]:
+    legacy_fields = {
+        "baseline_mask_pixel_count",
+        "probe_mask_pixel_count",
+        "roi_pixel_count",
+        "mask_intersection_pixel_count",
+        "mask_union_pixel_count",
+        "baseline_mask_coverage",
+        "probe_mask_coverage",
+        "mask_iou",
+        "effective_comparison_area",
+        "roi_luma_ncc",
+        "visual_status",
+        "unusable_reason",
+    }
     decimal_fields = {
         "baseline_mask_coverage",
         "probe_mask_coverage",
@@ -433,6 +447,8 @@ def _evidence_payload(raw: dict[str, object]) -> dict[str, object]:
     }
     result: dict[str, object] = {}
     for key, value in raw.items():
+        if key not in legacy_fields:
+            continue
         if value is None:
             result[key] = None
         elif key in decimal_fields:

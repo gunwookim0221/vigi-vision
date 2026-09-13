@@ -419,6 +419,56 @@ def test_efficient_sam_adapter_preserves_bounded_result_contract(
     assert calls and calls[0][0] == _image(64)
 
 
+def test_efficient_sam_adapter_preserves_baseline_support_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _plan()
+    policy = ObjectPresenceDecisionPolicy(
+        classifier_policy_version="test-baseline-support-v1",
+        classifier_preprocessing_version="test-baseline-support-v1",
+        baseline_support_mode=True,
+        minimum_mask_overlap_for_comparison=0.1,
+        minimum_roi_pixels=1,
+        minimum_clipped_mask_pixels=1,
+    )
+
+    def bounded(*, policy, **_kwargs):
+        comparison = RawComparison(
+            baseline_mask_pixel_count=100,
+            probe_mask_pixel_count=100,
+            roi_pixel_count=256,
+            mask_intersection_pixel_count=100,
+            mask_union_pixel_count=100,
+            baseline_mask_coverage=0.390625,
+            probe_mask_coverage=0.390625,
+            mask_iou=1.0,
+            effective_comparison_area=None,
+            roi_luma_ncc=1.0,
+            visual_status=VisualStatus.COMPARABLE,
+            unusable_reason=None,
+            comparison_mode="baseline_support_v1",
+            baseline_support_pixel_count=100,
+            baseline_support_luma_similarity=1.0,
+            baseline_support_luma_ncc=1.0,
+            baseline_support_edge_similarity=1.0,
+            baseline_support_change_ratio=0.0,
+            baseline_support_foreground_retention=1.0,
+            baseline_support_background_change_ratio=0.0,
+        )
+        return policy.decide(comparison)
+
+    monkeypatch.setattr(classification_module, "run_b4_in_process", bounded)
+    adapter = EfficientSamSuccessorClassifier(
+        policy,
+        EfficientSamWorkerSpec(Path("checkpoint.pt"), "a" * 64, "cpu"),
+        2.0,
+    )
+    output = adapter.classify(_image(64), _image(64), 32, 32, _authority(plan).roi, "acq-support")
+    assert output.outcome is ClassificationOutcome.PRESENT
+    assert output.comparison is not None
+    assert output.comparison.comparison_mode == "baseline_support_v1"
+
+
 def test_efficient_sam_adapter_runs_real_spawned_model_path(tmp_path: Path) -> None:
     torch = pytest.importorskip("torch")
     efficient_sam = pytest.importorskip("efficient_sam.efficient_sam")

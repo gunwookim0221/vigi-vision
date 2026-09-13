@@ -287,6 +287,12 @@ The historical-baseline correction preserves the selected Phase 6 frame time,
 classifies a real search-anchor frame, and persists target-level timing,
 acquisition, classifier, digest, ROI, policy, and safe-reason evidence without
 changing the public Schema 8 projection.
+The successor classifier now uses the versioned immutable baseline-mask support
+comparison: probe masks remain diagnostic, while bounded baseline-support
+appearance, structure, change, foreground-retention, and background-stability
+signals drive the
+conservative `PRESENT`/`ABSENT`/`INDETERMINATE` mapping. Legacy Schema 5–7
+policy identities and reopen behavior remain unchanged.
 Successor acquisition now preserves raw segment bounds separately from semantic
 coverage, uses bounded post-target replay context to finalize short RTSP media,
 and admits only a decoded frame at or before the requested target. Sentinel

@@ -5,7 +5,15 @@ from __future__ import annotations
 import math
 from typing import ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    model_validator,
+)
 
 from vigi_vision.object_presence_values import (
     ClassificationOutcome,
@@ -34,17 +42,30 @@ class RawComparison(BaseModel):
     roi_luma_ncc: StrictFloat | None
     visual_status: VisualStatus
     unusable_reason: VisualReason | None
+    comparison_mode: StrictStr | None = None
+    baseline_support_pixel_count: StrictInt | None = None
+    baseline_support_luma_similarity: StrictFloat | None = None
+    baseline_support_luma_ncc: StrictFloat | None = None
+    baseline_support_edge_similarity: StrictFloat | None = None
+    baseline_support_change_ratio: StrictFloat | None = None
+    baseline_support_foreground_retention: StrictFloat | None = None
+    baseline_support_background_change_ratio: StrictFloat | None = None
 
     @model_validator(mode="after")
     def validate_closed_matrix(self) -> RawComparison:
         """Reject non-finite values and every forbidden field combination."""
         _validate_metrics(self)
         _validate_consistency(self)
+        if self.comparison_mode not in {None, "baseline_support_v1"}:
+            raise ValueError
         match self.visual_status:
             case VisualStatus.COMPARABLE:
                 if self.unusable_reason is not None:
                     raise ValueError
-                _require_complete_comparable(self)
+                if self.comparison_mode == "baseline_support_v1":
+                    _require_complete_baseline_support(self)
+                else:
+                    _require_complete_comparable(self)
             case VisualStatus.UNUSABLE:
                 if self.unusable_reason is None:
                     raise ValueError
@@ -116,6 +137,12 @@ def _validate_metric_ranges(comparison: RawComparison) -> None:
         comparison.probe_mask_coverage,
         comparison.mask_iou,
         comparison.roi_luma_ncc,
+        comparison.baseline_support_luma_similarity,
+        comparison.baseline_support_luma_ncc,
+        comparison.baseline_support_edge_similarity,
+        comparison.baseline_support_change_ratio,
+        comparison.baseline_support_foreground_retention,
+        comparison.baseline_support_background_change_ratio,
     ):
         if value is not None and not math.isfinite(value):
             raise ValueError
@@ -128,6 +155,20 @@ def _validate_metric_ranges(comparison: RawComparison) -> None:
             raise ValueError
     if comparison.roi_luma_ncc is not None and not -1.0 <= comparison.roi_luma_ncc <= 1.0:
         raise ValueError
+    for value in (
+        comparison.baseline_support_luma_similarity,
+        comparison.baseline_support_edge_similarity,
+        comparison.baseline_support_change_ratio,
+        comparison.baseline_support_foreground_retention,
+        comparison.baseline_support_background_change_ratio,
+    ):
+        if value is not None and not 0.0 <= value <= 1.0:
+            raise ValueError
+    if (
+        comparison.baseline_support_luma_ncc is not None
+        and not -1.0 <= comparison.baseline_support_luma_ncc <= 1.0
+    ):
+        raise ValueError
 
 
 def _validate_count_ranges(comparison: RawComparison) -> None:
@@ -137,12 +178,15 @@ def _validate_count_ranges(comparison: RawComparison) -> None:
         comparison.mask_intersection_pixel_count,
         comparison.mask_union_pixel_count,
         comparison.effective_comparison_area,
+        comparison.baseline_support_pixel_count,
     ):
         if value is not None and value < 0:
             raise ValueError
         if value is not None and value > comparison.roi_pixel_count:
             raise ValueError
     if comparison.effective_comparison_area == 0:
+        raise ValueError
+    if comparison.baseline_support_pixel_count == 0:
         raise ValueError
     if (
         comparison.mask_intersection_pixel_count is not None
@@ -167,6 +211,29 @@ def _require_complete_comparable(comparison: RawComparison) -> None:
     if any(value is None for value in required):
         raise ValueError
     if comparison.effective_comparison_area != comparison.mask_intersection_pixel_count:
+        raise ValueError
+
+
+def _require_complete_baseline_support(comparison: RawComparison) -> None:
+    """Validate the successor baseline-support evidence row."""
+    required = (
+        comparison.baseline_mask_pixel_count,
+        comparison.baseline_support_pixel_count,
+        comparison.baseline_support_luma_similarity,
+        comparison.baseline_support_luma_ncc,
+        comparison.baseline_support_change_ratio,
+        comparison.baseline_support_foreground_retention,
+        comparison.baseline_support_background_change_ratio,
+    )
+    if any(value is None for value in required):
+        raise ValueError
+    baseline_support_pixel_count = comparison.baseline_support_pixel_count
+    baseline_mask_pixel_count = comparison.baseline_mask_pixel_count
+    if baseline_support_pixel_count is None or baseline_mask_pixel_count is None:
+        raise ValueError
+    if baseline_support_pixel_count > comparison.roi_pixel_count:
+        raise ValueError
+    if baseline_mask_pixel_count != baseline_support_pixel_count:
         raise ValueError
 
 

@@ -255,9 +255,53 @@ RawComparison
   mask_iou: finite decimal | null
   effective_comparison_area: positive integer | null
   roi_luma_ncc: finite decimal | null
+  comparison_mode: null | baseline_support_v1
+  baseline_support_pixel_count: integer | null
+  baseline_support_luma_similarity: finite decimal | null
+  baseline_support_luma_ncc: finite decimal | null
+  baseline_support_edge_similarity: finite decimal | null
+  baseline_support_change_ratio: finite decimal | null
+  baseline_support_foreground_retention: finite decimal | null
+  baseline_support_background_change_ratio: finite decimal | null
   visual_status: comparable | unusable
   unusable_reason: closed reason | null
 ```
+
+### Successor baseline-support comparison
+
+Schema 8 successor observations use the versioned `baseline_support_v1` mode
+(`efficient-sam-ti-baseline-support-v1`). The confirmed baseline mask is an
+immutable spatial support for the target. A probe's independently predicted
+mask is retained only as diagnostic context; its occupancy or IoU cannot make
+the target appear present.
+
+The comparator maps probe pixels at the baseline support coordinates after
+bounded background-based brightness/contrast normalization. It records support
+luma similarity, support luma NCC, edge similarity, pixel change ratio,
+foreground-retention ratio, and background-change ratio. `PRESENT` requires the positive support similarity,
+NCC, edge, low-change, and foreground-retention gates together. `ABSENT`
+requires low support similarity and NCC, high pixel change, low foreground
+retention, and a stable background together. Any conflict, occlusion, registration uncertainty, or
+insufficient support remains `INDETERMINATE` with
+`insufficient_visual_evidence`. These metrics describe the actual
+baseline-coordinate pixels and are not a reinterpretation of legacy Schema
+5–7 evidence rows.
+
+The deterministic fixture matrix fixes the successor gates at support
+similarity `>= 0.70`, support NCC `>= 0.50`, edge similarity `>= 0.60`,
+foreground retention `>= 0.70`, and change ratio `<= 0.30` for `PRESENT`.
+`ABSENT` requires support similarity `<= 0.60`, support NCC `<= 0.20`,
+foreground retention `<= 0.30`, and change ratio `>= 0.70`; edge similarity is
+retained as diagnostic evidence because a stationary background can preserve
+edge energy after the target is removed. Both states require background change
+ratio `<= 0.10`; a larger change is treated as camera motion or scene
+instability. The separated bands leave partial
+occlusion and similar-object replacement in the indeterminate region.
+
+The legacy `efficient-sam-ti-roi-ncc-v1` policy and its independent-mask
+contract remain unchanged for reopening existing Schema 5–7 runs; inactive
+successor fields are excluded from that legacy identity. A policy identity
+change is required before a successor run can use the support-space comparison.
 
 Every `RawComparison` key is required; a field that is not valid for the selected
 variant is JSON `null` (the schema has no optional omission). Counts are bounded

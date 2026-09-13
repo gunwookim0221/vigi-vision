@@ -920,6 +920,12 @@
         ["Baseline mask coverage", "baseline_mask_coverage"],
         ["Probe mask coverage", "probe_mask_coverage"],
         ["Effective comparison area", "effective_comparison_area"],
+        ["Baseline support similarity", "baseline_support_luma_similarity"],
+        ["Baseline support NCC", "baseline_support_luma_ncc"],
+        ["Baseline support edge similarity", "baseline_support_edge_similarity"],
+        ["Baseline support change ratio", "baseline_support_change_ratio"],
+        ["Baseline support foreground retention", "baseline_support_foreground_retention"],
+        ["Baseline support background change ratio", "baseline_support_background_change_ratio"],
       ]) {
         if (typeof comparison[key] !== "number") continue;
         const row = document.createElement("div");

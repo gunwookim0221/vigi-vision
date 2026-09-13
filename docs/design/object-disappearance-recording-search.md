@@ -198,6 +198,14 @@ coarse targets after such uncertainty so terminal evidence can retain the
 latest available observation. Final human real-NVR acceptance remains
 unimplemented:
 
+Successor classification uses the additive
+`efficient-sam-ti-baseline-support-v1` policy. Each probe is compared at the
+immutable confirmed baseline-mask coordinates with bounded background-based
+normalization and records support appearance, NCC, edge, change,
+foreground-retention, and background-stability metrics. The independently predicted probe mask remains
+diagnostic only, so a background-sized probe mask cannot redefine the target.
+Legacy Schema 5–7 policy identities and reopen behavior are preserved.
+
 The successor result now exposes an additive visual-evidence review projection.
 Each terminal run may publish immutable, digest-addressed baseline and observed
 JPEGs (plus bounded ROI crops), actual frame timing, source dimensions, ROI and

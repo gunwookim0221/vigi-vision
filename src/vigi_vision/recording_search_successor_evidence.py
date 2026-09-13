@@ -120,6 +120,14 @@ _COMPARISON_KEYS = frozenset(
         "mask_iou",
         "effective_comparison_area",
         "roi_luma_ncc",
+        "comparison_mode",
+        "baseline_support_pixel_count",
+        "baseline_support_luma_similarity",
+        "baseline_support_luma_ncc",
+        "baseline_support_edge_similarity",
+        "baseline_support_change_ratio",
+        "baseline_support_foreground_retention",
+        "baseline_support_background_change_ratio",
         "visual_status",
         "unusable_reason",
     }
@@ -616,22 +624,47 @@ def _valid_timestamp(value: object) -> bool:
     return parsed.tzinfo is not None and parsed.utcoffset() == timezone.utc.utcoffset(parsed)
 
 
-def _valid_comparison(value: object) -> bool:
+def _valid_comparison(value: object) -> bool:  # noqa: PLR0911
     if value is None:
         return True
     if not isinstance(value, dict):
         return False
     visual_status = value.get("visual_status")
     unusable_reason = value.get("unusable_reason")
+    comparison_mode = value.get("comparison_mode")
     if visual_status is not None and visual_status not in _VISUAL_STATUSES:
         return False
     if unusable_reason is not None and unusable_reason not in _UNUSABLE_REASONS:
         return False
+    if comparison_mode not in {None, "baseline_support_v1"}:
+        return False
     for key, item in value.items():
-        if key in {"visual_status", "unusable_reason"}:
+        if key in {"visual_status", "unusable_reason", "comparison_mode"}:
+            continue
+        if item is None:
             continue
         if type(item) not in {int, float} or not math.isfinite(item):
             return False
+    if comparison_mode == "baseline_support_v1":
+        required = {
+            "baseline_mask_pixel_count",
+            "baseline_support_pixel_count",
+            "baseline_support_luma_similarity",
+            "baseline_support_luma_ncc",
+            "baseline_support_change_ratio",
+            "baseline_support_foreground_retention",
+            "baseline_support_background_change_ratio",
+        }
+        if not required.issubset(value) or value.get("visual_status") != "comparable":
+            return False
+        for key in required:
+            item = value.get(key)
+            if (
+                isinstance(item, bool)
+                or not isinstance(item, (int, float))
+                or not math.isfinite(item)
+            ):
+                return False
     return True
 
 

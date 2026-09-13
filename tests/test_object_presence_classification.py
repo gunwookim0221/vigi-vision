@@ -91,6 +91,68 @@ def _classifier(
     return ObjectPresenceClassifier(policy)
 
 
+def _support_scene(*, background: int = 180, shoe: bool = True, offset: int = 0) -> DecodedRgbImage:
+    """Build a fixed-ROI shoe/carpet fixture without repository media."""
+    rows = []
+    for y in range(22):
+        row = []
+        for x in range(22):
+            roi_x, roi_y = x - 1, y - 1
+            if shoe and 6 <= roi_x < 14 and 6 <= roi_y < 14:
+                value = 25 + ((roi_x * 17 + roi_y * 11) % 40) + offset
+            else:
+                value = background + ((roi_x * 3 + roi_y * 2) % 8) + offset
+            value = max(0, min(255, value))
+            row.append((value, value, value))
+        rows.append(tuple(row))
+    return DecodedRgbImage.from_rows(tuple(rows))
+
+
+def _support_mask() -> BinaryMask:
+    return _block_mask(x_start=7, y_start=7)
+
+
+def _support_classifier(**overrides: object) -> ObjectPresenceClassifier:
+    values: dict[str, object] = {
+        "classifier_policy_version": "test-baseline-support-v1",
+        "classifier_preprocessing_version": "test-baseline-support-v1",
+        "baseline_support_mode": True,
+        "minimum_mask_overlap_for_comparison": 0.1,
+        "minimum_roi_pixels": 1,
+        "minimum_clipped_mask_pixels": 1,
+    }
+    values.update(overrides)
+    return ObjectPresenceClassifier(ObjectPresenceDecisionPolicy(**values))
+
+
+def _support_input(
+    probe_image: DecodedRgbImage, probe_mask: BinaryMask | None = None
+) -> ClassifierInput:
+    baseline_mask = _support_mask()
+    return ClassifierInput(
+        baseline_image=_support_scene(),
+        probe_image=probe_image,
+        baseline_mask=baseline_mask,
+        probe_mask=probe_mask or baseline_mask,
+        roi=_roi(),
+    )
+
+
+def _shift_image(image: DecodedRgbImage, dx: int, dy: int) -> DecodedRgbImage:
+    """Translate a frame and fill the exposed border with the carpet."""
+    rows = []
+    for y in range(image.height):
+        row = []
+        for x in range(image.width):
+            source_x, source_y = x - dx, y - dy
+            if 0 <= source_x < image.width and 0 <= source_y < image.height:
+                row.append(image.pixels[source_y][source_x])
+            else:
+                row.append((180, 180, 180))
+        rows.append(tuple(row))
+    return DecodedRgbImage.from_rows(tuple(rows))
+
+
 def _comparable(
     mask_iou: float = 0.2,
     roi_luma_ncc: float = 0.3,
@@ -137,6 +199,79 @@ def test_matching_regions_are_present() -> None:
     assert result.outcome is ClassificationOutcome.PRESENT
     assert result.comparison.mask_iou == 1.0
     assert result.comparison.roi_luma_ncc == 1.0
+
+
+def test_baseline_support_reclassifies_removed_shoe_as_absent() -> None:
+    result = _support_classifier().classify(_support_input(_support_scene(shoe=False)))
+    assert result.outcome is ClassificationOutcome.ABSENT
+    assert result.comparison.comparison_mode == "baseline_support_v1"
+    assert result.comparison.baseline_support_change_ratio is not None
+    assert result.comparison.baseline_support_change_ratio >= 0.7
+    assert result.comparison.baseline_support_foreground_retention is not None
+    assert result.comparison.baseline_support_foreground_retention <= 0.3
+
+
+def test_baseline_support_keeps_shoe_present_through_global_exposure_shift() -> None:
+    result = _support_classifier().classify(
+        _support_input(_support_scene(background=200, offset=20))
+    )
+    assert result.outcome is ClassificationOutcome.PRESENT
+    assert result.comparison.baseline_support_luma_ncc == 1.0
+
+
+def test_baseline_support_fails_closed_for_partial_occlusion() -> None:
+    probe = _support_scene()
+    rows = [list(row) for row in probe.pixels]
+    for y in range(7, 11):
+        for x in range(7, 15):
+            rows[y][x] = (180, 180, 180)
+    occluded = DecodedRgbImage.from_rows(tuple(tuple(row) for row in rows))
+    result = _support_classifier().classify(_support_input(occluded))
+    assert result.outcome is ClassificationOutcome.INDETERMINATE
+    assert result.reason_code is VisualReason.INSUFFICIENT_VISUAL_EVIDENCE
+
+
+def test_baseline_support_does_not_accept_similar_dark_replacement() -> None:
+    probe = _support_scene()
+    rows = [list(row) for row in probe.pixels]
+    for y in range(7, 15):
+        for x in range(7, 15):
+            value = 70 + ((x + y) % 3)
+            rows[y][x] = (value, value, value)
+    replacement = DecodedRgbImage.from_rows(tuple(tuple(row) for row in rows))
+    result = _support_classifier().classify(_support_input(replacement))
+    assert result.outcome is ClassificationOutcome.INDETERMINATE
+    assert result.reason_code is VisualReason.INSUFFICIENT_VISUAL_EVIDENCE
+
+
+def test_baseline_support_ignores_expanded_probe_mask_for_identity() -> None:
+    expanded = _mask(lambda x, y: 1 <= x < 21 and 1 <= y < 21)
+    result = _support_classifier().classify(_support_input(_support_scene(), probe_mask=expanded))
+    assert result.outcome is ClassificationOutcome.PRESENT
+    assert result.comparison.mask_iou is not None
+    assert result.comparison.mask_iou < 0.3
+
+
+def test_baseline_support_requires_valid_baseline_support() -> None:
+    result = _support_classifier(minimum_clipped_mask_pixels=65).compare(
+        _support_input(_support_scene())
+    )
+    assert result.visual_status is VisualStatus.UNUSABLE
+    assert result.unusable_reason is VisualReason.INVALID_MASK
+
+
+def test_baseline_support_keeps_small_registration_error_indeterminate() -> None:
+    probe = _shift_image(_support_scene(), 1, 0)
+    result = _support_classifier().classify(_support_input(probe))
+    assert result.outcome is ClassificationOutcome.INDETERMINATE
+
+
+def test_baseline_support_rejects_large_camera_motion_as_unstable_background() -> None:
+    probe = _shift_image(_support_scene(), 5, 5)
+    result = _support_classifier().classify(_support_input(probe))
+    assert result.outcome is ClassificationOutcome.INDETERMINATE
+    assert result.comparison.baseline_support_background_change_ratio is not None
+    assert result.comparison.baseline_support_background_change_ratio > 0.10
 
 
 def test_disjoint_masks_are_absent_when_luma_is_different() -> None:

@@ -22,6 +22,7 @@ from vigi_vision.recording_search_7e_public import (
     Phase7EPublicService,
     Phase7EPublicStatus,
     approved_phase7e_policy,
+    approved_successor_object_presence_policy,
     build_phase7e_service,
 )
 from vigi_vision.recording_search_successor import SuccessorPlanRequest
@@ -107,6 +108,26 @@ def test_policy_snapshots_reproduce_approved_identities() -> None:
     assert classifier.identity == (
         "rr-classifier-policy-v1-d20a9d64543ce5bfa2b0d4861952593d36342ad51489588de06c89efa258838f"
     )
+
+
+def test_successor_policy_uses_versioned_baseline_support_mode() -> None:
+    policy = approved_successor_object_presence_policy()
+    assert policy.baseline_support_mode is True
+    assert policy.classifier_policy_version == "efficient-sam-ti-baseline-support-v1"
+    assert policy.classifier_preprocessing_version == "phase7e-baseline-support-v1"
+
+
+def test_public_composition_keeps_legacy_object_policy_for_schema5_to7(tmp_path: Path) -> None:
+    service = build_phase7e_service(
+        root=tmp_path,
+        confirmation_service=SimpleNamespace(),
+        recording_planner=SimpleNamespace(),
+        replay_extractor=SimpleNamespace(),
+        ffmpeg=Path("ffmpeg"),
+        ffprobe=Path("ffprobe"),
+        mask_predictor=None,
+    )
+    assert service.object_policy.baseline_support_mode is False
 
 
 def test_phase7e_post_accepts_the_closed_browser_contract_and_validation_is_safe() -> None:

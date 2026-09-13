@@ -957,6 +957,16 @@ def approved_phase7e_policy() -> tuple[
     return policy, classifier, object_policy
 
 
+def approved_successor_object_presence_policy() -> ObjectPresenceDecisionPolicy:
+    """Return the versioned baseline-support policy for successor runs."""
+    return ObjectPresenceDecisionPolicy(
+        classifier_policy_version="efficient-sam-ti-baseline-support-v1",
+        classifier_preprocessing_version="phase7e-baseline-support-v1",
+        baseline_support_mode=True,
+        minimum_mask_overlap_for_comparison=0.1,
+    )
+
+
 def build_phase7e_service(
     *,
     root: Path,
@@ -969,7 +979,8 @@ def build_phase7e_service(
     now_utc: Callable[[], datetime] | None = None,
 ) -> Phase7EPublicService:
     """Compose the public service from existing capture/B4 boundaries."""
-    policy, classifier_policy, object_policy = approved_phase7e_policy()
+    policy, classifier_policy, legacy_object_policy = approved_phase7e_policy()
+    successor_object_policy = approved_successor_object_presence_policy()
     repository = RecordingSearch7ERepository(root)
     repository.media_root = root / ".media"
     repository.media_probe = FfprobeMediaProbe(ffprobe)
@@ -996,7 +1007,7 @@ def build_phase7e_service(
             )
 
             worker_spec = _worker_spec(mask_predictor)
-            successor_classifier = SuccessorB4Classifier(object_policy, worker_spec)
+            successor_classifier = SuccessorB4Classifier(successor_object_policy, worker_spec)
             successor_execution = SuccessorExecutionService(
                 SuccessorPlanService(recording_planner),
                 SuccessorTargetAcquisitionService(
@@ -1056,12 +1067,12 @@ def build_phase7e_service(
             confirmation_service.load_confirmed,
             InMemoryRgbDecoder(ffmpeg),
             mask_predictor,
-            object_policy,
+            legacy_object_policy,
         ),
         FfmpegLocalDecoder(ffmpeg, ffprobe),
         policy,
         classifier_policy,
-        object_policy,
+        legacy_object_policy,
         Phase8HandoffRepository(
             root / ".phase8",
             root / ".media",
@@ -1229,5 +1240,6 @@ __all__ = [
     "Phase8HandoffRepository",
     "approved_phase7e_policy",
     "approved_phase8_media_policy",
+    "approved_successor_object_presence_policy",
     "build_phase7e_service",
 ]

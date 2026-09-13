@@ -3,6 +3,7 @@ from __future__ import annotations
 # Compact fixture helpers intentionally use dynamic namespace objects.
 # ruff: noqa: ANN001, ANN201, ANN202
 import hashlib
+from dataclasses import replace
 from datetime import datetime, timezone
 from io import BytesIO
 from types import SimpleNamespace
@@ -182,3 +183,33 @@ def test_missing_old_run_is_evidence_unavailable(tmp_path):
         repository.read("object-disappearance-v3-ch1-20260912T050000Z", "search-run-" + "b" * 32)
         is None
     )
+
+
+def test_baseline_support_comparison_reopens_with_all_metrics(tmp_path):
+    prepared, observations, terminal = _fixture(tmp_path)
+    comparison = {
+        "baseline_mask_pixel_count": 20,
+        "probe_mask_pixel_count": 360,
+        "roi_pixel_count": 400,
+        "mask_intersection_pixel_count": 20,
+        "mask_union_pixel_count": 360,
+        "baseline_mask_coverage": 0.05,
+        "probe_mask_coverage": 0.9,
+        "mask_iou": 0.055556,
+        "effective_comparison_area": None,
+        "roi_luma_ncc": 0.208525,
+        "comparison_mode": "baseline_support_v1",
+        "baseline_support_pixel_count": 20,
+        "baseline_support_luma_similarity": 0.12,
+        "baseline_support_luma_ncc": -0.2,
+        "baseline_support_edge_similarity": 0.1,
+        "baseline_support_change_ratio": 0.95,
+        "baseline_support_foreground_retention": 0.05,
+        "baseline_support_background_change_ratio": 0.0,
+        "visual_status": "comparable",
+        "unusable_reason": None,
+    }
+    observation = replace(observations[-1], comparison=comparison)
+    repository = SuccessorEvidenceRepository(tmp_path / ".successor")
+    manifest = repository.publish(prepared, (*observations[:-1], observation), terminal)
+    assert manifest["entries"][-1]["comparison"] == comparison

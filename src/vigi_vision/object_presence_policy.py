@@ -5,12 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from typing import ClassVar, Final
+from typing import ClassVar, Final, cast
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StrictFloat,
     StrictInt,
     StrictStr,
@@ -62,6 +63,17 @@ class ObjectPresenceDecisionPolicy(BaseModel):
     efficient_sam_source_commit: StrictStr = _SOURCE_COMMIT
     checkpoint_sha256: StrictStr = _CHECKPOINT_SHA256
     prompt_rule: StrictStr = "confirmed_roi_center_v1"
+    baseline_support_mode: StrictBool = False
+    baseline_support_present_similarity_minimum: StrictFloat = Field(default=0.70, ge=0.0, le=1.0)
+    baseline_support_present_edge_minimum: StrictFloat = Field(default=0.60, ge=0.0, le=1.0)
+    baseline_support_present_change_maximum: StrictFloat = Field(default=0.30, ge=0.0, le=1.0)
+    baseline_support_present_ncc_minimum: StrictFloat = Field(default=0.50, ge=-1.0, le=1.0)
+    baseline_support_present_foreground_minimum: StrictFloat = Field(default=0.70, ge=0.0, le=1.0)
+    baseline_support_absent_similarity_maximum: StrictFloat = Field(default=0.60, ge=0.0, le=1.0)
+    baseline_support_absent_ncc_maximum: StrictFloat = Field(default=0.20, ge=-1.0, le=1.0)
+    baseline_support_absent_change_minimum: StrictFloat = Field(default=0.70, ge=0.0, le=1.0)
+    baseline_support_absent_foreground_maximum: StrictFloat = Field(default=0.30, ge=0.0, le=1.0)
+    baseline_support_background_change_maximum: StrictFloat = Field(default=0.10, ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def validate_policy(self) -> ObjectPresenceDecisionPolicy:
@@ -81,6 +93,16 @@ class ObjectPresenceDecisionPolicy(BaseModel):
             self.present_luma_ncc_minimum,
             self.absent_mask_iou_maximum,
             self.absent_luma_ncc_maximum,
+            self.baseline_support_present_similarity_minimum,
+            self.baseline_support_present_edge_minimum,
+            self.baseline_support_present_change_maximum,
+            self.baseline_support_present_ncc_minimum,
+            self.baseline_support_present_foreground_minimum,
+            self.baseline_support_absent_similarity_maximum,
+            self.baseline_support_absent_ncc_maximum,
+            self.baseline_support_absent_change_minimum,
+            self.baseline_support_absent_foreground_maximum,
+            self.baseline_support_background_change_maximum,
         )
         if any(not math.isfinite(value) for value in finite):
             raise ValueError
@@ -108,6 +130,16 @@ class ObjectPresenceDecisionPolicy(BaseModel):
             raise ValueError
         if self.present_luma_ncc_minimum <= self.absent_luma_ncc_maximum:
             raise ValueError
+        if (
+            self.baseline_support_present_similarity_minimum
+            <= self.baseline_support_absent_similarity_maximum
+            or self.baseline_support_present_change_maximum
+            >= self.baseline_support_absent_change_minimum
+            or self.baseline_support_present_ncc_minimum <= self.baseline_support_absent_ncc_maximum
+            or self.baseline_support_present_foreground_minimum
+            <= self.baseline_support_absent_foreground_maximum
+        ):
+            raise ValueError
 
     def _validate_identity(self) -> None:
         if len(self.efficient_sam_source_commit) != _SOURCE_COMMIT_LENGTH or any(
@@ -130,6 +162,10 @@ class ObjectPresenceDecisionPolicy(BaseModel):
             )
         if comparison.visual_status is not VisualStatus.COMPARABLE:
             raise ValueError
+        if comparison.comparison_mode == "baseline_support_v1":
+            if not self.baseline_support_mode:
+                raise ValueError
+            return _decide_baseline_support(self, comparison)
         if comparison.mask_iou is None or comparison.roi_luma_ncc is None:
             raise ValueError
         _validate_comparable_gates(self, comparison)
@@ -156,8 +192,15 @@ class ObjectPresenceDecisionPolicy(BaseModel):
     @property
     def identity_digest(self) -> str:
         """Return the stable SHA-256 digest of every policy field."""
+        fields = cast("dict[str, object]", self.model_dump(mode="json"))
+        if not self.baseline_support_mode:
+            fields = {
+                key: value
+                for key, value in fields.items()
+                if not key.startswith("baseline_support_")
+            }
         serialized = json.dumps(
-            self.model_dump(mode="json"),
+            fields,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -196,6 +239,66 @@ def _validate_comparable_gates(
         or comparison.baseline_mask_coverage >= policy.maximum_roi_mask_coverage_ratio
         or comparison.probe_mask_coverage >= policy.maximum_roi_mask_coverage_ratio
     ):
+        raise ValueError
+
+
+def _decide_baseline_support(
+    policy: ObjectPresenceDecisionPolicy, comparison: RawComparison
+) -> ClassificationResult:
+    """Apply the successor support-space matrix without probe-mask identity."""
+    _validate_baseline_support_gates(policy, comparison)
+    similarity = comparison.baseline_support_luma_similarity
+    ncc = comparison.baseline_support_luma_ncc
+    edge = comparison.baseline_support_edge_similarity
+    change = comparison.baseline_support_change_ratio
+    foreground = comparison.baseline_support_foreground_retention
+    background_change = comparison.baseline_support_background_change_ratio
+    if (
+        similarity is None
+        or ncc is None
+        or change is None
+        or foreground is None
+        or background_change is None
+    ):
+        raise ValueError
+    background_stable = background_change <= policy.baseline_support_background_change_maximum
+    if (
+        background_stable
+        and similarity >= policy.baseline_support_present_similarity_minimum
+        and ncc >= policy.baseline_support_present_ncc_minimum
+        and edge is not None
+        and edge >= policy.baseline_support_present_edge_minimum
+        and change <= policy.baseline_support_present_change_maximum
+        and foreground >= policy.baseline_support_present_foreground_minimum
+    ):
+        return ClassificationResult(
+            outcome=ClassificationOutcome.PRESENT, reason_code=None, comparison=comparison
+        )
+    if (
+        background_stable
+        and similarity <= policy.baseline_support_absent_similarity_maximum
+        and ncc <= policy.baseline_support_absent_ncc_maximum
+        and change >= policy.baseline_support_absent_change_minimum
+        and foreground <= policy.baseline_support_absent_foreground_maximum
+    ):
+        return ClassificationResult(
+            outcome=ClassificationOutcome.ABSENT, reason_code=None, comparison=comparison
+        )
+    return ClassificationResult(
+        outcome=ClassificationOutcome.INDETERMINATE,
+        reason_code=VisualReason.INSUFFICIENT_VISUAL_EVIDENCE,
+        comparison=comparison,
+    )
+
+
+def _validate_baseline_support_gates(
+    policy: ObjectPresenceDecisionPolicy, comparison: RawComparison
+) -> None:
+    if comparison.baseline_support_pixel_count is None:
+        raise ValueError
+    if comparison.baseline_support_pixel_count < policy.minimum_clipped_mask_pixels:
+        raise ValueError
+    if comparison.roi_pixel_count < policy.minimum_roi_pixels:
         raise ValueError
 
 
