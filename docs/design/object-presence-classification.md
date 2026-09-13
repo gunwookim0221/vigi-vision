@@ -255,7 +255,7 @@ RawComparison
   mask_iou: finite decimal | null
   effective_comparison_area: positive integer | null
   roi_luma_ncc: finite decimal | null
-  comparison_mode: null | baseline_support_v1 | baseline_support_v2
+  comparison_mode: null | baseline_support_v1 | baseline_support_v2 | baseline_support_v3
   baseline_support_pixel_count: integer | null
   baseline_support_luma_similarity: finite decimal | null
   baseline_support_luma_ncc: finite decimal | null
@@ -263,14 +263,20 @@ RawComparison
   baseline_support_change_ratio: finite decimal | null
   baseline_support_foreground_retention: finite decimal | null
   baseline_support_background_change_ratio: finite decimal | null
+  baseline_support_alignment_dx: bounded integer | null
+  baseline_support_alignment_dy: bounded integer | null
+  baseline_support_alignment_rotation_degrees: bounded integer | null
+  baseline_support_alignment_overlap: finite decimal | null
+  baseline_support_alignment_score: finite decimal | null
+  baseline_support_alignment_margin: finite decimal | null
   visual_status: comparable | unusable
   unusable_reason: closed reason | null
 ```
 
 ### Successor baseline-support comparison
 
-Schema 8 successor observations use the versioned `baseline_support_v2` mode
-(`efficient-sam-ti-baseline-support-v2`). The confirmed baseline mask is an
+Schema 8 successor observations use the versioned `baseline_support_v3` mode
+(`efficient-sam-ti-baseline-support-v3`). The confirmed baseline mask is an
 immutable spatial support for the target. A probe's independently predicted
 mask is retained only as diagnostic context; its occupancy or IoU cannot make
 the target appear present.
@@ -294,10 +300,21 @@ insufficient support remains `INDETERMINATE` with
 baseline-coordinate pixels and are not a reinterpretation of legacy Schema
 5–7 evidence rows.
 
+The v3 comparator first evaluates a bounded local rigid alignment around the
+confirmed ROI: translation is limited to 15% of the ROI dimensions and 16
+source pixels, and rotation candidates are limited to -10, -5, 0, 5, and 10
+degrees. A candidate must retain at least 75% of immutable baseline support.
+The selected offset, rotation, overlap, score, and best-vs-distinct-second
+margin are additive evidence. A PRESENT decision additionally requires a
+0.02 alignment margin; ambiguous candidates remain INDETERMINATE. The
+expanded stability exclusion covers the bounded alignment sweep so an object
+moving inside the ROI is not counted as camera motion, while fixed background
+changes still fail closed.
+
 The deterministic fixture matrix fixes the successor gates at support
 similarity `>= 0.70`, support NCC `>= 0.50`, edge similarity `>= 0.60`,
 foreground retention `>= 0.70`, and change ratio `<= 0.30` for `PRESENT`.
-`ABSENT` v2 requires support NCC `<= 0.20` and local-background foreground
+`ABSENT` v2/v3 requires support NCC `<= 0.20` and local-background foreground
 retention `<= 0.30`;
 support similarity and change ratio remain recorded diagnostics. Edge similarity is
 retained as diagnostic evidence because a stationary background can preserve
@@ -313,10 +330,10 @@ occlusion, replacement, and camera-motion fixtures.
 
 The legacy `efficient-sam-ti-roi-ncc-v1` policy and its independent-mask
 contract remain unchanged for reopening existing Schema 5–7 runs; inactive
-successor fields are excluded from that legacy identity. Persisted v1 support
-rows remain reopenable under their original all-gates semantics; a v2 policy
-identity is required before a new successor run can use local-background
-retention and dilated-ring stability.
+successor fields are excluded from that legacy identity. Persisted v1 and v2
+support rows remain reopenable under their original semantics; the v3 policy
+identity is required before a new successor run can use bounded local
+alignment.
 
 Every `RawComparison` key is required; a field that is not valid for the selected
 variant is JSON `null` (the schema has no optional omission). Counts are bounded

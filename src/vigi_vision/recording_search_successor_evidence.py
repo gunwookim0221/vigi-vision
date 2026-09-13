@@ -128,6 +128,12 @@ _COMPARISON_KEYS = frozenset(
         "baseline_support_change_ratio",
         "baseline_support_foreground_retention",
         "baseline_support_background_change_ratio",
+        "baseline_support_alignment_dx",
+        "baseline_support_alignment_dy",
+        "baseline_support_alignment_rotation_degrees",
+        "baseline_support_alignment_overlap",
+        "baseline_support_alignment_score",
+        "baseline_support_alignment_margin",
         "visual_status",
         "unusable_reason",
     }
@@ -629,23 +635,45 @@ def _valid_comparison(value: object) -> bool:  # noqa: PLR0911
         return True
     if not isinstance(value, dict):
         return False
-    visual_status = value.get("visual_status")
-    unusable_reason = value.get("unusable_reason")
-    comparison_mode = value.get("comparison_mode")
+    payload = value
+    visual_status = payload.get("visual_status")
+    unusable_reason = payload.get("unusable_reason")
+    comparison_mode = payload.get("comparison_mode")
     if visual_status is not None and visual_status not in _VISUAL_STATUSES:
         return False
     if unusable_reason is not None and unusable_reason not in _UNUSABLE_REASONS:
         return False
-    if comparison_mode not in {None, "baseline_support_v1", "baseline_support_v2"}:
+    if comparison_mode not in {
+        None,
+        "baseline_support_v1",
+        "baseline_support_v2",
+        "baseline_support_v3",
+    }:
         return False
-    for key, item in value.items():
+    alignment_keys = {
+        "baseline_support_alignment_dx",
+        "baseline_support_alignment_dy",
+        "baseline_support_alignment_rotation_degrees",
+        "baseline_support_alignment_overlap",
+        "baseline_support_alignment_score",
+        "baseline_support_alignment_margin",
+    }
+    if comparison_mode != "baseline_support_v3" and any(
+        item is not None for key, item in payload.items() if key in alignment_keys
+    ):
+        return False
+    for key, item in payload.items():
         if key in {"visual_status", "unusable_reason", "comparison_mode"}:
             continue
         if item is None:
             continue
         if type(item) not in {int, float} or not math.isfinite(item):
             return False
-    if comparison_mode in {"baseline_support_v1", "baseline_support_v2"}:
+    if comparison_mode in {
+        "baseline_support_v1",
+        "baseline_support_v2",
+        "baseline_support_v3",
+    }:
         required = {
             "baseline_mask_pixel_count",
             "baseline_support_pixel_count",
@@ -655,14 +683,47 @@ def _valid_comparison(value: object) -> bool:  # noqa: PLR0911
             "baseline_support_foreground_retention",
             "baseline_support_background_change_ratio",
         }
-        if not required.issubset(value) or value.get("visual_status") != "comparable":
+        if comparison_mode == "baseline_support_v3":
+            required.update(
+                {
+                    "baseline_support_alignment_dx",
+                    "baseline_support_alignment_dy",
+                    "baseline_support_alignment_rotation_degrees",
+                    "baseline_support_alignment_overlap",
+                    "baseline_support_alignment_score",
+                    "baseline_support_alignment_margin",
+                }
+            )
+        if not required.issubset(payload) or payload.get("visual_status") != "comparable":
             return False
         for key in required:
-            item = value.get(key)
+            item = payload.get(key)
             if (
                 isinstance(item, bool)
                 or not isinstance(item, (int, float))
                 or not math.isfinite(item)
+            ):
+                return False
+        if comparison_mode == "baseline_support_v3":
+            dx = payload.get("baseline_support_alignment_dx")
+            dy = payload.get("baseline_support_alignment_dy")
+            rotation = payload.get("baseline_support_alignment_rotation_degrees")
+            overlap = payload.get("baseline_support_alignment_overlap")
+            score = payload.get("baseline_support_alignment_score")
+            margin = payload.get("baseline_support_alignment_margin")
+            if (
+                type(dx) is not int
+                or type(dy) is not int
+                or type(rotation) is not int
+                or abs(dx) > 32
+                or abs(dy) > 32
+                or abs(rotation) > 15
+                or not isinstance(overlap, (int, float))
+                or not 0.0 < overlap <= 1.0
+                or not isinstance(score, (int, float))
+                or not -1.0 <= score <= 1.0
+                or not isinstance(margin, (int, float))
+                or not 0.0 <= margin <= 1.0
             ):
                 return False
     return True

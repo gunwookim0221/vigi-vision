@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 from vigi_vision.object_presence_evidence import RawComparison
 from vigi_vision.object_presence_metrics import (
@@ -53,6 +53,9 @@ _SUPPORT_CHANGE_THRESHOLD: Final[float] = 32.0
 _FOREGROUND_CONTRAST_THRESHOLD: Final[float] = 40.0
 _STABILITY_DILATION_PIXELS: Final[int] = 4
 _BACKGROUND_GRADIENT_CHANGE_THRESHOLD: Final[float] = 32.0
+_ALIGNMENT_ROTATIONS: Final[tuple[int, ...]] = (-10, -5, 0, 5, 10)
+_ALIGNMENT_DISTINCT_ROTATION_DEGREES: Final[int] = 5
+_DENSE_ALIGNMENT_RADIUS_THRESHOLD: Final[int] = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +104,25 @@ class ObjectPresenceClassifier:
     def classify(self, values: ClassifierInput) -> ClassificationResult:
         """Return the conservative three-state result for one in-memory input."""
         return self.policy.decide(self.compare(values))
+
+
+@dataclass(frozen=True, slots=True)
+class _AlignmentChoice:
+    """Best bounded local alignment and its support-space measurements."""
+
+    similarity: float | None
+    ncc: float | None
+    edge: float | None
+    change: float | None
+    foreground: float | None
+    background_change: float | None
+    normalized_probe: tuple[float, ...]
+    dx: int
+    dy: int
+    rotation_degrees: int
+    overlap: float
+    score: float
+    margin: float
 
 
 def binarize_mask_logits(logits: object, threshold: float = 0.0) -> BinaryMask:
@@ -207,7 +229,7 @@ def _measure_masks(
     return measurements, terminal
 
 
-def _compare_with_baseline_support(
+def _compare_with_baseline_support(  # noqa: PLR0915 - explicit evidence-gate assembly
     values: ClassifierInput, policy: ObjectPresenceDecisionPolicy
 ) -> RawComparison:
     """Compare probe pixels against the immutable baseline mask support.
@@ -253,40 +275,127 @@ def _compare_with_baseline_support(
         for index, present in enumerate(value for row in baseline_mask for value in row)
         if present
     )
-    stability_mask = _dilated_exclusion_mask(baseline_mask, _STABILITY_DILATION_PIXELS)
-    background_indices = tuple(
+    alignment_radius_x, alignment_radius_y = _alignment_radii(
+        values.roi.width, values.roi.height, policy
+    )
+    stability_radius = min(
+        _STABILITY_DILATION_PIXELS + max(alignment_radius_x, alignment_radius_y),
+        min(values.roi.width, values.roi.height) // 4,
+    )
+    alignment_stability_mask = _dilated_exclusion_mask(baseline_mask, stability_radius)
+    alignment_background_indices = tuple(
         index
-        for index, excluded in enumerate(value for row in stability_mask for value in row)
+        for index, excluded in enumerate(value for row in alignment_stability_mask for value in row)
         if not excluded
     )
+    fixed_stability_mask = _dilated_exclusion_mask(baseline_mask, _STABILITY_DILATION_PIXELS)
+    fixed_background_indices = tuple(
+        index
+        for index, excluded in enumerate(value for row in fixed_stability_mask for value in row)
+        if not excluded
+    )
+    alignment_background_baseline = tuple(
+        baseline_luma[index] for index in alignment_background_indices
+    )
+    alignment_background_probe = tuple(probe_luma[index] for index in alignment_background_indices)
+    fixed_background_baseline = tuple(baseline_luma[index] for index in fixed_background_indices)
+    fixed_background_probe = tuple(probe_luma[index] for index in fixed_background_indices)
     support_baseline = tuple(baseline_luma[index] for index in support_indices)
     support_probe = tuple(probe_luma[index] for index in support_indices)
-    background_baseline = tuple(baseline_luma[index] for index in background_indices)
-    background_probe = tuple(probe_luma[index] for index in background_indices)
-    support_luma_ncc_raw = mean_centered_ncc(support_baseline, support_probe)
-    support_luma_ncc = (
-        None if support_luma_ncc_raw is None else quantize_metric(support_luma_ncc_raw)
+    fixed_support_ncc_raw = mean_centered_ncc(support_baseline, support_probe)
+    fixed_support_ncc = (
+        None if fixed_support_ncc_raw is None else quantize_metric(fixed_support_ncc_raw)
     )
     (
-        support_luma_similarity,
-        change_ratio,
-        foreground_retention,
-        background_change_ratio,
-        normalized_probe,
+        fixed_similarity,
+        fixed_change,
+        fixed_foreground,
+        fixed_background_change,
+        fixed_normalized_probe,
     ) = _support_luma_metrics(
         support_baseline,
         support_probe,
-        background_baseline,
-        background_probe,
-        (background_indices, values.roi.width),
+        fixed_background_baseline,
+        fixed_background_probe,
+        (fixed_background_indices, values.roi.width),
     )
-    edge_similarity = _support_edge_similarity(
-        baseline_luma,
-        baseline_mask,
-        values.roi.width,
-        normalized_probe,
-        support_indices,
-    )
+    if policy.baseline_support_alignment_mode:
+        alignment = _aligned_support_choice(
+            baseline_luma,
+            probe_luma,
+            baseline_mask,
+            support_indices,
+            alignment_background_baseline,
+            alignment_background_probe,
+            alignment_background_indices,
+            values.roi.width,
+            alignment_radius_x,
+            alignment_radius_y,
+            policy,
+        )
+        alignment_is_confident = (
+            alignment.overlap >= policy.baseline_support_alignment_min_support_overlap
+            and alignment.margin >= policy.baseline_support_alignment_margin_minimum
+        )
+        if alignment_is_confident:
+            support_luma_similarity = alignment.similarity
+            support_luma_ncc = alignment.ncc
+            edge_similarity = alignment.edge
+            change_ratio = alignment.change
+            foreground_retention = alignment.foreground
+            background_change_ratio = alignment.background_change
+            normalized_probe = alignment.normalized_probe
+        else:
+            # A low-margin alignment is ambiguous.  Preserve fixed baseline
+            # support metrics so removal remains observable instead of letting
+            # a floor/background correlation mask the absence signal.
+            support_luma_similarity = fixed_similarity
+            support_luma_ncc = fixed_support_ncc
+            edge_similarity = _support_edge_similarity(
+                baseline_luma,
+                baseline_mask,
+                values.roi.width,
+                fixed_normalized_probe,
+                support_indices,
+            )
+            change_ratio = fixed_change
+            foreground_retention = fixed_foreground
+            background_change_ratio = alignment.background_change
+            if (
+                fixed_foreground is not None
+                and fixed_foreground > 0.0
+                and fixed_background_change is not None
+            ):
+                background_change_ratio = max(
+                    background_change_ratio or 0.0,
+                    fixed_background_change,
+                )
+            normalized_probe = fixed_normalized_probe
+        alignment_fields: tuple[
+            int | None, int | None, int | None, float | None, float | None, float | None
+        ] = (
+            alignment.dx if alignment.overlap > 0.0 else 0,
+            alignment.dy if alignment.overlap > 0.0 else 0,
+            alignment.rotation_degrees if alignment.overlap > 0.0 else 0,
+            alignment.overlap if alignment.overlap > 0.0 else 1.0,
+            alignment.score if alignment.overlap > 0.0 else -1.0,
+            alignment.margin,
+        )
+    else:
+        support_luma_similarity = fixed_similarity
+        support_luma_ncc = fixed_support_ncc
+        change_ratio = fixed_change
+        foreground_retention = fixed_foreground
+        background_change_ratio = fixed_background_change
+        normalized_probe = fixed_normalized_probe
+        edge_similarity = _support_edge_similarity(
+            baseline_luma,
+            baseline_mask,
+            values.roi.width,
+            normalized_probe,
+            support_indices,
+        )
+        alignment_fields = (None, None, None, None, None, None)
     roi_ncc_raw = mean_centered_ncc(baseline_luma, probe_luma)
     roi_ncc = None if roi_ncc_raw is None else quantize_metric(roi_ncc_raw)
     if (
@@ -324,7 +433,11 @@ def _compare_with_baseline_support(
         roi_luma_ncc=roi_ncc,
         visual_status=VisualStatus.COMPARABLE,
         unusable_reason=None,
-        comparison_mode="baseline_support_v2",
+        comparison_mode=(
+            "baseline_support_v3"
+            if policy.baseline_support_alignment_mode
+            else "baseline_support_v2"
+        ),
         baseline_support_pixel_count=baseline_count,
         baseline_support_luma_similarity=support_luma_similarity,
         baseline_support_luma_ncc=support_luma_ncc,
@@ -332,6 +445,12 @@ def _compare_with_baseline_support(
         baseline_support_change_ratio=change_ratio,
         baseline_support_foreground_retention=foreground_retention,
         baseline_support_background_change_ratio=background_change_ratio,
+        baseline_support_alignment_dx=alignment_fields[0],
+        baseline_support_alignment_dy=alignment_fields[1],
+        baseline_support_alignment_rotation_degrees=alignment_fields[2],
+        baseline_support_alignment_overlap=alignment_fields[3],
+        baseline_support_alignment_score=alignment_fields[4],
+        baseline_support_alignment_margin=alignment_fields[5],
     )
 
 
@@ -420,6 +539,216 @@ def _support_luma_metrics(
         background_changed,
         normalized,
     )
+
+
+def _alignment_radii(
+    roi_width: int, roi_height: int, policy: ObjectPresenceDecisionPolicy
+) -> tuple[int, int]:
+    """Return bounded source-pixel translation radii derived from the ROI."""
+    if not policy.baseline_support_alignment_mode:
+        return 0, 0
+    fraction = policy.baseline_support_alignment_max_translation_fraction
+    cap = policy.baseline_support_alignment_max_translation_pixels
+    return min(cap, max(0, math.floor(roi_width * fraction))), min(
+        cap, max(0, math.floor(roi_height * fraction))
+    )
+
+
+def _aligned_support_choice(  # noqa: PLR0913 - each alignment boundary is explicit
+    baseline_luma: tuple[float, ...],
+    probe_luma: tuple[float, ...],
+    baseline_mask: tuple[tuple[bool, ...], ...],
+    support_indices: tuple[int, ...],
+    background_baseline: tuple[float, ...],
+    background_probe: tuple[float, ...],
+    background_indices: tuple[int, ...],
+    width: int,
+    radius_x: int,
+    radius_y: int,
+    policy: ObjectPresenceDecisionPolicy,
+) -> _AlignmentChoice:
+    """Choose one deterministic bounded translation/rotation candidate."""
+    height = len(baseline_mask)
+    candidates: list[_AlignmentChoice] = []
+    dense_grid = (
+        radius_x <= _DENSE_ALIGNMENT_RADIUS_THRESHOLD
+        and radius_y <= _DENSE_ALIGNMENT_RADIUS_THRESHOLD
+    )
+    translation_x = _alignment_offsets(radius_x, dense=dense_grid)
+    translation_y = _alignment_offsets(radius_y, dense=dense_grid)
+    for rotation in _ALIGNMENT_ROTATIONS:
+        for dy in translation_y:
+            for dx in translation_x:
+                transformed = _transformed_support(
+                    probe_luma,
+                    support_indices,
+                    width,
+                    height,
+                    dx,
+                    dy,
+                    rotation,
+                )
+                if transformed is None:
+                    continue
+                mapped_indices, support_probe, overlap = transformed
+                if overlap < policy.baseline_support_alignment_min_support_overlap:
+                    continue
+                candidate_baseline = tuple(baseline_luma[index] for index in mapped_indices)
+                (
+                    similarity,
+                    change,
+                    foreground,
+                    background_change,
+                    normalized_probe,
+                ) = _support_luma_metrics(
+                    candidate_baseline,
+                    support_probe,
+                    background_baseline,
+                    background_probe,
+                    (background_indices, width),
+                )
+                support_ncc_raw = mean_centered_ncc(candidate_baseline, support_probe)
+                support_ncc = None if support_ncc_raw is None else quantize_metric(support_ncc_raw)
+                if (
+                    similarity is None
+                    or support_ncc is None
+                    or change is None
+                    or foreground is None
+                    or background_change is None
+                    or len(normalized_probe) != len(mapped_indices)
+                ):
+                    continue
+                edge = _support_edge_similarity(
+                    baseline_luma,
+                    baseline_mask,
+                    width,
+                    normalized_probe,
+                    mapped_indices,
+                )
+                score = _alignment_score(similarity, support_ncc, edge, change, foreground)
+                if edge is None or score is None:
+                    continue
+                candidates.append(
+                    _AlignmentChoice(
+                        similarity,
+                        support_ncc,
+                        edge,
+                        change,
+                        foreground,
+                        background_change,
+                        normalized_probe,
+                        dx,
+                        dy,
+                        rotation,
+                        overlap,
+                        score,
+                        0.0,
+                    )
+                )
+    if not candidates:
+        return _AlignmentChoice(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            (),
+            0,
+            0,
+            0,
+            0.0,
+            -1.0,
+            0.0,
+        )
+    ordered = sorted(
+        candidates,
+        key=lambda item: (
+            item.score,
+            item.overlap,
+            -abs(item.dx) - abs(item.dy),
+            -abs(item.rotation_degrees),
+            -item.dy,
+            -item.dx,
+        ),
+        reverse=True,
+    )
+    best = ordered[0]
+    second_scores = [
+        item.score
+        for item in ordered[1:]
+        if abs(item.dx - best.dx) > 1
+        or abs(item.dy - best.dy) > 1
+        or abs(item.rotation_degrees - best.rotation_degrees) > _ALIGNMENT_DISTINCT_ROTATION_DEGREES
+    ]
+    second = max(second_scores, default=-1.0)
+    margin = quantize_metric(max(0.0, best.score - second))
+    return replace(best, margin=margin)
+
+
+def _alignment_offsets(radius: int, *, dense: bool) -> tuple[int, ...]:
+    """Return a bounded translation grid with a stable zero anchor."""
+    step = 1 if dense else 2
+    offsets = set(range(-radius, radius + 1, step))
+    offsets.add(0)
+    return tuple(sorted(offsets))
+
+
+def _alignment_score(
+    similarity: float | None,
+    ncc: float | None,
+    edge: float | None,
+    change: float | None,
+    foreground: float | None,
+) -> float | None:
+    if any(value is None for value in (similarity, ncc, edge, change, foreground)):
+        return None
+    similarity, ncc, edge, change, foreground = cast(
+        "tuple[float, float, float, float, float]",
+        (similarity, ncc, edge, change, foreground),
+    )
+    score = (
+        0.40 * ((ncc + 1.0) / 2.0)
+        + 0.25 * similarity
+        + 0.15 * edge
+        + 0.20 * foreground
+        - 0.20 * change
+    )
+    return quantize_metric(max(-1.0, min(1.0, score)))
+
+
+def _transformed_support(  # noqa: PLR0913 - explicit transform coordinates
+    probe_luma: tuple[float, ...],
+    support_indices: tuple[int, ...],
+    width: int,
+    height: int,
+    dx: int,
+    dy: int,
+    rotation_degrees: int,
+) -> tuple[tuple[int, ...], tuple[float, ...], float] | None:
+    """Sample probe luma at one bounded rigid transform of baseline support."""
+    angle = math.radians(rotation_degrees)
+    cosine = math.cos(angle)
+    sine = math.sin(angle)
+    center_x = (width - 1) / 2.0
+    center_y = (height - 1) / 2.0
+    mapped: list[int] = []
+    sampled: list[float] = []
+    for index in support_indices:
+        x = index % width
+        y = index // width
+        relative_x = x - center_x
+        relative_y = y - center_y
+        source_x = round(center_x + cosine * relative_x + sine * relative_y + dx)
+        source_y = round(center_y - sine * relative_x + cosine * relative_y + dy)
+        if not (0 <= source_x < width and 0 <= source_y < height):
+            continue
+        mapped.append(index)
+        sampled.append(probe_luma[source_y * width + source_x])
+    if not support_indices or len(mapped) != len(sampled):
+        return None
+    overlap = len(mapped) / len(support_indices)
+    return tuple(mapped), tuple(sampled), quantize_metric(overlap)
 
 
 def _dilated_exclusion_mask(

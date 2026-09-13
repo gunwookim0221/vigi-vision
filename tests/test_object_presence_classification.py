@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import replace
 
@@ -153,6 +154,26 @@ def _shift_image(image: DecodedRgbImage, dx: int, dy: int) -> DecodedRgbImage:
     return DecodedRgbImage.from_rows(tuple(rows))
 
 
+def _rotate_image(image: DecodedRgbImage, degrees: int) -> DecodedRgbImage:
+    """Rotate the synthetic ROI around its center and fill with carpet."""
+    angle = math.radians(degrees)
+    cosine, sine = math.cos(angle), math.sin(angle)
+    center = (image.width - 1) / 2.0
+    rows = []
+    for y in range(image.height):
+        row = []
+        for x in range(image.width):
+            relative_x, relative_y = x - center, y - center
+            source_x = round(center + cosine * relative_x - sine * relative_y)
+            source_y = round(center + sine * relative_x + cosine * relative_y)
+            if 0 <= source_x < image.width and 0 <= source_y < image.height:
+                row.append(image.pixels[source_y][source_x])
+            else:
+                row.append((180, 180, 180))
+        rows.append(tuple(row))
+    return DecodedRgbImage.from_rows(tuple(rows))
+
+
 def _comparable(
     mask_iou: float = 0.2,
     roi_luma_ncc: float = 0.3,
@@ -233,6 +254,23 @@ def test_baseline_support_v2_accepts_floor_exposure_metrics_from_preserved_run()
         .outcome
         is ClassificationOutcome.INDETERMINATE
     )
+    exposed_floor_v3 = exposed_floor.model_copy(
+        update={
+            "comparison_mode": "baseline_support_v3",
+            "baseline_support_alignment_dx": 0,
+            "baseline_support_alignment_dy": 0,
+            "baseline_support_alignment_rotation_degrees": 0,
+            "baseline_support_alignment_overlap": 1.0,
+            "baseline_support_alignment_score": 0.2,
+            "baseline_support_alignment_margin": 0.0,
+        }
+    )
+    assert (
+        _support_classifier(baseline_support_alignment_mode=True)
+        .policy.decide(exposed_floor_v3)
+        .outcome
+        is ClassificationOutcome.ABSENT
+    )
 
 
 def test_baseline_support_keeps_shoe_present_through_global_exposure_shift() -> None:
@@ -303,6 +341,123 @@ def test_baseline_support_keeps_small_registration_error_indeterminate() -> None
     probe = _shift_image(_support_scene(), 1, 0)
     result = _support_classifier().classify(_support_input(probe))
     assert result.outcome is ClassificationOutcome.INDETERMINATE
+
+
+def test_baseline_support_v3_accepts_bounded_object_translation() -> None:
+    classifier = _support_classifier(
+        classifier_policy_version="test-baseline-support-v3",
+        classifier_preprocessing_version="test-baseline-support-v3",
+        baseline_support_alignment_mode=True,
+    )
+    result = classifier.classify(_support_input(_shift_image(_support_scene(), 2, 0)))
+    assert result.outcome is ClassificationOutcome.PRESENT
+    assert result.comparison.comparison_mode == "baseline_support_v3"
+    assert result.comparison.baseline_support_alignment_dx == 2
+    assert result.comparison.baseline_support_alignment_margin is not None
+    assert result.comparison.baseline_support_alignment_margin >= 0.02
+
+
+def test_baseline_support_v3_accepts_one_pixel_object_translation() -> None:
+    classifier = _support_classifier(
+        classifier_policy_version="test-baseline-support-v3",
+        classifier_preprocessing_version="test-baseline-support-v3",
+        baseline_support_alignment_mode=True,
+    )
+    result = classifier.classify(_support_input(_shift_image(_support_scene(), 1, 0)))
+    assert result.outcome is ClassificationOutcome.PRESENT
+    assert result.comparison.baseline_support_alignment_dx in {0, 1, 2}
+
+
+def test_baseline_support_v3_reclassifies_removed_shoe_as_absent() -> None:
+    classifier = _support_classifier(
+        classifier_policy_version="test-baseline-support-v3",
+        classifier_preprocessing_version="test-baseline-support-v3",
+        baseline_support_alignment_mode=True,
+    )
+    result = classifier.classify(_support_input(_support_scene(shoe=False)))
+    assert result.outcome is ClassificationOutcome.ABSENT
+    assert result.comparison.comparison_mode == "baseline_support_v3"
+    assert result.comparison.baseline_support_alignment_margin is not None
+    assert result.comparison.baseline_support_alignment_margin < 0.02
+
+
+def test_baseline_support_v3_accepts_bounded_object_rotation() -> None:
+    classifier = _support_classifier(
+        classifier_policy_version="test-baseline-support-v3",
+        classifier_preprocessing_version="test-baseline-support-v3",
+        baseline_support_alignment_mode=True,
+    )
+    result = classifier.classify(_support_input(_rotate_image(_support_scene(), 5)))
+    assert result.outcome is ClassificationOutcome.PRESENT
+    assert result.comparison.baseline_support_alignment_rotation_degrees in {-10, -5, 0, 5, 10}
+
+
+def test_baseline_support_v3_preserves_presence_through_exposure_and_noise() -> None:
+    classifier = _support_classifier(
+        classifier_policy_version="test-baseline-support-v3",
+        classifier_preprocessing_version="test-baseline-support-v3",
+        baseline_support_alignment_mode=True,
+    )
+    exposure = classifier.classify(_support_input(_support_scene(background=200, offset=20)))
+    assert exposure.outcome is ClassificationOutcome.PRESENT
+
+    baseline = _support_scene()
+    rows = [list(row) for row in baseline.pixels]
+    for y, row in enumerate(rows):
+        for x, pixel in enumerate(row):
+            noise = 3 if (x + 2 * y) % 5 == 0 else -2 if (x + y) % 7 == 0 else 0
+            row[x] = tuple(max(0, min(255, channel + noise)) for channel in pixel)
+    noisy = DecodedRgbImage.from_rows(tuple(tuple(row) for row in rows))
+    assert classifier.classify(_support_input(noisy)).outcome is ClassificationOutcome.PRESENT
+
+
+def test_baseline_support_v3_keeps_large_camera_motion_indeterminate() -> None:
+    classifier = _support_classifier(
+        classifier_policy_version="test-baseline-support-v3",
+        classifier_preprocessing_version="test-baseline-support-v3",
+        baseline_support_alignment_mode=True,
+    )
+    result = classifier.classify(_support_input(_shift_image(_support_scene(), 5, 5)))
+    assert result.outcome is ClassificationOutcome.INDETERMINATE
+
+
+def test_baseline_support_v3_keeps_occlusion_and_replacement_indeterminate() -> None:
+    classifier = _support_classifier(
+        classifier_policy_version="test-baseline-support-v3",
+        classifier_preprocessing_version="test-baseline-support-v3",
+        baseline_support_alignment_mode=True,
+    )
+    probe = _support_scene()
+    rows = [list(row) for row in probe.pixels]
+    for y in range(7, 11):
+        for x in range(7, 15):
+            rows[y][x] = (180, 180, 180)
+    occluded = DecodedRgbImage.from_rows(tuple(tuple(row) for row in rows))
+    assert (
+        classifier.classify(_support_input(occluded)).outcome is ClassificationOutcome.INDETERMINATE
+    )
+
+    rows = [list(row) for row in probe.pixels]
+    for y in range(7, 15):
+        for x in range(7, 15):
+            value = 70 + ((x + y) % 3)
+            rows[y][x] = (value, value, value)
+    replacement = DecodedRgbImage.from_rows(tuple(tuple(row) for row in rows))
+    assert (
+        classifier.classify(_support_input(replacement)).outcome
+        is ClassificationOutcome.INDETERMINATE
+    )
+
+
+def test_baseline_support_v3_does_not_let_probe_mask_block_present() -> None:
+    classifier = _support_classifier(
+        classifier_policy_version="test-baseline-support-v3",
+        classifier_preprocessing_version="test-baseline-support-v3",
+        baseline_support_alignment_mode=True,
+    )
+    expanded = _mask(lambda x, y: 1 <= x < 21 and 1 <= y < 21)
+    result = classifier.classify(_support_input(_support_scene(), probe_mask=expanded))
+    assert result.outcome is ClassificationOutcome.PRESENT
 
 
 def test_baseline_support_rejects_large_camera_motion_as_unstable_background() -> None:

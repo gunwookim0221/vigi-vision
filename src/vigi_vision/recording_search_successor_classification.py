@@ -905,6 +905,12 @@ def _safe_comparison(comparison: object) -> dict[str, object] | None:
         "baseline_support_change_ratio",
         "baseline_support_foreground_retention",
         "baseline_support_background_change_ratio",
+        "baseline_support_alignment_dx",
+        "baseline_support_alignment_dy",
+        "baseline_support_alignment_rotation_degrees",
+        "baseline_support_alignment_overlap",
+        "baseline_support_alignment_score",
+        "baseline_support_alignment_margin",
         "visual_status",
         "unusable_reason",
     }

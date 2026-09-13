@@ -213,3 +213,39 @@ def test_baseline_support_comparison_reopens_with_all_metrics(tmp_path):
     repository = SuccessorEvidenceRepository(tmp_path / ".successor")
     manifest = repository.publish(prepared, (*observations[:-1], observation), terminal)
     assert manifest["entries"][-1]["comparison"] == comparison
+
+
+def test_aligned_baseline_support_comparison_reopens_with_alignment_facts(tmp_path):
+    prepared, observations, terminal = _fixture(tmp_path)
+    comparison = {
+        "baseline_mask_pixel_count": 20,
+        "probe_mask_pixel_count": 360,
+        "roi_pixel_count": 400,
+        "mask_intersection_pixel_count": 20,
+        "mask_union_pixel_count": 360,
+        "baseline_mask_coverage": 0.05,
+        "probe_mask_coverage": 0.9,
+        "mask_iou": 0.055556,
+        "effective_comparison_area": None,
+        "roi_luma_ncc": 0.208525,
+        "comparison_mode": "baseline_support_v3",
+        "baseline_support_pixel_count": 20,
+        "baseline_support_luma_similarity": 0.92,
+        "baseline_support_luma_ncc": 0.86,
+        "baseline_support_edge_similarity": 0.9,
+        "baseline_support_change_ratio": 0.1,
+        "baseline_support_foreground_retention": 0.95,
+        "baseline_support_background_change_ratio": 0.0,
+        "baseline_support_alignment_dx": 2,
+        "baseline_support_alignment_dy": -1,
+        "baseline_support_alignment_rotation_degrees": 5,
+        "baseline_support_alignment_overlap": 0.95,
+        "baseline_support_alignment_score": 0.87,
+        "baseline_support_alignment_margin": 0.12,
+        "visual_status": "comparable",
+        "unusable_reason": None,
+    }
+    observation = replace(observations[-1], comparison=comparison)
+    repository = SuccessorEvidenceRepository(tmp_path / ".successor")
+    manifest = repository.publish(prepared, (*observations[:-1], observation), terminal)
+    assert manifest["entries"][-1]["comparison"] == comparison

@@ -113,8 +113,9 @@ def test_policy_snapshots_reproduce_approved_identities() -> None:
 def test_successor_policy_uses_versioned_baseline_support_mode() -> None:
     policy = approved_successor_object_presence_policy()
     assert policy.baseline_support_mode is True
-    assert policy.classifier_policy_version == "efficient-sam-ti-baseline-support-v2"
-    assert policy.classifier_preprocessing_version == "phase7e-baseline-support-v2"
+    assert policy.baseline_support_alignment_mode is True
+    assert policy.classifier_policy_version == "efficient-sam-ti-baseline-support-v3"
+    assert policy.classifier_preprocessing_version == "phase7e-baseline-support-v3"
 
 
 def test_public_composition_keeps_legacy_object_policy_for_schema5_to7(tmp_path: Path) -> None:

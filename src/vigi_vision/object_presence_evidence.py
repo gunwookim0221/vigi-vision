@@ -22,6 +22,9 @@ from vigi_vision.object_presence_values import (
     quantize_metric,
 )
 
+_MAX_ALIGNMENT_TRANSLATION_PIXELS = 32
+_MAX_ALIGNMENT_ROTATION_DEGREES = 15
+
 
 class RawComparison(BaseModel):
     """Strict closed evidence matrix for one successful visual comparison."""
@@ -50,20 +53,49 @@ class RawComparison(BaseModel):
     baseline_support_change_ratio: StrictFloat | None = None
     baseline_support_foreground_retention: StrictFloat | None = None
     baseline_support_background_change_ratio: StrictFloat | None = None
+    baseline_support_alignment_dx: StrictInt | None = None
+    baseline_support_alignment_dy: StrictInt | None = None
+    baseline_support_alignment_rotation_degrees: StrictInt | None = None
+    baseline_support_alignment_overlap: StrictFloat | None = None
+    baseline_support_alignment_score: StrictFloat | None = None
+    baseline_support_alignment_margin: StrictFloat | None = None
 
     @model_validator(mode="after")
     def validate_closed_matrix(self) -> RawComparison:
         """Reject non-finite values and every forbidden field combination."""
         _validate_metrics(self)
         _validate_consistency(self)
-        if self.comparison_mode not in {None, "baseline_support_v1", "baseline_support_v2"}:
+        if self.comparison_mode not in {
+            None,
+            "baseline_support_v1",
+            "baseline_support_v2",
+            "baseline_support_v3",
+        }:
+            raise ValueError
+        if self.comparison_mode != "baseline_support_v3" and any(
+            value is not None
+            for value in (
+                self.baseline_support_alignment_dx,
+                self.baseline_support_alignment_dy,
+                self.baseline_support_alignment_rotation_degrees,
+                self.baseline_support_alignment_overlap,
+                self.baseline_support_alignment_score,
+                self.baseline_support_alignment_margin,
+            )
+        ):
             raise ValueError
         match self.visual_status:
             case VisualStatus.COMPARABLE:
                 if self.unusable_reason is not None:
                     raise ValueError
-                if self.comparison_mode in {"baseline_support_v1", "baseline_support_v2"}:
+                if self.comparison_mode in {
+                    "baseline_support_v1",
+                    "baseline_support_v2",
+                    "baseline_support_v3",
+                }:
                     _require_complete_baseline_support(self)
+                    if self.comparison_mode == "baseline_support_v3":
+                        _require_alignment_evidence(self)
                 else:
                     _require_complete_comparable(self)
             case VisualStatus.UNUSABLE:
@@ -143,6 +175,9 @@ def _validate_metric_ranges(comparison: RawComparison) -> None:
         comparison.baseline_support_change_ratio,
         comparison.baseline_support_foreground_retention,
         comparison.baseline_support_background_change_ratio,
+        comparison.baseline_support_alignment_overlap,
+        comparison.baseline_support_alignment_score,
+        comparison.baseline_support_alignment_margin,
     ):
         if value is not None and not math.isfinite(value):
             raise ValueError
@@ -161,12 +196,19 @@ def _validate_metric_ranges(comparison: RawComparison) -> None:
         comparison.baseline_support_change_ratio,
         comparison.baseline_support_foreground_retention,
         comparison.baseline_support_background_change_ratio,
+        comparison.baseline_support_alignment_overlap,
+        comparison.baseline_support_alignment_margin,
     ):
         if value is not None and not 0.0 <= value <= 1.0:
             raise ValueError
     if (
         comparison.baseline_support_luma_ncc is not None
         and not -1.0 <= comparison.baseline_support_luma_ncc <= 1.0
+    ):
+        raise ValueError
+    if (
+        comparison.baseline_support_alignment_score is not None
+        and not -1.0 <= comparison.baseline_support_alignment_score <= 1.0
     ):
         raise ValueError
 
@@ -234,6 +276,32 @@ def _require_complete_baseline_support(comparison: RawComparison) -> None:
     if baseline_support_pixel_count > comparison.roi_pixel_count:
         raise ValueError
     if baseline_mask_pixel_count != baseline_support_pixel_count:
+        raise ValueError
+
+
+def _require_alignment_evidence(comparison: RawComparison) -> None:
+    """Require bounded local-alignment facts for the v3 successor row."""
+    required = (
+        comparison.baseline_support_alignment_dx,
+        comparison.baseline_support_alignment_dy,
+        comparison.baseline_support_alignment_rotation_degrees,
+        comparison.baseline_support_alignment_overlap,
+        comparison.baseline_support_alignment_score,
+        comparison.baseline_support_alignment_margin,
+    )
+    if any(value is None for value in required):
+        raise ValueError
+    if (
+        comparison.baseline_support_alignment_dx is None
+        or comparison.baseline_support_alignment_dy is None
+        or comparison.baseline_support_alignment_rotation_degrees is None
+        or abs(comparison.baseline_support_alignment_dx) > _MAX_ALIGNMENT_TRANSLATION_PIXELS
+        or abs(comparison.baseline_support_alignment_dy) > _MAX_ALIGNMENT_TRANSLATION_PIXELS
+        or abs(comparison.baseline_support_alignment_rotation_degrees)
+        > _MAX_ALIGNMENT_ROTATION_DEGREES
+        or comparison.baseline_support_alignment_overlap is None
+        or not 0.0 < comparison.baseline_support_alignment_overlap <= 1.0
+    ):
         raise ValueError
 
 

@@ -64,6 +64,15 @@ class ObjectPresenceDecisionPolicy(BaseModel):
     checkpoint_sha256: StrictStr = _CHECKPOINT_SHA256
     prompt_rule: StrictStr = "confirmed_roi_center_v1"
     baseline_support_mode: StrictBool = False
+    baseline_support_alignment_mode: StrictBool = False
+    baseline_support_alignment_max_translation_fraction: StrictFloat = Field(
+        default=0.15, ge=0.0, le=0.25
+    )
+    baseline_support_alignment_max_translation_pixels: StrictInt = Field(default=16, ge=0, le=32)
+    baseline_support_alignment_min_support_overlap: StrictFloat = Field(
+        default=0.75, ge=0.5, le=1.0
+    )
+    baseline_support_alignment_margin_minimum: StrictFloat = Field(default=0.02, ge=0.0, le=1.0)
     baseline_support_present_similarity_minimum: StrictFloat = Field(default=0.70, ge=0.0, le=1.0)
     baseline_support_present_edge_minimum: StrictFloat = Field(default=0.60, ge=0.0, le=1.0)
     baseline_support_present_change_maximum: StrictFloat = Field(default=0.30, ge=0.0, le=1.0)
@@ -103,6 +112,9 @@ class ObjectPresenceDecisionPolicy(BaseModel):
             self.baseline_support_absent_change_minimum,
             self.baseline_support_absent_foreground_maximum,
             self.baseline_support_background_change_maximum,
+            self.baseline_support_alignment_max_translation_fraction,
+            self.baseline_support_alignment_min_support_overlap,
+            self.baseline_support_alignment_margin_minimum,
         )
         if any(not math.isfinite(value) for value in finite):
             raise ValueError
@@ -140,6 +152,11 @@ class ObjectPresenceDecisionPolicy(BaseModel):
             <= self.baseline_support_absent_foreground_maximum
         ):
             raise ValueError
+        if self.baseline_support_alignment_mode and (
+            self.baseline_support_alignment_max_translation_pixels <= 0
+            or self.baseline_support_alignment_min_support_overlap <= 0.0
+        ):
+            raise ValueError
 
     def _validate_identity(self) -> None:
         if len(self.efficient_sam_source_commit) != _SOURCE_COMMIT_LENGTH or any(
@@ -162,7 +179,11 @@ class ObjectPresenceDecisionPolicy(BaseModel):
             )
         if comparison.visual_status is not VisualStatus.COMPARABLE:
             raise ValueError
-        if comparison.comparison_mode in {"baseline_support_v1", "baseline_support_v2"}:
+        if comparison.comparison_mode in {
+            "baseline_support_v1",
+            "baseline_support_v2",
+            "baseline_support_v3",
+        }:
             if not self.baseline_support_mode:
                 raise ValueError
             return _decide_baseline_support(self, comparison)
@@ -262,8 +283,17 @@ def _decide_baseline_support(
     ):
         raise ValueError
     background_stable = background_change <= policy.baseline_support_background_change_maximum
+    alignment_confident = comparison.comparison_mode != "baseline_support_v3" or (
+        comparison.baseline_support_alignment_overlap is not None
+        and comparison.baseline_support_alignment_overlap
+        >= policy.baseline_support_alignment_min_support_overlap
+        and comparison.baseline_support_alignment_margin is not None
+        and comparison.baseline_support_alignment_margin
+        >= policy.baseline_support_alignment_margin_minimum
+    )
     if (
         background_stable
+        and alignment_confident
         and similarity >= policy.baseline_support_present_similarity_minimum
         and ncc >= policy.baseline_support_present_ncc_minimum
         and edge is not None
@@ -283,7 +313,7 @@ def _decide_baseline_support(
         and ncc <= policy.baseline_support_absent_ncc_maximum
         and foreground <= policy.baseline_support_absent_foreground_maximum
         and (
-            comparison.comparison_mode == "baseline_support_v2"
+            comparison.comparison_mode in {"baseline_support_v2", "baseline_support_v3"}
             or (
                 similarity <= policy.baseline_support_absent_similarity_maximum
                 and change >= policy.baseline_support_absent_change_minimum

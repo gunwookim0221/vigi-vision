@@ -926,6 +926,12 @@
         ["Baseline support change ratio", "baseline_support_change_ratio"],
         ["Baseline support foreground retention", "baseline_support_foreground_retention"],
         ["Baseline support background change ratio", "baseline_support_background_change_ratio"],
+        ["Alignment dx", "baseline_support_alignment_dx"],
+        ["Alignment dy", "baseline_support_alignment_dy"],
+        ["Alignment rotation degrees", "baseline_support_alignment_rotation_degrees"],
+        ["Alignment overlap", "baseline_support_alignment_overlap"],
+        ["Alignment score", "baseline_support_alignment_score"],
+        ["Alignment margin", "baseline_support_alignment_margin"],
       ]) {
         if (typeof comparison[key] !== "number") continue;
         const row = document.createElement("div");
