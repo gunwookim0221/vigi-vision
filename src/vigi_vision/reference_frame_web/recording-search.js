@@ -848,7 +848,13 @@
     const observed = entries.filter((item) => item.role !== "baseline"
       && typeof item.frame_utc === "string" && typeof item.digest === "string")
       .sort((left, right) => String(left.frame_utc).localeCompare(String(right.frame_utc)));
-    const ending = observed.at(-1) ?? null;
+    const coarseObserved = observed.filter((item) => item.role === "observation");
+    let ending = coarseObserved.at(-1) ?? null;
+    if (ending === null && terminalPayload?.status === "FOUND") {
+      const terminalAbsent = entries.find((item) => item.observation_id === payload.first_absent_observation_id
+        && typeof item.digest === "string");
+      ending = terminalAbsent ?? null;
+    }
     const roi = payload.roi;
     const sourceWidth = payload.source_width;
     const sourceHeight = payload.source_height;

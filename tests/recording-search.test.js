@@ -795,6 +795,31 @@ test("terminal FOUND loads identity-bound visual evidence and both bracket frame
   assert.match(harness.recordingSearchReviewClipStatus.textContent, /사용할 수 없습니다/);
 });
 
+test("search-end evidence selection is role and time based, not array order", async () => {
+  const payload = evidenceManifest("FOUND");
+  payload.entries = [payload.entries[0], payload.entries[2], payload.entries[1]];
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    if (url.endsWith("/evidence")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => payload });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => foundStatusWithTiming() });
+  }, undefined, { confirmation: true, search: true, evidence: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  await settle();
+
+  assert.match(harness.recordingSearchEndImage.src, /evidence\/c{64}$/);
+  assert.match(harness.recordingSearchEndTime.textContent, /03:34:41/);
+});
+
 test("legacy terminal run without evidence remains readable with a safe unavailable message", async () => {
   const harness = createHarness((url) => {
     if (url === "/api/v1/recording-searches") {
@@ -816,6 +841,33 @@ test("legacy terminal run without evidence remains readable with a safe unavaila
 
   assert.equal(harness.recordingSearchEvidence.hidden, false);
   assert.equal(harness.recordingSearchEvidenceStatus.textContent, "이전 실행에는 시각 증거가 보존되지 않았습니다.");
+});
+
+test("an anchor-only terminal manifest never masquerades as search-end evidence", async () => {
+  const payload = evidenceManifest("INCONCLUSIVE");
+  payload.entries[1].role = "anchor";
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    if (url.endsWith("/evidence")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => payload });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => status("INCONCLUSIVE") });
+  }, undefined, { confirmation: true, search: true, evidence: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  await settle();
+
+  assert.equal(harness.recordingSearchEvidence.hidden, false);
+  assert.equal(harness.recordingSearchEndImage.src, undefined);
+  assert.equal(harness.recordingSearchEndTime.textContent, "");
+  assert.equal(harness.recordingSearchEvidenceStatus.textContent, "이 실행의 시각 증거를 사용할 수 없습니다.");
 });
 
 test("an exact missing polled run never inherits another run and is permanent", async () => {

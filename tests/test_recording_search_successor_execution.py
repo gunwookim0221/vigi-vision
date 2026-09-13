@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import signal
@@ -44,6 +45,7 @@ from vigi_vision.recording_search_successor_classification import (
     SuccessorClassifierResult,
     SuccessorCoarseClassificationService,
 )
+from vigi_vision.recording_search_successor_evidence import SuccessorEvidenceRepository
 from vigi_vision.recording_search_successor_execution import (
     SuccessorExecutionError,
     SuccessorExecutionService,
@@ -228,6 +230,30 @@ class _IndeterminateClassifier(_Classifier):
             ClassificationOutcome.INDETERMINATE,
             "insufficient_visual_evidence",
         )
+
+
+class _AnchorIndeterminateThenPresentClassifier(_Classifier):
+    """Model an uncertain anchor followed by a usable final target."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def classify(
+        self,
+        _baseline: object,
+        _probe: DecodedRgbImage,
+        _width: int,
+        _height: int,
+        _roi: object,
+        _correlation_id: str,
+    ) -> SuccessorClassifierResult:
+        self.calls += 1
+        if self.calls == 1:
+            return SuccessorClassifierResult(
+                ClassificationOutcome.INDETERMINATE,
+                "insufficient_visual_evidence",
+            )
+        return SuccessorClassifierResult(ClassificationOutcome.PRESENT)
 
 
 def _confirmed(tmp_path: Path) -> ConfirmedInvestigationInput:
@@ -563,6 +589,56 @@ def test_visual_indeterminate_reason_is_not_collapsed_in_terminal(tmp_path: Path
     assert any(
         item["reason_code"] == "insufficient_visual_evidence" for item in result.coarse_observations
     )
+
+
+def test_anchor_indeterminate_still_acquires_and_publishes_search_end_evidence(
+    tmp_path: Path,
+) -> None:
+    segment = _segment(ANCHOR + timedelta(minutes=30, seconds=1))
+    planner = _Planner(segment)
+    acquisition = SuccessorTargetAcquisitionService(
+        planner,
+        _Extractor(tmp_path, ANCHOR + timedelta(hours=2)),
+        _FrameDecoder(),
+        temporary_directory=tmp_path / "temporary",
+    )
+    classifier = _AnchorIndeterminateThenPresentClassifier()
+    classification = SuccessorCoarseClassificationService(classifier, _MediaDecoder())
+    service = SuccessorExecutionService(
+        SuccessorPlanService(planner),
+        acquisition,
+        classification,
+        SuccessorBinaryNarrowingService(acquisition, classification),
+        _MediaDecoder(),
+        SuccessorTerminalRepository(tmp_path / "successor"),
+        SuccessorEvidenceRepository(tmp_path / "successor"),
+    )
+    confirmed = replace(
+        _confirmed(tmp_path),
+        jpeg_sha256=hashlib.sha256(b"baseline").hexdigest(),
+    )
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:27:32",
+        run_id="search-run-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+
+    result = service.execute(prepared)
+
+    assert result.status == "INCONCLUSIVE"
+    assert result.reason_code == "insufficient_visual_evidence"
+    assert classifier.calls == 2
+    assert tuple(item["requested_time_utc"] for item in result.coarse_observations) == (
+        "2026-09-04T05:17:32Z",
+        "2026-09-04T05:17:32Z",
+        "2026-09-04T05:27:32Z",
+    )
+    evidence = service.evidence_repository.read(confirmed.investigation_id, prepared.request.run_id)
+    assert evidence is not None
+    observed = [item for item in evidence["entries"] if item["role"] == "observation"]
+    assert len(observed) == 1
+    assert observed[0]["requested_time_utc"] == "2026-09-04T05:27:32.000000Z"
 
 
 def test_successor_durable_running_state_recovers_as_interrupted(tmp_path: Path) -> None:

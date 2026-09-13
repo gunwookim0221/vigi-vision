@@ -193,7 +193,10 @@ reference-frame time as a confirmed PRESENT baseline, adds an actual
 search-anchor observation before coarse targets, and durably records safe
 per-target timing, acquisition, classifier, digest, ROI, and policy facts.
 Target-local unavailable and visual-indeterminate reasons remain distinct in
-terminal evidence. Final human real-NVR acceptance remains unimplemented:
+terminal evidence; the executor continues through the remaining configured
+coarse targets after such uncertainty so terminal evidence can retain the
+latest available observation. Final human real-NVR acceptance remains
+unimplemented:
 
 The successor result now exposes an additive visual-evidence review projection.
 Each terminal run may publish immutable, digest-addressed baseline and observed

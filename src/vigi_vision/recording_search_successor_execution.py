@@ -464,7 +464,7 @@ class SuccessorExecutionService:
             baseline_payload,
         )
 
-    def execute(  # noqa: C901, PLR0911
+    def execute(  # noqa: PLR0911
         self,
         prepared: SuccessorPreparedExecution,
         *,
@@ -484,15 +484,6 @@ class SuccessorExecutionService:
             augmented = _with_anchor_observation(prepared, coarse, anchor_observation)
             if augmented.candidate_bracket is not None:
                 return self._narrow_or_publish(prepared, augmented)
-            if anchor_observation.state not in {
-                SuccessorObservationState.PRESENT,
-                SuccessorObservationState.ABSENT,
-            }:
-                return self._publish_inconclusive(
-                    prepared,
-                    _inconclusive_reason(prepared.plan, augmented.observations),
-                    augmented,
-                )
             for target in prepared.plan.targets:
                 if cancellation is not None and cancellation():
                     return self._publish_interrupted(prepared)
@@ -505,22 +496,17 @@ class SuccessorExecutionService:
                 augmented = _with_anchor_observation(prepared, coarse, anchor_observation)
                 if augmented.candidate_bracket is not None:
                     return self._narrow_or_publish(prepared, augmented)
-                if observation.state not in {
-                    SuccessorObservationState.PRESENT,
-                    SuccessorObservationState.ABSENT,
-                }:
-                    return self._publish_inconclusive(
-                        prepared,
-                        _inconclusive_reason(prepared.plan, augmented.observations),
-                        augmented,
-                    )
             if prepared.plan.gaps:
                 return self._publish_inconclusive(prepared, "incomplete_coverage", augmented)
             if all(
                 item.state is SuccessorObservationState.PRESENT for item in augmented.observations
             ):
                 return self._publish_not_found(prepared, augmented)
-            return self._publish_inconclusive(prepared, "no_present_absent_bracket", augmented)
+            return self._publish_inconclusive(
+                prepared,
+                _inconclusive_reason(prepared.plan, augmented.observations),
+                augmented,
+            )
         except SuccessorExecutionError:
             raise
         except Exception as error:
