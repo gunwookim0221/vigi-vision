@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NoReturn, Protocol
 
@@ -32,6 +33,8 @@ from vigi_vision.recording_search_b3_models import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from vigi_vision.investigation_confirmation_models import ConfirmationRoi
     from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
 
@@ -91,6 +94,8 @@ def predict_masks_for_images(  # noqa: PLR0913
     roi: ConfirmationRoi,
     policy: ObjectPresenceDecisionPolicy,
     predictor: MaskPredictor | None,
+    *,
+    diagnostics_sink: Callable[[str, int], None] | None = None,
 ) -> tuple[BinaryMask, BinaryMask]:
     """Produce masks from decoded pixels without requiring a persistence snapshot.
 
@@ -106,13 +111,16 @@ def predict_masks_for_images(  # noqa: PLR0913
         roi.x + (roi.width - 1) // 2,
         roi.y + (roi.height - 1) // 2,
     )
+    prediction_calls = 0
     try:
+        prediction_calls += 1
         baseline = _prediction_to_mask(
             predictor.predict_from_rgb(baseline_image, point, size),
             size,
             point,
             policy,
         )
+        prediction_calls += 1
         probe = _prediction_to_mask(
             predictor.predict_from_rgb(probe_image, point, size),
             size,
@@ -129,6 +137,8 @@ def predict_masks_for_images(  # noqa: PLR0913
         _fail(ClassificationPreparationReason.CLASSIFIER_EXECUTION_FAILED)
     except Exception:  # noqa: BLE001 - predictor failures are one safe category.
         _fail(ClassificationPreparationReason.CLASSIFIER_EXECUTION_FAILED)
+    finally:
+        _emit_diagnostic(diagnostics_sink, "segmentation_calls", prediction_calls)
     return baseline, probe
 
 
@@ -185,3 +195,11 @@ def _mask_is_usable(mask: BinaryMask, point: Point, policy: ObjectPresenceDecisi
 
 def _fail(reason: ClassificationPreparationReason) -> NoReturn:
     raise ClassificationPreparationError(reason)
+
+
+def _emit_diagnostic(sink: Callable[[str, int], None] | None, name: str, value: int) -> None:
+    """Emit one safe process-local diagnostic without changing classification."""
+    if sink is None:
+        return
+    with suppress(Exception):
+        sink(name, value)

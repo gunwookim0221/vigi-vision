@@ -43,7 +43,10 @@ from vigi_vision.recording_search_7e_b4_process import (
     run_b4_in_process,
 )
 from vigi_vision.recording_search_7e_models import StrictIdentityEnvelope
-from vigi_vision.recording_search_7e_public import approved_phase7e_policy
+from vigi_vision.recording_search_7e_public import (
+    approved_phase7e_policy,
+    approved_successor_object_presence_policy,
+)
 from vigi_vision.recording_search_b3_media import DecodedMedia
 
 
@@ -419,6 +422,61 @@ def test_startup_budget_is_separate_from_inference_budget(
     assert not _active_classifier_children()
 
 
+def test_classifier_timing_contains_bounded_reuse_and_alignment_counts() -> None:
+    roi = ConfirmationRoi(
+        x=8,
+        y=8,
+        width=20,
+        height=20,
+        coordinate_space="source_pixels",
+        provenance=RoiProvenance.MANUAL,
+    )
+    baseline = DecodedRgbImage.from_rows(
+        tuple(
+            tuple(
+                (
+                    (25 + ((x + y) % 7),) * 3
+                    if 12 <= x < 20 and 12 <= y < 20
+                    else (180 + ((x + y) % 5),) * 3
+                )
+                for x in range(32)
+            )
+            for y in range(32)
+        )
+    )
+    probe = baseline
+    baseline_mask = BinaryMask.from_rows(
+        tuple(tuple(13 <= x < 19 and 13 <= y < 19 for x in range(32)) for y in range(32))
+    )
+    probe_mask = baseline_mask
+    policy = approved_successor_object_presence_policy().model_copy(
+        update={"minimum_roi_pixels": 1, "minimum_clipped_mask_pixels": 1}
+    )
+    events: list[dict[str, int | str]] = []
+    run_b4_in_process(
+        baseline_image=baseline,
+        probe_image=probe,
+        source_width=32,
+        source_height=32,
+        roi=roi,
+        policy=policy,
+        worker_spec=StaticMaskWorkerSpec(baseline_mask, probe_mask),
+        correlation_id="alignment-counts",
+        timeout_seconds=3.0,
+        timing_sink=events.append,
+    )
+    timing = events[-1]
+    assert timing["decoder_calls"] == 2
+    assert timing["segmentation_calls"] == 2
+    assert timing["duplicate_processing_count"] == 0
+    assert timing["alignment_translation_candidates"] == 49
+    assert timing["alignment_rotation_candidates"] == 5
+    assert timing["alignment_scale_candidates"] == 1
+    assert timing["alignment_comparisons"] == 245
+    assert timing["alignment_elapsed_ms"] >= 0
+    assert not _active_classifier_children()
+
+
 def test_valid_result_waits_for_bounded_graceful_worker_reap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -474,6 +532,14 @@ def test_inference_timeout_reports_stage_and_safe_timing() -> None:
         "model_ready_ms",
         "preprocessing_ms",
         "child_inference_ms",
+        "decoder_calls",
+        "segmentation_calls",
+        "alignment_translation_candidates",
+        "alignment_rotation_candidates",
+        "alignment_scale_candidates",
+        "alignment_comparisons",
+        "alignment_elapsed_ms",
+        "duplicate_processing_count",
     }
     assert not _active_classifier_children()
 

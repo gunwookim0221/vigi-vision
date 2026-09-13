@@ -368,6 +368,20 @@ def test_baseline_support_v3_accepts_one_pixel_object_translation() -> None:
     assert result.comparison.baseline_support_alignment_dx in {0, 1, 2}
 
 
+def test_alignment_diagnostics_sink_failure_does_not_change_result() -> None:
+    classifier = _support_classifier(
+        classifier_policy_version="test-baseline-support-v3",
+        classifier_preprocessing_version="test-baseline-support-v3",
+        baseline_support_alignment_mode=True,
+    )
+
+    def broken_sink(_name: str, _value: int) -> None:
+        raise RuntimeError
+
+    result = classifier.classify(_support_input(_support_scene()), diagnostics_sink=broken_sink)
+    assert result.outcome is ClassificationOutcome.PRESENT
+
+
 def test_baseline_support_v3_reclassifies_removed_shoe_as_absent() -> None:
     classifier = _support_classifier(
         classifier_policy_version="test-baseline-support-v3",

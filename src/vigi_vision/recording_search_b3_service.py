@@ -43,7 +43,7 @@ from vigi_vision.recording_search_models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Callable, Generator
 
     from vigi_vision.investigation_confirmation_models import ConfirmationRoi
     from vigi_vision.object_presence_evidence import ClassificationResult
@@ -254,6 +254,7 @@ def classify_decoded_images(  # noqa: PLR0913
     roi: ConfirmationRoi,
     policy: ObjectPresenceDecisionPolicy,
     mask_predictor: MaskPredictor | None,
+    diagnostics_sink: Callable[[str, int], None] | None = None,
 ) -> ClassificationResult:
     """Run the authoritative B4 computation without legacy persistence.
 
@@ -269,6 +270,7 @@ def classify_decoded_images(  # noqa: PLR0913
         roi,
         policy,
         mask_predictor,
+        diagnostics_sink=diagnostics_sink,
     )
     try:
         return ObjectPresenceClassifier(policy).classify(
@@ -278,7 +280,8 @@ def classify_decoded_images(  # noqa: PLR0913
                 baseline_mask=masks[0],
                 probe_mask=masks[1],
                 roi=roi,
-            )
+            ),
+            diagnostics_sink=diagnostics_sink,
         )
     except Exception:  # noqa: BLE001 - classifier failures are one safe category.
         _fail(ClassificationPreparationReason.INVALID_CLASSIFIER_OUTPUT)

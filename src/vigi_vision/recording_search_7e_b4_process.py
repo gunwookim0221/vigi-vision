@@ -95,6 +95,14 @@ _TIMING_KEYS: Final = frozenset(
         "model_ready_ms",
         "preprocessing_ms",
         "child_inference_ms",
+        "decoder_calls",
+        "segmentation_calls",
+        "alignment_translation_candidates",
+        "alignment_rotation_candidates",
+        "alignment_scale_candidates",
+        "alignment_comparisons",
+        "alignment_elapsed_ms",
+        "duplicate_processing_count",
     }
 )
 _LOGGER = logging.getLogger("uvicorn.error.vigi_vision.phase7e")
@@ -242,6 +250,7 @@ def run_b4_in_process(
     process_started_at: float | None = None
     inference_started_at: float | None = None
     result_received_at: float | None = None
+    ready_received_at: float | None = None
     child_timings: dict[str, int | str] = {}
     try:
         parent, child = context.Pipe(duplex=False)
@@ -304,6 +313,7 @@ def run_b4_in_process(
                         continue
                     child_timings = _decode_timing(raw, correlation_id, "ready")
                     ready = True
+                    ready_received_at = monotonic()
                     inference_deadline = monotonic() + float(startup_timeout)
                     continue
                 result = _decode_result(raw, correlation_id)
@@ -337,6 +347,7 @@ def run_b4_in_process(
                                 continue
                             child_timings = _decode_timing(raw, correlation_id, "ready")
                             ready = True
+                            ready_received_at = monotonic()
                             inference_deadline = monotonic() + float(startup_timeout)
                             continue
                         result = _decode_result(raw, correlation_id)
@@ -391,8 +402,8 @@ def run_b4_in_process(
         if isinstance(primary_error, B4ProcessTimeout):
             event["timeout_stage"] = primary_error.stage
         if process_started_at is not None:
-            if ready:
-                event["startup_ms"] = _elapsed_ms(process_started_at)
+            if ready and ready_received_at is not None:
+                event["startup_ms"] = _elapsed_ms(process_started_at, ready_received_at)
             if result_received_at is not None:
                 event["ipc_result_ms"] = _elapsed_ms(process_started_at, result_received_at)
             if inference_started_at is not None:
@@ -474,7 +485,10 @@ def _emit_timing(event: dict[str, int | str], sink: TimingSink | None) -> None:
 
 def _emit_stage(sink: Callable[[str, int], None] | None, name: str, elapsed_ms: int) -> None:
     if sink is not None:
-        sink(name, elapsed_ms)
+        try:
+            sink(name, elapsed_ms)
+        except Exception:  # noqa: S110 - diagnostics cannot affect authority.
+            pass
 
 
 def _build_request(
@@ -621,6 +635,8 @@ def _compute(
     preprocessing_started = monotonic()
     baseline = _image_from_b64(request["baseline_rgb24"], width, height)
     probe = _image_from_b64(request["probe_rgb24"], width, height)
+    _emit_stage(stage_sink, "decoder_calls", 2)
+    _emit_stage(stage_sink, "duplicate_processing_count", 0)
     roi = ConfirmationRoi.model_validate(request["roi"])
     policy_payload = request["policy"]
     if not isinstance(policy_payload, dict):
@@ -645,6 +661,7 @@ def _compute(
         roi=roi,
         policy=policy,
         mask_predictor=predictor,
+        diagnostics_sink=stage_sink,
     )
     _emit_stage(stage_sink, "child_inference_ms", _elapsed_ms(started))
     return result

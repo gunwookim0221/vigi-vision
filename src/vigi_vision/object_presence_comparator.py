@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from time import perf_counter
 from typing import TYPE_CHECKING, Final, cast
 
 from vigi_vision.object_presence_evidence import RawComparison
@@ -56,6 +57,9 @@ _BACKGROUND_GRADIENT_CHANGE_THRESHOLD: Final[float] = 32.0
 _ALIGNMENT_ROTATIONS: Final[tuple[int, ...]] = (-10, -5, 0, 5, 10)
 _ALIGNMENT_DISTINCT_ROTATION_DEGREES: Final[int] = 5
 _DENSE_ALIGNMENT_RADIUS_THRESHOLD: Final[int] = 4
+_COARSE_ALIGNMENT_STEP: Final[int] = 4
+_ALIGNMENT_REFINE_RADIUS: Final[int] = 2
+_ALIGNMENT_SEED_COUNT: Final[int] = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,11 +68,18 @@ class ObjectPresenceClassifier:
 
     policy: ObjectPresenceDecisionPolicy
 
-    def compare(self, values: ClassifierInput) -> RawComparison:
+    def compare(
+        self,
+        values: ClassifierInput,
+        *,
+        diagnostics_sink: Callable[[str, int], None] | None = None,
+    ) -> RawComparison:
         """Return one validated raw comparison without performing I/O."""
         _validate_input(values)
         if self.policy.baseline_support_mode:
-            return _compare_with_baseline_support(values, self.policy)
+            return _compare_with_baseline_support(
+                values, self.policy, diagnostics_sink=diagnostics_sink
+            )
         roi_pixels = values.roi.width * values.roi.height
         baseline_mask, probe_mask = clipped_masks(
             values.baseline_mask.rows, values.probe_mask.rows, values.roi
@@ -101,9 +112,14 @@ class ObjectPresenceClassifier:
             unusable_reason=None,
         )
 
-    def classify(self, values: ClassifierInput) -> ClassificationResult:
+    def classify(
+        self,
+        values: ClassifierInput,
+        *,
+        diagnostics_sink: Callable[[str, int], None] | None = None,
+    ) -> ClassificationResult:
         """Return the conservative three-state result for one in-memory input."""
-        return self.policy.decide(self.compare(values))
+        return self.policy.decide(self.compare(values, diagnostics_sink=diagnostics_sink))
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,7 +246,10 @@ def _measure_masks(
 
 
 def _compare_with_baseline_support(  # noqa: PLR0915 - explicit evidence-gate assembly
-    values: ClassifierInput, policy: ObjectPresenceDecisionPolicy
+    values: ClassifierInput,
+    policy: ObjectPresenceDecisionPolicy,
+    *,
+    diagnostics_sink: Callable[[str, int], None] | None = None,
 ) -> RawComparison:
     """Compare probe pixels against the immutable baseline mask support.
 
@@ -332,6 +351,7 @@ def _compare_with_baseline_support(  # noqa: PLR0915 - explicit evidence-gate as
             alignment_radius_x,
             alignment_radius_y,
             policy,
+            diagnostics_sink=diagnostics_sink,
         )
         alignment_is_confident = (
             alignment.overlap >= policy.baseline_support_alignment_min_support_overlap
@@ -566,86 +586,132 @@ def _aligned_support_choice(  # noqa: PLR0913 - each alignment boundary is expli
     radius_x: int,
     radius_y: int,
     policy: ObjectPresenceDecisionPolicy,
+    *,
+    diagnostics_sink: Callable[[str, int], None] | None = None,
 ) -> _AlignmentChoice:
-    """Choose one deterministic bounded translation/rotation candidate."""
+    """Choose one deterministic bounded translation/rotation candidate.
+
+    A coarse translation grid is refined around the best few candidates.  The
+    rigid transform remains closed and bounded, while avoiding a full Python
+    metric pass for every pixel-level translation in the configured radius.
+    """
+    started = perf_counter()
     height = len(baseline_mask)
     candidates: list[_AlignmentChoice] = []
+    evaluated: set[tuple[int, int, int]] = set()
+    comparison_count = 0
     dense_grid = (
         radius_x <= _DENSE_ALIGNMENT_RADIUS_THRESHOLD
         and radius_y <= _DENSE_ALIGNMENT_RADIUS_THRESHOLD
     )
     translation_x = _alignment_offsets(radius_x, dense=dense_grid)
     translation_y = _alignment_offsets(radius_y, dense=dense_grid)
-    for rotation in _ALIGNMENT_ROTATIONS:
-        for dy in translation_y:
-            for dx in translation_x:
-                transformed = _transformed_support(
-                    probe_luma,
-                    support_indices,
-                    width,
-                    height,
-                    dx,
-                    dy,
-                    rotation,
-                )
-                if transformed is None:
-                    continue
-                mapped_indices, support_probe, overlap = transformed
-                if overlap < policy.baseline_support_alignment_min_support_overlap:
-                    continue
-                candidate_baseline = tuple(baseline_luma[index] for index in mapped_indices)
-                (
+
+    def evaluate(transforms: Sequence[tuple[int, int, int]]) -> None:
+        nonlocal comparison_count
+        for rotation, dy, dx in transforms:
+            key = (dx, dy, rotation)
+            if key in evaluated:
+                continue
+            evaluated.add(key)
+            comparison_count += 1
+            transformed = _transformed_support(
+                probe_luma,
+                support_indices,
+                width,
+                height,
+                dx,
+                dy,
+                rotation,
+            )
+            if transformed is None:
+                continue
+            mapped_indices, support_probe, overlap = transformed
+            if overlap < policy.baseline_support_alignment_min_support_overlap:
+                continue
+            candidate_baseline = tuple(baseline_luma[index] for index in mapped_indices)
+            (
+                similarity,
+                change,
+                foreground,
+                background_change,
+                normalized_probe,
+            ) = _support_luma_metrics(
+                candidate_baseline,
+                support_probe,
+                background_baseline,
+                background_probe,
+                (background_indices, width),
+            )
+            support_ncc_raw = mean_centered_ncc(candidate_baseline, support_probe)
+            support_ncc = None if support_ncc_raw is None else quantize_metric(support_ncc_raw)
+            if (
+                similarity is None
+                or support_ncc is None
+                or change is None
+                or foreground is None
+                or background_change is None
+                or len(normalized_probe) != len(mapped_indices)
+            ):
+                continue
+            edge = _support_edge_similarity(
+                baseline_luma,
+                baseline_mask,
+                width,
+                normalized_probe,
+                mapped_indices,
+            )
+            score = _alignment_score(similarity, support_ncc, edge, change, foreground)
+            if edge is None or score is None:
+                continue
+            candidates.append(
+                _AlignmentChoice(
                     similarity,
+                    support_ncc,
+                    edge,
                     change,
                     foreground,
                     background_change,
                     normalized_probe,
-                ) = _support_luma_metrics(
-                    candidate_baseline,
-                    support_probe,
-                    background_baseline,
-                    background_probe,
-                    (background_indices, width),
+                    dx,
+                    dy,
+                    rotation,
+                    overlap,
+                    score,
+                    0.0,
                 )
-                support_ncc_raw = mean_centered_ncc(candidate_baseline, support_probe)
-                support_ncc = None if support_ncc_raw is None else quantize_metric(support_ncc_raw)
-                if (
-                    similarity is None
-                    or support_ncc is None
-                    or change is None
-                    or foreground is None
-                    or background_change is None
-                    or len(normalized_probe) != len(mapped_indices)
-                ):
-                    continue
-                edge = _support_edge_similarity(
-                    baseline_luma,
-                    baseline_mask,
-                    width,
-                    normalized_probe,
-                    mapped_indices,
-                )
-                score = _alignment_score(similarity, support_ncc, edge, change, foreground)
-                if edge is None or score is None:
-                    continue
-                candidates.append(
-                    _AlignmentChoice(
-                        similarity,
-                        support_ncc,
-                        edge,
-                        change,
-                        foreground,
-                        background_change,
-                        normalized_probe,
-                        dx,
-                        dy,
-                        rotation,
-                        overlap,
-                        score,
-                        0.0,
-                    )
-                )
+            )
+
+    coarse_transforms = tuple(
+        (rotation, dy, dx)
+        for rotation in _ALIGNMENT_ROTATIONS
+        for dy in translation_y
+        for dx in translation_x
+    )
+    evaluate(coarse_transforms)
+    if candidates and not dense_grid:
+        seeds = sorted(candidates, key=_alignment_sort_key, reverse=True)[:_ALIGNMENT_SEED_COUNT]
+        refine_transforms = tuple(
+            (seed.rotation_degrees, dy, dx)
+            for seed in seeds
+            for dy in range(
+                max(-radius_y, seed.dy - _ALIGNMENT_REFINE_RADIUS),
+                min(radius_y, seed.dy + _ALIGNMENT_REFINE_RADIUS) + 1,
+            )
+            for dx in range(
+                max(-radius_x, seed.dx - _ALIGNMENT_REFINE_RADIUS),
+                min(radius_x, seed.dx + _ALIGNMENT_REFINE_RADIUS) + 1,
+            )
+        )
+        evaluate(refine_transforms)
     if not candidates:
+        _emit_alignment_diagnostics(
+            diagnostics_sink,
+            len(translation_x),
+            len(translation_y),
+            comparison_count,
+            started,
+        )
         return _AlignmentChoice(
             None,
             None,
@@ -661,18 +727,7 @@ def _aligned_support_choice(  # noqa: PLR0913 - each alignment boundary is expli
             -1.0,
             0.0,
         )
-    ordered = sorted(
-        candidates,
-        key=lambda item: (
-            item.score,
-            item.overlap,
-            -abs(item.dx) - abs(item.dy),
-            -abs(item.rotation_degrees),
-            -item.dy,
-            -item.dx,
-        ),
-        reverse=True,
-    )
+    ordered = sorted(candidates, key=_alignment_sort_key, reverse=True)
     best = ordered[0]
     second_scores = [
         item.score
@@ -683,15 +738,58 @@ def _aligned_support_choice(  # noqa: PLR0913 - each alignment boundary is expli
     ]
     second = max(second_scores, default=-1.0)
     margin = quantize_metric(max(0.0, best.score - second))
+    _emit_alignment_diagnostics(
+        diagnostics_sink,
+        len(translation_x),
+        len(translation_y),
+        comparison_count,
+        started,
+    )
     return replace(best, margin=margin)
 
 
 def _alignment_offsets(radius: int, *, dense: bool) -> tuple[int, ...]:
     """Return a bounded translation grid with a stable zero anchor."""
-    step = 1 if dense else 2
+    step = 1 if dense else _COARSE_ALIGNMENT_STEP
     offsets = set(range(-radius, radius + 1, step))
-    offsets.add(0)
+    offsets.update({-radius, 0, radius})
     return tuple(sorted(offsets))
+
+
+def _alignment_sort_key(item: _AlignmentChoice) -> tuple[float, float, int, int, int, int]:
+    return (
+        item.score,
+        item.overlap,
+        -abs(item.dx) - abs(item.dy),
+        -abs(item.rotation_degrees),
+        -item.dy,
+        -item.dx,
+    )
+
+
+def _emit_alignment_diagnostics(
+    sink: Callable[[str, int], None] | None,
+    translation_x_count: int,
+    translation_y_count: int,
+    comparison_count: int,
+    started: float,
+) -> None:
+    """Emit bounded, non-sensitive alignment counters to the process sink."""
+    if sink is None:
+        return
+    elapsed_ms = max(0, round((perf_counter() - started) * 1000))
+    values = (
+        ("alignment_translation_candidates", translation_x_count * translation_y_count),
+        ("alignment_rotation_candidates", len(_ALIGNMENT_ROTATIONS)),
+        ("alignment_scale_candidates", 1),
+        ("alignment_comparisons", comparison_count),
+        ("alignment_elapsed_ms", elapsed_ms),
+    )
+    try:
+        for name, value in values:
+            sink(name, value)
+    except Exception:  # noqa: BLE001, S110 - diagnostics cannot affect classification.
+        pass
 
 
 def _alignment_score(
