@@ -96,6 +96,7 @@ _SUCCESSOR_TERMINAL_REASONS = frozenset(
         "target_replay_failed",
         "target_decode_timeout",
         "target_decode_unavailable",
+        "roi_occluded",
         "classifier_timeout",
         "classifier_failed",
         "midpoint_gap",
@@ -869,6 +870,20 @@ def _observation_record(item: SuccessorObservation) -> dict[str, object]:
             None if item.raw_segment_end_utc is None else _timestamp(item.raw_segment_end_utc)
         ),
         "media_validation_outcome": item.media_validation_outcome,
+        "fallback_used": item.fallback_used,
+        "fallback_reason": item.fallback_reason,
+        "observability": item.observability,
+        "candidate_trace": [
+            {
+                "requested_time_utc": trace[0],
+                "candidate_time_utc": trace[1],
+                "candidate_offset_seconds": trace[2],
+                "observable": trace[3],
+                "reason": trace[4],
+                "selected": trace[5],
+            }
+            for trace in item.candidate_trace
+        ],
         "authority_identity": item.authority_identity,
         "reference_frame_resource_id": item.reference_frame_resource_id,
         "roi_identity": item.roi_identity,

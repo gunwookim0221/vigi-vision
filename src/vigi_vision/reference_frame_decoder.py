@@ -170,6 +170,62 @@ class FfmpegReferenceFrameDecoder:
             tolerance_ms=_cadence_tolerance_ms(candidates),
         )
 
+    def decode_candidates(
+        self, requests: tuple[ReferenceFrameDecodeRequest, ...]
+    ) -> tuple[DecodedFrameEvidence | None, ...]:
+        """Decode bounded neighboring timestamps after one shared local probe."""
+        if not requests:
+            return ()
+        clip_path = requests[0].clip_path
+        if any(request.clip_path != clip_path for request in requests):
+            raise ReferenceFrameDecodeError
+        candidates, width, height = self._probe(clip_path)
+        results: list[DecodedFrameEvidence | None] = []
+        for request in requests:
+            try:
+                selected = select_nearest_candidate(
+                    candidates,
+                    request.target_offset_seconds,
+                    request.policy,
+                    allow_terminal_before=request.allow_terminal_before,
+                )
+                request.output_path.parent.mkdir(parents=True, exist_ok=True)
+                completed = self.extract_runner(
+                    self._extract_arguments(clip_path, selected.index, request.output_path),
+                    _TOOL_TIMEOUT_SECONDS,
+                )
+                if completed.returncode != 0:
+                    _remove_partial_output(request.output_path)
+                    results.append(None)
+                    continue
+                self._validate_jpeg(request.output_path, width, height)
+            except (
+                OSError,
+                subprocess.TimeoutExpired,
+                ReferenceFrameDecodeError,
+                ReferenceFrameNoCandidateError,
+            ):
+                _remove_partial_output(request.output_path)
+                results.append(None)
+                continue
+            results.append(
+                DecodedFrameEvidence(
+                    jpeg_path=request.output_path,
+                    local_pts_seconds=float(selected.local_pts_seconds),
+                    width=width,
+                    height=height,
+                    timing_precision_status=TimingPrecisionStatus.MEASURED_CLIP_RELATIVE,
+                    warnings=(
+                        _SOURCE_MAPPING_WARNING,
+                        *_candidate_warnings(candidates, request.target_offset_seconds),
+                    ),
+                    cadence_source="adjacent_pts",
+                    cadence_ms=_cadence_ms(candidates),
+                    tolerance_ms=_cadence_tolerance_ms(candidates),
+                )
+            )
+        return tuple(results)
+
     def _probe(self, clip_path: Path) -> tuple[tuple[DecodedFrameCandidate, ...], int, int]:
         try:
             completed = self.probe_runner(self._probe_arguments(clip_path), _TOOL_TIMEOUT_SECONDS)

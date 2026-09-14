@@ -15,7 +15,7 @@ from vigi_vision.investigation_confirmation_models import ConfirmationRoi, RoiPr
 from vigi_vision.object_presence_evidence import RawComparison
 from vigi_vision.object_presence_models import DecodedRgbImage
 from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
-from vigi_vision.object_presence_values import ClassificationOutcome, VisualStatus
+from vigi_vision.object_presence_values import ClassificationOutcome, VisualReason, VisualStatus
 from vigi_vision.recording_models import RecordingSegment, RecordingWindow
 from vigi_vision.recording_search_7e_b4_process import EfficientSamWorkerSpec
 from vigi_vision.recording_search_b3_media import DecodedMedia
@@ -25,12 +25,14 @@ from vigi_vision.recording_search_successor import (
     build_successor_plan,
 )
 from vigi_vision.recording_search_successor_acquisition import (
+    SuccessorFrameCandidate,
     SuccessorTargetAcquisitionResult,
     SuccessorTargetStatus,
     successor_target_id,
 )
 from vigi_vision.recording_search_successor_classification import (
     EfficientSamSuccessorClassifier,
+    ObservableFrameFallbackPolicy,
     SuccessorClassificationAuthority,
     SuccessorClassificationError,
     SuccessorClassifierResult,
@@ -90,6 +92,16 @@ def _authority(plan) -> SuccessorClassificationAuthority:
 class _Decoder:
     def decode(self, payload: bytes, width: int, height: int) -> DecodedMedia:
         return DecodedMedia(JpegIntegrity("b" * 64, len(payload)), _image(payload[0]))
+
+
+class _SelectiveDecoder(_Decoder):
+    def __init__(self, failures: set[int]) -> None:
+        self.failures = failures
+
+    def decode(self, payload: bytes, width: int, height: int) -> DecodedMedia:
+        if payload[0] in self.failures:
+            raise ValueError
+        return super().decode(payload, width, height)
 
 
 class _Classifier:
@@ -362,6 +374,271 @@ def test_resolution_mismatch_is_indeterminate_without_classifier_call() -> None:
     assert result.observations[0].state is SuccessorObservationState.INDETERMINATE
     assert result.observations[0].reason_code == "invalid_frame_or_roi"
     assert len(classifier.calls) == 2
+
+
+def _unusable_result() -> SuccessorClassifierResult:
+    comparison = RawComparison(
+        baseline_mask_pixel_count=100,
+        probe_mask_pixel_count=20,
+        roi_pixel_count=256,
+        mask_intersection_pixel_count=0,
+        mask_union_pixel_count=120,
+        baseline_mask_coverage=0.390625,
+        probe_mask_coverage=0.078125,
+        mask_iou=0.0,
+        effective_comparison_area=None,
+        roi_luma_ncc=None,
+        visual_status=VisualStatus.UNUSABLE,
+        unusable_reason=VisualReason.INSUFFICIENT_MASK_OVERLAP,
+    )
+    return SuccessorClassifierResult(
+        ClassificationOutcome.INDETERMINATE,
+        "insufficient_mask_overlap",
+        comparison,
+    )
+
+
+def _present_result() -> SuccessorClassifierResult:
+    comparison = RawComparison(
+        baseline_mask_pixel_count=100,
+        probe_mask_pixel_count=100,
+        roi_pixel_count=256,
+        mask_intersection_pixel_count=100,
+        mask_union_pixel_count=100,
+        baseline_mask_coverage=0.390625,
+        probe_mask_coverage=0.390625,
+        mask_iou=1.0,
+        effective_comparison_area=100,
+        roi_luma_ncc=1.0,
+        visual_status=VisualStatus.COMPARABLE,
+        unusable_reason=None,
+    )
+    return SuccessorClassifierResult(ClassificationOutcome.PRESENT, None, comparison)
+
+
+class _ResultClassifier:
+    policy_identity = "policy-test"
+
+    def __init__(self, results: list[SuccessorClassifierResult]) -> None:
+        self.results = results
+
+    def classify(self, *_args: object):
+        return self.results.pop(0)
+
+
+def _candidate(target, offset: int) -> SuccessorFrameCandidate:
+    value = bytes([target.sequence + abs(offset) + 10])
+    frame_time = target.requested_time_utc + timedelta(seconds=offset)
+    return SuccessorFrameCandidate(
+        frame_time,
+        frame_time,
+        1.0,
+        0.0,
+        value,
+        hashlib.sha256(value).hexdigest(),
+        len(value),
+        32,
+        32,
+    )
+
+
+def _with_candidates(plan, target, *offsets: int) -> SuccessorTargetAcquisitionResult:
+    acquisition = _acquisition(plan, target)
+    return SuccessorTargetAcquisitionResult(
+        acquisition.plan_id,
+        acquisition.target_id,
+        acquisition.acquisition_id,
+        acquisition.sequence,
+        acquisition.requested_time_utc,
+        acquisition.assigned_segment_id,
+        RecordingWindow(
+            1,
+            target.requested_time_utc - timedelta(seconds=5),
+            target.requested_time_utc + timedelta(seconds=5),
+        ),
+        acquisition.status,
+        acquisition.frame_utc,
+        acquisition.frame_pts_seconds,
+        acquisition.frame_offset_seconds,
+        acquisition.frame_bytes,
+        acquisition.frame_sha256,
+        acquisition.frame_size_bytes,
+        acquisition.frame_width,
+        acquisition.frame_height,
+        frame_candidates=tuple(_candidate(target, offset) for offset in offsets),
+    )
+
+
+def test_occluded_target_uses_closest_previous_usable_frame() -> None:
+    plan = _plan()
+    target = plan.targets[0]
+    acquisition = _with_candidates(plan, target, -1, 1, -2)
+    service = SuccessorCoarseClassificationService(
+        _ResultClassifier(
+            [_unusable_result(), _unusable_result(), _unusable_result(), _present_result()]
+        ),
+        _Decoder(),
+    )
+
+    observation = service.classify_coarse_target(plan, target, acquisition, _authority(plan))
+
+    assert observation.state is SuccessorObservationState.PRESENT
+    assert observation.fallback_used is True
+    assert observation.fallback_reason == "ROI_OCCLUDED"
+    assert observation.frame_utc == target.requested_time_utc - timedelta(seconds=2)
+    assert observation.frame_offset_seconds == -2.0
+    assert observation.candidate_trace[-1][3:] == (True, None, True)
+    assert observation.candidate_trace[0][3] is False
+
+
+def test_occluded_target_prefers_future_when_previous_is_unusable() -> None:
+    plan = _plan()
+    target = plan.targets[0]
+    acquisition = _with_candidates(plan, target, -1, 1)
+    service = SuccessorCoarseClassificationService(
+        _ResultClassifier([_unusable_result(), _unusable_result(), _present_result()]),
+        _Decoder(),
+    )
+
+    observation = service.classify_coarse_target(plan, target, acquisition, _authority(plan))
+
+    assert observation.frame_utc == target.requested_time_utc + timedelta(seconds=1)
+    assert observation.fallback_used is True
+
+
+def test_occluded_target_tie_uses_earlier_neighbor() -> None:
+    plan = _plan()
+    target = plan.targets[0]
+    acquisition = _with_candidates(plan, target, -1, 1)
+    service = SuccessorCoarseClassificationService(
+        _ResultClassifier([_unusable_result(), _present_result()]),
+        _Decoder(),
+    )
+
+    observation = service.classify_coarse_target(plan, target, acquisition, _authority(plan))
+
+    assert observation.frame_utc == target.requested_time_utc - timedelta(seconds=1)
+
+
+def test_occluded_target_without_usable_neighbor_is_not_absent() -> None:
+    plan = _plan()
+    target = plan.targets[0]
+    acquisition = _with_candidates(plan, target, -1, 1)
+    service = SuccessorCoarseClassificationService(
+        _ResultClassifier([_unusable_result(), _unusable_result(), _unusable_result()]),
+        _Decoder(),
+    )
+
+    observation = service.classify_coarse_target(plan, target, acquisition, _authority(plan))
+
+    assert observation.state is SuccessorObservationState.INDETERMINATE
+    assert observation.reason_code == "roi_occluded"
+    assert observation.fallback_used is False
+    assert observation.fallback_reason == "ROI_OCCLUDED"
+
+
+def test_occluded_neighbor_outside_replay_boundary_is_not_used() -> None:
+    plan = _plan()
+    target = plan.targets[0]
+    base = _acquisition(plan, target)
+    boundary_window = RecordingWindow(
+        1, target.requested_time_utc - timedelta(seconds=1), target.requested_time_utc
+    )
+    acquisition = SuccessorTargetAcquisitionResult(
+        base.plan_id,
+        base.target_id,
+        base.acquisition_id,
+        base.sequence,
+        base.requested_time_utc,
+        base.assigned_segment_id,
+        boundary_window,
+        base.status,
+        base.frame_utc,
+        base.frame_pts_seconds,
+        base.frame_offset_seconds,
+        base.frame_bytes,
+        base.frame_sha256,
+        base.frame_size_bytes,
+        base.frame_width,
+        base.frame_height,
+        frame_candidates=(
+            SuccessorFrameCandidate(
+                target.requested_time_utc + timedelta(seconds=1),
+                target.requested_time_utc,
+                1.0,
+                -1.0,
+                b"\x0b",
+                hashlib.sha256(b"\x0b").hexdigest(),
+                1,
+                32,
+                32,
+            ),
+        ),
+    )
+    service = SuccessorCoarseClassificationService(
+        _ResultClassifier([_unusable_result()]),
+        _Decoder(),
+    )
+
+    observation = service.classify_coarse_target(plan, target, acquisition, _authority(plan))
+
+    assert observation.state is SuccessorObservationState.INDETERMINATE
+    assert observation.reason_code == "roi_occluded"
+
+
+def test_decode_unavailable_primary_can_use_neighbor_with_explicit_reason() -> None:
+    plan = _plan()
+    target = plan.targets[0]
+    acquisition = _with_candidates(plan, target, -1)
+    service = SuccessorCoarseClassificationService(
+        _ResultClassifier([_present_result()]),
+        _SelectiveDecoder({target.sequence}),
+    )
+
+    observation = service.classify_coarse_target(plan, target, acquisition, _authority(plan))
+
+    assert observation.state is SuccessorObservationState.PRESENT
+    assert observation.fallback_used is True
+    assert observation.fallback_reason == "DECODE_UNAVAILABLE"
+    assert observation.frame_utc == target.requested_time_utc - timedelta(seconds=1)
+
+
+def test_fallback_policy_step_excludes_non_step_candidates() -> None:
+    plan = _plan()
+    target = plan.targets[0]
+    acquisition = _with_candidates(plan, target, -1, -2)
+    service = SuccessorCoarseClassificationService(
+        _ResultClassifier([_unusable_result(), _present_result()]),
+        _Decoder(),
+        ObservableFrameFallbackPolicy(max_seconds=2, step_seconds=2, max_candidates=2),
+    )
+
+    observation = service.classify_coarse_target(plan, target, acquisition, _authority(plan))
+
+    assert observation.state is SuccessorObservationState.PRESENT
+    assert observation.frame_utc == target.requested_time_utc - timedelta(seconds=2)
+
+
+def test_observability_sink_failure_does_not_change_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _plan()
+    target = plan.targets[0]
+    acquisition = _with_candidates(plan, target, -1)
+
+    def fail_logging(*_args: object, **_kwargs: object) -> None:
+        raise OSError
+
+    monkeypatch.setattr(classification_module._OBSERVABILITY_LOGGER, "info", fail_logging)
+    service = SuccessorCoarseClassificationService(
+        _ResultClassifier([_unusable_result(), _present_result()]),
+        _Decoder(),
+    )
+
+    observation = service.classify_coarse_target(plan, target, acquisition, _authority(plan))
+
+    assert observation.state is SuccessorObservationState.PRESENT
+    assert observation.fallback_used is True
 
 
 def test_authority_plan_mismatch_fails_closed() -> None:

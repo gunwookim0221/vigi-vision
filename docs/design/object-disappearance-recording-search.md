@@ -192,6 +192,15 @@ new successor requests. Successor execution preserves the selected historical
 reference-frame time as a confirmed PRESENT baseline, adds an actual
 search-anchor observation before coarse targets, and durably records safe
 per-target timing, acquisition, classifier, digest, ROI, and policy facts.
+Observable-frame fallback is additive to successor observations: when the
+existing classifier marks a candidate visually unusable, the already acquired
+clip supplies a bounded nearest temporal neighbor (up to ten seconds, one
+second steps) with deterministic earlier-frame tie breaking. Requested and
+selected frame times, offsets, fallback reason, and observability are retained
+for evidence/UI projection; no fallback is used for ordinary comparable
+indeterminate results. Baseline records remain immutable and legacy manifests
+remain readable. Slice 3 classification remains the consumer of the selected
+frame; no new model or search-policy change is introduced.
 Target-local unavailable and visual-indeterminate reasons remain distinct in
 terminal evidence; the executor continues through the remaining configured
 coarse targets after such uncertainty so terminal evidence can retain the

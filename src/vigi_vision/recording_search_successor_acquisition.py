@@ -102,6 +102,46 @@ class SuccessorTargetAcquisitionPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class SuccessorFrameCandidate:
+    """One bounded decoded frame candidate retained for visual resolution."""
+
+    candidate_time_utc: datetime
+    frame_utc: datetime
+    frame_pts_seconds: float
+    frame_offset_seconds: float
+    frame_bytes: bytes = field(repr=False)
+    frame_sha256: str
+    frame_size_bytes: int
+    frame_width: int
+    frame_height: int
+    frame_warnings: tuple[str, ...] = ()
+    timing_precision_status: str | None = None
+
+    def __post_init__(self) -> None:
+        """Reject malformed or unbounded candidate evidence."""
+        if (
+            not _is_utc(self.candidate_time_utc)
+            or not _is_utc(self.frame_utc)
+            or type(self.frame_pts_seconds) not in {int, float}
+            or not math.isfinite(self.frame_pts_seconds)
+            or self.frame_pts_seconds < 0
+            or type(self.frame_offset_seconds) not in {int, float}
+            or not math.isfinite(self.frame_offset_seconds)
+            or not self.frame_bytes
+            or type(self.frame_sha256) is not str
+            or len(self.frame_sha256) != _SHA256_HEX_LENGTH
+            or any(char not in "0123456789abcdef" for char in self.frame_sha256)
+            or type(self.frame_size_bytes) is not int
+            or self.frame_size_bytes != len(self.frame_bytes)
+            or type(self.frame_width) is not int
+            or self.frame_width <= 0
+            or type(self.frame_height) is not int
+            or self.frame_height <= 0
+        ):
+            raise SuccessorAcquisitionContractError
+
+
+@dataclass(frozen=True, slots=True)
 class SuccessorTargetAcquisitionResult:
     """Bounded target facts with an in-memory frame for classifier input."""
 
@@ -130,6 +170,7 @@ class SuccessorTargetAcquisitionResult:
     tolerance_ms: int | None = None
     raw_segment_end_utc: datetime | None = None
     media_validation_outcome: str = "not_attempted"
+    frame_candidates: tuple[SuccessorFrameCandidate, ...] = ()
 
     def __post_init__(self) -> None:  # noqa: C901, PLR0912
         """Validate target identity, status, and frame evidence consistency."""
@@ -232,6 +273,20 @@ class SuccessorTargetAcquisitionResult:
             and self.status is not SuccessorTargetStatus.FRAME_AVAILABLE
         ):
             raise SuccessorAcquisitionContractError
+        if type(self.frame_candidates) is not tuple or any(
+            type(item) is not SuccessorFrameCandidate for item in self.frame_candidates
+        ):
+            raise SuccessorAcquisitionContractError
+        if self.status is not SuccessorTargetStatus.FRAME_AVAILABLE and self.frame_candidates:
+            raise SuccessorAcquisitionContractError
+        if self.status is SuccessorTargetStatus.FRAME_AVAILABLE and self.frame_candidates:
+            if self.replay_window is None:
+                raise SuccessorAcquisitionContractError
+            for item in self.frame_candidates:
+                if not (
+                    self.replay_window.start_utc <= item.frame_utc <= self.replay_window.end_utc
+                ):
+                    raise SuccessorAcquisitionContractError
 
 
 class SuccessorRecordingReplayBoundary(Protocol):
@@ -664,6 +719,25 @@ class SuccessorTargetAcquisitionService:
                     raw_segment_end_utc=raw_segment_end_utc,
                     media_validation_outcome="failed",
                 )
+            primary_candidate = SuccessorFrameCandidate(
+                target.requested_time_utc,
+                frame_utc,
+                evidence.local_pts_seconds,
+                (frame_utc - target.requested_time_utc).total_seconds(),
+                frame_bytes,
+                hashlib.sha256(frame_bytes).hexdigest(),
+                len(frame_bytes),
+                evidence.width,
+                evidence.height,
+                evidence.warnings,
+                evidence.timing_precision_status.value,
+            )
+            neighbors = self._decode_neighbor_candidates(
+                target,
+                window,
+                clip,
+                frame_root,
+            )
             return SuccessorTargetAcquisitionResult(
                 plan.plan_id,
                 target_id,
@@ -690,12 +764,86 @@ class SuccessorTargetAcquisitionService:
                 tolerance_ms=evidence.tolerance_ms,
                 raw_segment_end_utc=raw_segment_end_utc,
                 media_validation_outcome="validated",
+                frame_candidates=(primary_candidate, *neighbors),
             )
         finally:
             try:
                 shutil.rmtree(frame_root)
             except OSError as exc:
                 raise SuccessorAcquisitionCleanupError from exc
+
+    def _decode_neighbor_candidates(  # noqa: C901
+        self,
+        target: CoarseTargetAssignment,
+        window: RecordingWindow,
+        clip: ReplayClip,
+        frame_root: Path,
+    ) -> tuple[SuccessorFrameCandidate, ...]:
+        """Decode bounded local neighbors from the already acquired replay clip."""
+        decode_candidates = getattr(self.decoder, "decode_candidates", None)
+        if not callable(decode_candidates):
+            return ()
+        candidates: list[SuccessorFrameCandidate] = []
+        requests: list[tuple[datetime, ReferenceFrameDecodeRequest]] = []
+        maximum_distance = min(DEFAULT_TARGET_PADDING_SECONDS, self.policy.target_padding_seconds)
+        for distance in range(1, maximum_distance + 1):
+            for direction in (-1, 1):
+                candidate_time = target.requested_time_utc + timedelta(seconds=direction * distance)
+                if not (window.start_utc <= candidate_time <= window.end_utc):
+                    continue
+                output_path = frame_root / f"neighbor-{len(requests) + 1}.jpg"
+                requests.append(
+                    (
+                        candidate_time,
+                        ReferenceFrameDecodeRequest(
+                            clip.temporary_mp4_path,
+                            (candidate_time - window.start_utc).total_seconds(),
+                            FrameSelectionPolicy.NEAREST_DECODED_FRAME,
+                            output_path,
+                            allow_terminal_before=candidate_time >= window.end_utc,
+                        ),
+                    )
+                )
+        try:
+            decoded_value: object = decode_candidates(tuple(request for _, request in requests))
+        except (
+            OSError,
+            TypeError,
+            ValueError,
+            ReferenceFrameDecodeError,
+            ReferenceFrameNoCandidateError,
+        ):
+            return ()
+        if not isinstance(decoded_value, tuple):
+            return ()
+        decoded = cast("tuple[object, ...]", decoded_value)
+        if len(decoded) != len(requests):
+            return ()
+        for (candidate_time, _request), evidence in zip(requests, decoded, strict=True):
+            if evidence is None:
+                continue
+            evidence_path = getattr(evidence, "jpeg_path", None)
+            if not isinstance(evidence_path, Path):
+                continue
+            try:
+                candidate = _read_frame_candidate(
+                    evidence,
+                    candidate_time,
+                    window,
+                    frame_root,
+                    self.policy.maximum_frame_bytes,
+                )
+            except (
+                OSError,
+                ReferenceFrameDecodeError,
+                ReferenceFrameNoCandidateError,
+                ReferenceFrameDecodeTimeoutError,
+                SuccessorAcquisitionContractError,
+            ):
+                continue
+            if all(item.candidate_time_utc != candidate.candidate_time_utc for item in candidates):
+                candidates.append(candidate)
+        return tuple(candidates)
 
     @staticmethod
     def _unavailable_result(  # noqa: PLR0913
@@ -738,6 +886,60 @@ def _validate_target_membership(
 ) -> None:
     if target not in plan.targets:
         raise SuccessorAcquisitionContractError
+
+
+def _read_frame_candidate(
+    evidence: object,
+    candidate_time: datetime,
+    window: RecordingWindow,
+    frame_root: Path,
+    maximum_frame_bytes: int,
+) -> SuccessorFrameCandidate:
+    """Validate one neighbor JPEG and retain only credential-free frame facts."""
+    evidence_path = getattr(evidence, "jpeg_path", None)
+    local_pts = getattr(evidence, "local_pts_seconds", None)
+    width = getattr(evidence, "width", None)
+    height = getattr(evidence, "height", None)
+    timing = getattr(evidence, "timing_precision_status", None)
+    warnings = getattr(evidence, "warnings", ())
+    if (
+        not isinstance(evidence_path, Path)
+        or not _is_contained_file(evidence_path, frame_root)
+        or timing is not TimingPrecisionStatus.MEASURED_CLIP_RELATIVE
+        or local_pts is None
+        or not isinstance(local_pts, (float, int))
+        or not math.isfinite(float(local_pts))
+        or float(local_pts) < 0
+        or not isinstance(width, int)
+        or width <= 0
+        or not isinstance(height, int)
+        or height <= 0
+    ):
+        raise SuccessorAcquisitionContractError
+    frame_utc = window.start_utc + timedelta(seconds=float(local_pts))
+    if frame_utc < window.start_utc or frame_utc > window.end_utc:
+        raise SuccessorAcquisitionContractError
+    try:
+        frame_bytes = evidence_path.read_bytes()
+    except OSError:
+        raise SuccessorAcquisitionContractError from None
+    if not frame_bytes or len(frame_bytes) > maximum_frame_bytes:
+        raise SuccessorAcquisitionContractError
+    return SuccessorFrameCandidate(
+        candidate_time,
+        frame_utc,
+        float(local_pts),
+        (frame_utc - candidate_time).total_seconds(),
+        frame_bytes,
+        hashlib.sha256(frame_bytes).hexdigest(),
+        len(frame_bytes),
+        width,
+        height,
+        tuple(item for item in cast("tuple[object, ...]", warnings) if isinstance(item, str))
+        if isinstance(warnings, tuple)
+        else (),
+        getattr(timing, "value", None),
+    )
 
 
 def _validate_midpoint_target(plan: MultiSegmentCoarsePlan, target: CoarseTargetAssignment) -> None:
@@ -871,6 +1073,7 @@ __all__ = (
     "SuccessorAcquisitionCleanupError",
     "SuccessorAcquisitionContractError",
     "SuccessorAcquisitionError",
+    "SuccessorFrameCandidate",
     "SuccessorRecordingReplayBoundary",
     "SuccessorReplayExtractionBoundary",
     "SuccessorTargetAcquisitionPolicy",

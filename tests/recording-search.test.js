@@ -912,6 +912,7 @@ test("current 34-key evidence renders an INDETERMINATE observation for visual re
   assert.match(harness.recordingSearchBaselineImage.src, /evidence\/a{64}$/);
   assert.match(harness.recordingSearchEndImage.src, /evidence\/b{64}$/);
   assert.equal(harness.recordingSearchEndCaption.textContent, "최근 유효 관측");
+  assert.equal(harness.recordingSearchEndFrameMeta.hidden, true);
 });
 
 test("current evidence uses the search-end caption only when the observation reaches the terminal end", async () => {
@@ -937,6 +938,40 @@ test("current evidence uses the search-end caption only when the observation rea
   await settle();
 
   assert.equal(harness.recordingSearchEndCaption.textContent, "검색 종료 관측");
+});
+
+test("extended evidence exposes observable-frame fallback metadata", async () => {
+  const payload = currentEvidenceManifest("INCONCLUSIVE");
+  payload.entries = payload.entries.map((entry) => ({
+    ...entry,
+    fallback_used: entry.role !== "baseline",
+    fallback_reason: entry.role !== "baseline" ? "ROI_OCCLUDED" : null,
+    observability: entry.role !== "baseline" ? "USABLE" : "USABLE",
+  }));
+  payload.entries[1].requested_time_utc = "2026-07-20T03:34:41Z";
+  payload.entries[1].frame_utc = "2026-07-20T03:34:40Z";
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    if (url.endsWith("/evidence")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => payload });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => successorStatus("INCONCLUSIVE") });
+  }, undefined, { confirmation: true, search: true, evidence: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  await settle();
+
+  assert.equal(harness.recordingSearchEndFrameMeta.hidden, false);
+  assert.equal(harness.recordingSearchEndFrameMeta.children.length, 4);
+  assert.equal(harness.recordingSearchEndFrameMeta.children[2].children[1].textContent,
+    "ROI가 관측되지 않아 가까운 프레임을 사용");
 });
 
 test("a verified evidence image failure is reported separately from schema failure", async () => {

@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import logging
 import math
 import re
 from dataclasses import dataclass, field
@@ -30,7 +31,7 @@ from vigi_vision.investigation_confirmation_models import (
     is_investigation_id,
 )
 from vigi_vision.object_presence_evidence import ClassificationResult, RawComparison
-from vigi_vision.object_presence_values import ClassificationOutcome
+from vigi_vision.object_presence_values import ClassificationOutcome, VisualStatus
 from vigi_vision.recording_search_7e_b4_process import (
     B4ProcessError,
     B4ProcessTimeout,
@@ -40,6 +41,8 @@ from vigi_vision.recording_search_7e_b4_process import (
 from vigi_vision.recording_search_b3_models import ClassificationPreparationError
 from vigi_vision.recording_search_successor import TargetAvailability
 from vigi_vision.recording_search_successor_acquisition import (
+    SuccessorAcquisitionContractError,
+    SuccessorFrameCandidate,
     SuccessorTargetAcquisitionResult,
     SuccessorTargetStatus,
     successor_anchor_target_id,
@@ -87,8 +90,17 @@ _SAFE_REASON_CODES = frozenset(
         "target_replay_failed",
         "target_decode_timeout",
         "target_decode_unavailable",
+        "roi_occluded",
     }
 )
+_FALLBACK_REASON = "ROI_OCCLUDED"
+_FALLBACK_REASONS = frozenset({_FALLBACK_REASON, "DECODE_UNAVAILABLE"})
+_OBSERVABILITY_STATES = frozenset({"USABLE", "OCCLUDED", "DECODE_UNAVAILABLE"})
+_MAX_FALLBACK_SECONDS = 10
+_MAX_CANDIDATE_TRACE = 21
+_CANDIDATE_TRACE_FIELDS = 6
+CandidateTraceEntry = tuple[str, str, float, bool, str | None, bool]
+_OBSERVABILITY_LOGGER = logging.getLogger("uvicorn.error.vigi_vision.phase7e")
 
 
 class SuccessorClassificationContractError(ValueError):
@@ -319,6 +331,45 @@ class EfficientSamSuccessorClassifier:
 
 
 @dataclass(frozen=True, slots=True)
+class ObservableFrameFallbackPolicy:
+    """Bounded temporal neighborhood used when a ROI is not observable."""
+
+    max_seconds: int = 10
+    step_seconds: int = 1
+    max_candidates: int = 21
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.max_seconds) is not int
+            or not 0 < self.max_seconds <= _MAX_FALLBACK_SECONDS
+            or type(self.step_seconds) is not int
+            or not 0 < self.step_seconds <= self.max_seconds
+            or type(self.max_candidates) is not int
+            or not 1 <= self.max_candidates <= 2 * (self.max_seconds // self.step_seconds) + 1
+        ):
+            raise SuccessorClassificationContractError
+
+
+@dataclass(frozen=True, slots=True)
+class ObservableFrameResolution:
+    """Selected frame plus a bounded, credential-free candidate trace."""
+
+    selected: SuccessorFrameCandidate | None
+    fallback_used: bool
+    fallback_reason: str | None
+    observability: str
+    candidate_trace: tuple[CandidateTraceEntry, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            self.fallback_reason is not None and self.fallback_reason not in _FALLBACK_REASONS
+        ) or self.observability not in _OBSERVABILITY_STATES:
+            raise SuccessorClassificationContractError
+        if self.fallback_used and self.selected is None:
+            raise SuccessorClassificationContractError
+
+
+@dataclass(frozen=True, slots=True)
 class SuccessorObservation:
     """One target fact, ordered by observed frame time when available."""
 
@@ -356,8 +407,12 @@ class SuccessorObservation:
     tolerance_ms: int | None = None
     raw_segment_end_utc: datetime | None = None
     media_validation_outcome: str = "not_attempted"
+    fallback_used: bool = False
+    fallback_reason: str | None = None
+    observability: str = "USABLE"
+    candidate_trace: tuple[CandidateTraceEntry, ...] = ()
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> None:  # noqa: C901
         if (
             not self.plan_id
             or not self.target_id
@@ -410,7 +465,30 @@ class SuccessorObservation:
             or self.raw_segment_end_utc is not None
             and not _is_utc(self.raw_segment_end_utc)
             or self.media_validation_outcome not in {"not_attempted", "validated", "failed"}
+            or type(self.fallback_used) is not bool
+            or self.fallback_reason is not None
+            and self.fallback_reason not in _FALLBACK_REASONS
+            or self.observability not in _OBSERVABILITY_STATES
+            or not isinstance(self.candidate_trace, tuple)
+            or len(self.candidate_trace) > _MAX_CANDIDATE_TRACE
         ):
+            raise SuccessorClassificationContractError
+        for trace in self.candidate_trace:
+            if (
+                not isinstance(trace, tuple)
+                or len(trace) != _CANDIDATE_TRACE_FIELDS
+                or not isinstance(trace[0], str)
+                or not isinstance(trace[1], str)
+                or type(trace[2]) not in {int, float}
+                or not math.isfinite(trace[2])
+                or type(trace[3]) is not bool
+                or (trace[4] is not None and not isinstance(trace[4], str))
+                or type(trace[5]) is not bool
+                or trace[5]
+                and not trace[3]
+            ):
+                raise SuccessorClassificationContractError
+        if self.fallback_used and self.fallback_reason not in _FALLBACK_REASONS:
             raise SuccessorClassificationContractError
         if (
             self.state
@@ -491,6 +569,9 @@ class SuccessorCoarseClassificationService:
 
     classifier: SuccessorClassifier
     media_decoder: MediaDecoder
+    fallback_policy: ObservableFrameFallbackPolicy = field(
+        default_factory=ObservableFrameFallbackPolicy
+    )
 
     def classify_plan(
         self,
@@ -631,12 +712,7 @@ class SuccessorCoarseClassificationService:
                 f"target_{state.value.lower()}",
                 self.classifier.policy_identity,
             )
-        if (
-            acquisition.frame_bytes is None
-            or acquisition.frame_width != authority.source_width
-            or acquisition.frame_height != authority.source_height
-            or not _roi_valid(authority.roi, authority.source_width, authority.source_height)
-        ):
+        if not _roi_valid(authority.roi, authority.source_width, authority.source_height):
             return _observation(
                 plan,
                 target,
@@ -646,35 +722,178 @@ class SuccessorCoarseClassificationService:
                 "invalid_frame_or_roi",
                 self.classifier.policy_identity,
             )
+        candidates = _ordered_candidates(acquisition, target, self.fallback_policy)
+        if not candidates:
+            return _observation(
+                plan,
+                target,
+                acquisition,
+                authority,
+                SuccessorObservationState.INDETERMINATE,
+                "invalid_frame_or_roi",
+                self.classifier.policy_identity,
+            )
+        trace: list[CandidateTraceEntry] = []
+        saw_occluded = False
+        saw_decode_failure = False
+        first_decode_reason: str | None = None
+        last_comparison: dict[str, object] | None = None
+        primary = candidates[0]
+        for index, candidate in enumerate(candidates):
+            evaluation = self._evaluate_candidate(candidate, authority, acquisition.acquisition_id)
+            if evaluation[0] == "decode_failed":
+                saw_decode_failure = True
+                decode_reason = (
+                    evaluation[1] if isinstance(evaluation[1], str) else "frame_decode_failed"
+                )
+                if first_decode_reason is None:
+                    first_decode_reason = decode_reason
+                trace.append(
+                    (
+                        _timestamp(candidate.candidate_time_utc),
+                        _timestamp(candidate.frame_utc),
+                        (candidate.frame_utc - target.requested_time_utc).total_seconds(),
+                        False,
+                        decode_reason,
+                        False,
+                    )
+                )
+                continue
+            if evaluation[0] == "classifier_error":
+                error_reason = (
+                    evaluation[1] if isinstance(evaluation[1], str) else "classifier_failed"
+                )
+                classifier_elapsed_ms = evaluation[2] if isinstance(evaluation[2], int) else None
+                state = (
+                    SuccessorObservationState.CLASSIFIER_TIMEOUT
+                    if error_reason == "classifier_timeout"
+                    else SuccessorObservationState.CLASSIFIER_FAILED
+                )
+                trace.append(
+                    (
+                        _timestamp(candidate.candidate_time_utc),
+                        _timestamp(candidate.frame_utc),
+                        (candidate.frame_utc - target.requested_time_utc).total_seconds(),
+                        False,
+                        error_reason,
+                        False,
+                    )
+                )
+                return _observation(
+                    plan,
+                    target,
+                    acquisition,
+                    authority,
+                    state,
+                    error_reason,
+                    self.classifier.policy_identity,
+                    frame_candidate=candidate,
+                    fallback_used=index > 0,
+                    fallback_reason=(
+                        _FALLBACK_REASON
+                        if saw_occluded
+                        else ("DECODE_UNAVAILABLE" if saw_decode_failure else None)
+                    )
+                    if index > 0
+                    else None,
+                    observability="USABLE",
+                    candidate_trace=tuple(trace),
+                    classifier_stage="timeout"
+                    if error_reason == "classifier_timeout"
+                    else "failed",
+                    classifier_elapsed_ms=classifier_elapsed_ms,
+                )
+            classified = evaluation[1]
+            if not isinstance(classified, SuccessorClassifierResult):
+                raise SuccessorClassificationContractError
+            comparison = _safe_comparison(classified.comparison)
+            if _is_occluded_result(classified):
+                saw_occluded = True
+                last_comparison = comparison
+                trace.append(
+                    (
+                        _timestamp(candidate.candidate_time_utc),
+                        _timestamp(candidate.frame_utc),
+                        (candidate.frame_utc - target.requested_time_utc).total_seconds(),
+                        False,
+                        _FALLBACK_REASON,
+                        False,
+                    )
+                )
+                continue
+            trace.append(
+                (
+                    _timestamp(candidate.candidate_time_utc),
+                    _timestamp(candidate.frame_utc),
+                    (candidate.frame_utc - target.requested_time_utc).total_seconds(),
+                    True,
+                    classified.reason_code,
+                    True,
+                )
+            )
+            return _observation(
+                plan,
+                target,
+                acquisition,
+                authority,
+                SuccessorObservationState(classified.outcome.value),
+                classified.reason_code,
+                self.classifier.policy_identity,
+                comparison=comparison,
+                classifier_stage=classified.stage,
+                classifier_elapsed_ms=classified.elapsed_ms,
+                frame_candidate=candidate,
+                fallback_used=index > 0,
+                fallback_reason=(
+                    _FALLBACK_REASON
+                    if saw_occluded
+                    else ("DECODE_UNAVAILABLE" if saw_decode_failure else None)
+                )
+                if index > 0
+                else None,
+                observability="USABLE",
+                candidate_trace=tuple(trace),
+            )
+        fallback_reason = _FALLBACK_REASON if saw_occluded else "DECODE_UNAVAILABLE"
+        return _observation(
+            plan,
+            target,
+            acquisition,
+            authority,
+            SuccessorObservationState.INDETERMINATE,
+            "roi_occluded" if saw_occluded else (first_decode_reason or "frame_decode_failed"),
+            self.classifier.policy_identity,
+            comparison=last_comparison,
+            frame_candidate=primary,
+            fallback_reason=fallback_reason,
+            observability="OCCLUDED" if saw_occluded else "DECODE_UNAVAILABLE",
+            candidate_trace=tuple(trace),
+        )
+
+    def _evaluate_candidate(
+        self,
+        candidate: SuccessorFrameCandidate,
+        authority: SuccessorClassificationAuthority,
+        correlation_id: str,
+    ) -> tuple[object, ...]:
+        if (
+            candidate.frame_width != authority.source_width
+            or candidate.frame_height != authority.source_height
+        ):
+            return ("decode_failed", "invalid_frame_or_roi", None)
         try:
             decoded = self.media_decoder.decode(
-                acquisition.frame_bytes,
+                candidate.frame_bytes,
                 authority.source_width,
                 authority.source_height,
             )
         except (OSError, TypeError, ValueError):
-            return _observation(
-                plan,
-                target,
-                acquisition,
-                authority,
-                SuccessorObservationState.INDETERMINATE,
-                "frame_decode_failed",
-                self.classifier.policy_identity,
-            )
+            return ("decode_failed", "frame_decode_failed", None)
         if (
             decoded.image.width != authority.source_width
             or decoded.image.height != authority.source_height
         ):
-            return _observation(
-                plan,
-                target,
-                acquisition,
-                authority,
-                SuccessorObservationState.INDETERMINATE,
-                "frame_resolution_mismatch",
-                self.classifier.policy_identity,
-            )
+            return ("decode_failed", "frame_resolution_mismatch", None)
         classifier_started = perf_counter()
         try:
             classified = self.classifier.classify(
@@ -683,39 +902,91 @@ class SuccessorCoarseClassificationService:
                 authority.source_width,
                 authority.source_height,
                 authority.roi,
-                acquisition.acquisition_id,
+                correlation_id,
             )
         except SuccessorClassificationError as error:
-            state = (
-                SuccessorObservationState.CLASSIFIER_TIMEOUT
-                if error.reason == "classifier_timeout"
-                else SuccessorObservationState.CLASSIFIER_FAILED
-            )
-            return _observation(
-                plan,
-                target,
-                acquisition,
-                authority,
-                state,
+            return (
+                "classifier_error",
                 error.reason,
-                self.classifier.policy_identity,
-                classifier_stage="timeout" if error.reason == "classifier_timeout" else "failed",
-                classifier_elapsed_ms=max(0, round((perf_counter() - classifier_started) * 1000)),
+                max(0, round((perf_counter() - classifier_started) * 1000)),
             )
         if not isinstance(classified, SuccessorClassifierResult):
             raise SuccessorClassificationContractError
-        return _observation(
-            plan,
-            target,
-            acquisition,
-            authority,
-            SuccessorObservationState(classified.outcome.value),
-            classified.reason_code,
-            self.classifier.policy_identity,
-            comparison=_safe_comparison(classified.comparison),
-            classifier_stage=classified.stage,
-            classifier_elapsed_ms=classified.elapsed_ms,
+        return ("classified", classified, classified.elapsed_ms)
+
+
+def _ordered_candidates(
+    acquisition: SuccessorTargetAcquisitionResult,
+    target: CoarseTargetAssignment,
+    policy: ObservableFrameFallbackPolicy,
+) -> tuple[SuccessorFrameCandidate, ...]:
+    """Return target-centered candidates inside the one acquired window."""
+    if (
+        acquisition.frame_bytes is None
+        or acquisition.frame_utc is None
+        or acquisition.frame_pts_seconds is None
+        or acquisition.frame_offset_seconds is None
+        or acquisition.frame_sha256 is None
+        or acquisition.frame_size_bytes is None
+        or acquisition.frame_width is None
+        or acquisition.frame_height is None
+        or acquisition.replay_window is None
+    ):
+        return ()
+    try:
+        primary = SuccessorFrameCandidate(
+            target.requested_time_utc,
+            acquisition.frame_utc,
+            acquisition.frame_pts_seconds,
+            acquisition.frame_offset_seconds,
+            acquisition.frame_bytes,
+            acquisition.frame_sha256,
+            acquisition.frame_size_bytes,
+            acquisition.frame_width,
+            acquisition.frame_height,
+            acquisition.frame_warnings,
+            acquisition.timing_precision_status,
         )
+    except (SuccessorAcquisitionContractError, TypeError, ValueError):
+        return ()
+    all_candidates = (primary, *acquisition.frame_candidates)
+    lower = acquisition.replay_window.start_utc
+    upper = acquisition.replay_window.end_utc
+    bounded: list[SuccessorFrameCandidate] = [primary]
+    seen_requested: set[datetime] = {target.requested_time_utc}
+    for candidate in all_candidates[1:]:
+        distance = abs((candidate.candidate_time_utc - target.requested_time_utc).total_seconds())
+        if (
+            candidate.candidate_time_utc in seen_requested
+            or distance > policy.max_seconds
+            or not math.isclose(
+                distance / policy.step_seconds, round(distance / policy.step_seconds)
+            )
+            or not lower <= candidate.candidate_time_utc <= upper
+            or not lower <= candidate.frame_utc <= upper
+        ):
+            continue
+        seen_requested.add(candidate.candidate_time_utc)
+        bounded.append(candidate)
+    bounded.sort(
+        key=lambda item: (
+            abs((item.candidate_time_utc - target.requested_time_utc).total_seconds()),
+            item.candidate_time_utc,
+            item.frame_utc,
+        )
+    )
+    return tuple(bounded[: policy.max_candidates])
+
+
+def _is_occluded_result(classified: SuccessorClassifierResult) -> bool:
+    """Use only existing classifier unusable grounds to trigger fallback."""
+    comparison = classified.comparison
+    return (
+        classified.outcome is ClassificationOutcome.INDETERMINATE
+        and comparison is not None
+        and comparison.visual_status is VisualStatus.UNUSABLE
+        and comparison.unusable_reason is not None
+    )
 
 
 def _observation(
@@ -733,11 +1004,34 @@ def _observation(
     comparison: dict[str, object] | None = None,
     classifier_stage: str | None = None,
     classifier_elapsed_ms: int | None = None,
+    frame_candidate: SuccessorFrameCandidate | None = None,
+    fallback_used: bool = False,
+    fallback_reason: str | None = None,
+    observability: str = "USABLE",
+    candidate_trace: tuple[CandidateTraceEntry, ...] = (),
 ) -> SuccessorObservation:
-    if acquisition.frame_utc is not None:
+    if frame_candidate is not None:
+        frame_utc = frame_candidate.frame_utc
+        frame_pts_seconds = frame_candidate.frame_pts_seconds
+        frame_offset_seconds = (
+            frame_candidate.frame_utc - target.requested_time_utc
+        ).total_seconds()
+    elif acquisition.frame_utc is not None:
         frame_utc = acquisition.frame_utc
         frame_pts_seconds = acquisition.frame_pts_seconds
         frame_offset_seconds = acquisition.frame_offset_seconds
+    frame_sha256 = (
+        acquisition.frame_sha256 if frame_candidate is None else frame_candidate.frame_sha256
+    )
+    frame_bytes = (
+        acquisition.frame_bytes if frame_candidate is None else frame_candidate.frame_bytes
+    )
+    frame_width = (
+        acquisition.frame_width if frame_candidate is None else frame_candidate.frame_width
+    )
+    frame_height = (
+        acquisition.frame_height if frame_candidate is None else frame_candidate.frame_height
+    )
     payload = {
         "version": _CLASSIFICATION_VERSION,
         "plan_id": plan.plan_id,
@@ -755,7 +1049,7 @@ def _observation(
         "state": state.value,
         "reason_code": reason_code,
         "timing_precision_status": acquisition.timing_precision_status,
-        "frame_sha256": acquisition.frame_sha256,
+        "frame_sha256": frame_sha256,
         "assigned_segment_id": acquisition.assigned_segment_id,
         "acquisition_mode": acquisition.acquisition_mode,
         "target_delta_ms": acquisition.target_delta_ms,
@@ -768,8 +1062,12 @@ def _observation(
             else _timestamp(acquisition.raw_segment_end_utc)
         ),
         "media_validation_outcome": acquisition.media_validation_outcome,
+        "fallback_used": fallback_used,
+        "fallback_reason": fallback_reason,
+        "observability": observability,
     }
     identity = _digest_identity("successor-observation-v1-", payload)
+    _emit_observable_trace(target.requested_time_utc, candidate_trace)
     return SuccessorObservation(
         plan.plan_id,
         acquisition.target_id,
@@ -790,10 +1088,10 @@ def _observation(
         identity,
         acquisition.timing_precision_status,
         acquisition.frame_warnings,
-        acquisition.frame_sha256,
-        acquisition.frame_bytes,
-        acquisition.frame_width,
-        acquisition.frame_height,
+        frame_sha256,
+        frame_bytes,
+        frame_width,
+        frame_height,
         comparison,
         classifier_stage,
         classifier_elapsed_ms,
@@ -805,6 +1103,10 @@ def _observation(
         acquisition.tolerance_ms,
         acquisition.raw_segment_end_utc,
         acquisition.media_validation_outcome,
+        fallback_used,
+        fallback_reason,
+        observability,
+        candidate_trace,
     )
 
 
@@ -844,6 +1146,10 @@ def _with_ordinal(item: SuccessorObservation, ordinal: int) -> SuccessorObservat
         item.tolerance_ms,
         item.raw_segment_end_utc,
         item.media_validation_outcome,
+        item.fallback_used,
+        item.fallback_reason,
+        item.observability,
+        item.candidate_trace,
     )
 
 
@@ -878,6 +1184,9 @@ def reidentify_observation(
             None if item.raw_segment_end_utc is None else _timestamp(item.raw_segment_end_utc)
         ),
         "media_validation_outcome": item.media_validation_outcome,
+        "fallback_used": item.fallback_used,
+        "fallback_reason": item.fallback_reason,
+        "observability": item.observability,
     }
     return SuccessorObservation(
         item.plan_id,
@@ -914,6 +1223,10 @@ def reidentify_observation(
         item.tolerance_ms,
         item.raw_segment_end_utc,
         item.media_validation_outcome,
+        item.fallback_used,
+        item.fallback_reason,
+        item.observability,
+        item.candidate_trace,
     )
 
 
@@ -947,6 +1260,36 @@ def _roi_valid(roi: ConfirmationRoi, width: int, height: int) -> bool:
         and roi.x + roi.width <= width
         and roi.y + roi.height <= height
     )
+
+
+def _emit_observable_trace(
+    requested_time_utc: datetime, trace: tuple[CandidateTraceEntry, ...]
+) -> None:
+    """Emit one bounded, credential-free candidate-resolution profile."""
+    if not trace:
+        return
+    payload = {
+        "event": "phase7e.observable_frame",
+        "requested_time_utc": _timestamp(requested_time_utc),
+        "candidate_trace": [
+            {
+                "candidate_time_utc": item[0],
+                "frame_utc": item[1],
+                "candidate_offset_seconds": item[2],
+                "observable": item[3],
+                "reason": item[4],
+                "selected": item[5],
+            }
+            for item in trace
+        ],
+    }
+    try:
+        _OBSERVABILITY_LOGGER.info(
+            "phase7e.observable_frame %s",
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        )
+    except Exception:  # noqa: BLE001 - diagnostic sinks cannot affect classification.
+        return
 
 
 def _digest_identity(prefix: str, payload: object) -> str:
@@ -1002,6 +1345,8 @@ def _timestamp(value: datetime) -> str:
 
 __all__ = (
     "EfficientSamSuccessorClassifier",
+    "ObservableFrameFallbackPolicy",
+    "ObservableFrameResolution",
     "SuccessorCandidateBracket",
     "SuccessorClassificationAuthority",
     "SuccessorClassificationContractError",

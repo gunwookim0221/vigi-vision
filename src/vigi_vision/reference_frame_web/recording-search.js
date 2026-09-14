@@ -24,6 +24,7 @@
   const endImage = document.querySelector("#recording-search-end-image");
   const endRoi = document.querySelector("#recording-search-end-roi");
   const endTime = document.querySelector("#recording-search-end-time");
+  const endFrameMeta = document.querySelector("#recording-search-end-frame-meta");
   const endCaption = document.querySelector("#recording-search-end-caption");
   const endHighlight = document.querySelector("#recording-search-end-highlight");
   const evidenceMetrics = document.querySelector("#recording-search-evidence-metrics");
@@ -789,6 +790,9 @@
     "acquisition_mode", "target_delta_ms", "cadence_source", "cadence_ms",
     "tolerance_ms", "raw_segment_end_utc", "media_validation_outcome",
   ]);
+  const EXTENDED_EVIDENCE_ENTRY_KEYS = Object.freeze([
+    ...CURRENT_EVIDENCE_ENTRY_KEYS, "fallback_used", "fallback_reason", "observability",
+  ]);
   const EVIDENCE_ROLES = new Set(["baseline", "baseline_link", "anchor", "observation"]);
   const EVIDENCE_ACQUISITION_STATUSES = new Set([
     "FRAME_AVAILABLE", "UNAVAILABLE_GAP", "RECORDING_UNAVAILABLE", "REPLAY_TIMEOUT",
@@ -810,6 +814,7 @@
     "no_present_absent_bracket", "cancelled", "internal_error", "invalid_mask",
     "background_dominant", "insufficient_mask_overlap", "insufficient_comparison_area",
     "zero_luma_variance",
+    "roi_occluded",
   ]);
   const COMPARISON_KEYS = new Set([
     "baseline_mask_pixel_count", "probe_mask_pixel_count", "roi_pixel_count",
@@ -867,8 +872,9 @@
 
   function validEvidenceEntry(entry, payload) {
     const current = hasExactKeys(entry, CURRENT_EVIDENCE_ENTRY_KEYS);
+    const extended = hasExactKeys(entry, EXTENDED_EVIDENCE_ENTRY_KEYS);
     const legacy = hasExactKeys(entry, LEGACY_EVIDENCE_ENTRY_KEYS);
-    if ((!current && !legacy)
+    if ((!current && !extended && !legacy)
       || !EVIDENCE_ROLES.has(entry.role)
       || entry.plan_id !== payload.plan_id
       || entry.authority_identity !== payload.authority_identity
@@ -889,7 +895,11 @@
       || (entry.classifier_stage !== null && !["completed", "timeout", "failed"].includes(entry.classifier_stage))
       || (entry.classifier_elapsed_ms !== null && (!Number.isInteger(entry.classifier_elapsed_ms) || entry.classifier_elapsed_ms < 0))
       || !validComparison(entry.comparison)
-      || !validTransportMetadata(entry, current)) return false;
+      || !validTransportMetadata(entry, current || extended)) return false;
+    if (extended && (typeof entry.fallback_used !== "boolean"
+      || (entry.fallback_reason !== null && !["ROI_OCCLUDED", "DECODE_UNAVAILABLE"].includes(entry.fallback_reason))
+      || !["USABLE", "OCCLUDED", "DECODE_UNAVAILABLE"].includes(entry.observability)
+      || (entry.fallback_used && !["ROI_OCCLUDED", "DECODE_UNAVAILABLE"].includes(entry.fallback_reason)))) return false;
     const validDigest = (value) => value === null || (typeof value === "string" && /^[0-9a-f]{64}$/.test(value));
     if (!validDigest(entry.digest) || !validDigest(entry.roi_digest)
       || (entry.digest === null) !== (entry.path === null)
@@ -976,6 +986,10 @@
     if (endCaption != null) endCaption.textContent = "검색 종료 관측";
     if (baselineTime != null) baselineTime.textContent = "";
     if (endTime != null) endTime.textContent = "";
+    if (endFrameMeta != null) {
+      endFrameMeta.replaceChildren();
+      endFrameMeta.hidden = true;
+    }
   }
 
   function setEvidenceHighlight(highlight, roi, sourceWidth, sourceHeight) {
@@ -1035,6 +1049,32 @@
     setEvidenceImage(endRoi, endingRoiSrc);
     baselineTime.textContent = baseline.frame_utc ?? baseline.requested_time_utc;
     endTime.textContent = ending.frame_utc ?? ending.requested_time_utc;
+    if (endFrameMeta != null && typeof ending.fallback_reason === "string") {
+      const fallbackUsed = ending.fallback_used === true;
+      const rows = [
+        ["요청 시각", ending.requested_time_utc],
+        ["실제 판정 프레임", ending.frame_utc ?? ending.requested_time_utc],
+        ["대체 사유", fallbackUsed
+          ? (ending.fallback_reason === "DECODE_UNAVAILABLE"
+            ? "요청 프레임을 디코딩할 수 없어 가까운 프레임을 사용"
+            : "ROI가 관측되지 않아 가까운 프레임을 사용")
+          : (ending.fallback_reason === "DECODE_UNAVAILABLE"
+            ? "판정 가능한 프레임을 디코딩하지 못했습니다"
+            : "주변에도 ROI를 관측할 수 있는 프레임이 없어 판정하지 못했습니다")],
+        ["시간 차이", typeof ending.frame_offset_seconds === "number"
+          ? `${ending.frame_offset_seconds.toFixed(3)}초` : "확인되지 않음"],
+      ];
+      for (const [label, value] of rows) {
+        const row = document.createElement("div");
+        const term = document.createElement("dt");
+        const detail = document.createElement("dd");
+        term.textContent = label;
+        detail.textContent = value;
+        row.append(term, detail);
+        endFrameMeta.append(row);
+      }
+      endFrameMeta.hidden = false;
+    }
     const observedEnd = terminalPayload?.terminal_details?.observed_end_time_utc;
     const observedEndMillis = evidenceUtcMillis(observedEnd);
     const isSearchEnd = observedEndMillis !== null

@@ -115,6 +115,9 @@ _ENTRY_KEYS = frozenset(
         "media_validation_outcome",
     }
 )
+_EXTENDED_ENTRY_KEYS = _ENTRY_KEYS | frozenset(
+    {"fallback_used", "fallback_reason", "observability"}
+)
 _LEGACY_ENTRY_KEYS = _ENTRY_KEYS - {
     "acquisition_mode",
     "target_delta_ms",
@@ -190,6 +193,7 @@ _REASONS = frozenset(
         "no_present_absent_bracket",
         "cancelled",
         "internal_error",
+        "roi_occluded",
     }
 )
 
@@ -412,6 +416,9 @@ def _baseline_entry(prepared: SuccessorPreparedExecution) -> dict[str, object] |
         "tolerance_ms": None,
         "raw_segment_end_utc": None,
         "media_validation_outcome": "validated",
+        "fallback_used": False,
+        "fallback_reason": None,
+        "observability": "USABLE",
     }
 
 
@@ -470,6 +477,9 @@ def _observation_entry(
             None if item.raw_segment_end_utc is None else _timestamp(item.raw_segment_end_utc)
         ),
         "media_validation_outcome": item.media_validation_outcome,
+        "fallback_used": item.fallback_used,
+        "fallback_reason": item.fallback_reason,
+        "observability": item.observability,
     }
 
 
@@ -564,7 +574,11 @@ def _validate_manifest(value: object, investigation_id: str, run_id: str) -> Non
         if not isinstance(item, dict):
             raise SuccessorEvidenceError("evidence_corrupt")
         item_keys = set(item)
-        if not (item_keys == set(_ENTRY_KEYS) or item_keys == set(_LEGACY_ENTRY_KEYS)):
+        if not (
+            item_keys == set(_ENTRY_KEYS)
+            or item_keys == set(_LEGACY_ENTRY_KEYS)
+            or item_keys == set(_EXTENDED_ENTRY_KEYS)
+        ):
             raise SuccessorEvidenceError("evidence_corrupt")
         if item.get("role") not in _ENTRY_ROLES or item.get("plan_id") != plan_id:
             raise SuccessorEvidenceError("evidence_corrupt")
@@ -577,6 +591,9 @@ def _validate_manifest(value: object, investigation_id: str, run_id: str) -> Non
             raise SuccessorEvidenceError("evidence_corrupt")
         if item_keys == _ENTRY_KEYS:
             _validate_transport_metadata(item)
+        if item_keys == _EXTENDED_ENTRY_KEYS:
+            _validate_transport_metadata(item)
+            _validate_fallback_metadata(item)
         acquisition_status = item.get("acquisition_status")
         state = item.get("state")
         if acquisition_status not in _ACQUISITION_STATUSES or state not in _OBSERVATION_STATES:
@@ -687,6 +704,20 @@ def _validate_transport_metadata(item: dict[str, object]) -> None:
             or delta > item["tolerance_ms"]
         )
     ):
+        raise SuccessorEvidenceError("evidence_corrupt")
+
+
+def _validate_fallback_metadata(item: dict[str, object]) -> None:
+    fallback_used = item.get("fallback_used")
+    fallback_reason = item.get("fallback_reason")
+    observability = item.get("observability")
+    if type(fallback_used) is not bool:
+        raise SuccessorEvidenceError("evidence_corrupt")
+    if fallback_reason not in {None, "ROI_OCCLUDED", "DECODE_UNAVAILABLE"}:
+        raise SuccessorEvidenceError("evidence_corrupt")
+    if observability not in {"USABLE", "OCCLUDED", "DECODE_UNAVAILABLE"}:
+        raise SuccessorEvidenceError("evidence_corrupt")
+    if fallback_used and fallback_reason not in {"ROI_OCCLUDED", "DECODE_UNAVAILABLE"}:
         raise SuccessorEvidenceError("evidence_corrupt")
 
 
