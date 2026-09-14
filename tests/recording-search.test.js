@@ -205,6 +205,21 @@ function evidenceManifest(statusKind = "FOUND") {
   };
 }
 
+function currentEvidenceManifest(statusKind = "INCONCLUSIVE") {
+  const payload = evidenceManifest(statusKind);
+  payload.entries = payload.entries.map((entry) => ({
+    ...entry,
+    acquisition_mode: "normal",
+    target_delta_ms: entry.role === "baseline" ? null : 0,
+    cadence_source: entry.role === "baseline" ? null : "adjacent_pts",
+    cadence_ms: entry.role === "baseline" ? null : 34,
+    tolerance_ms: entry.role === "baseline" ? null : 134,
+    raw_segment_end_utc: entry.role === "baseline" ? null : "2026-07-20T03:35:00Z",
+    media_validation_outcome: entry.role === "baseline" ? "validated" : "validated",
+  }));
+  return payload;
+}
+
 function loadedConfirmation() {
   return {
     investigation_id: INVESTIGATION_ID,
@@ -840,7 +855,7 @@ test("legacy terminal run without evidence remains readable with a safe unavaila
   await settle();
 
   assert.equal(harness.recordingSearchEvidence.hidden, false);
-  assert.equal(harness.recordingSearchEvidenceStatus.textContent, "이전 실행에는 시각 증거가 보존되지 않았습니다.");
+  assert.equal(harness.recordingSearchEvidenceStatus.textContent, "이 실행에 보존된 시각 증거가 없습니다.");
 });
 
 test("an anchor-only terminal manifest never masquerades as search-end evidence", async () => {
@@ -865,9 +880,175 @@ test("an anchor-only terminal manifest never masquerades as search-end evidence"
   await settle();
 
   assert.equal(harness.recordingSearchEvidence.hidden, false);
-  assert.equal(harness.recordingSearchEndImage.src, undefined);
+  assert.equal(harness.recordingSearchEndImage.hidden, true);
   assert.equal(harness.recordingSearchEndTime.textContent, "");
-  assert.equal(harness.recordingSearchEvidenceStatus.textContent, "이 실행의 시각 증거를 사용할 수 없습니다.");
+  assert.equal(harness.recordingSearchEvidenceStatus.textContent, "이 실행에 보존된 시각 증거가 없습니다.");
+});
+
+test("current 34-key evidence renders an INDETERMINATE observation for visual review", async () => {
+  const payload = currentEvidenceManifest("INCONCLUSIVE");
+  payload.entries[1].state = "INDETERMINATE";
+  payload.entries[1].reason_code = "insufficient_visual_evidence";
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    if (url.endsWith("/evidence")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => payload });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => successorStatus("INCONCLUSIVE", "insufficient_visual_evidence") });
+  }, undefined, { confirmation: true, search: true, evidence: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  await settle();
+
+  assert.equal(harness.recordingSearchEvidence.hidden, false);
+  assert.equal(harness.recordingSearchEvidenceStatus.textContent, "자동 판정이 불확실하므로 직접 비교하세요.");
+  assert.match(harness.recordingSearchBaselineImage.src, /evidence\/a{64}$/);
+  assert.match(harness.recordingSearchEndImage.src, /evidence\/b{64}$/);
+  assert.equal(harness.recordingSearchEndCaption.textContent, "최근 유효 관측");
+});
+
+test("current evidence uses the search-end caption only when the observation reaches the terminal end", async () => {
+  const payload = currentEvidenceManifest("INCONCLUSIVE");
+  payload.entries[1].frame_utc = "2026-07-20T03:35:27.873Z";
+  payload.entries[1].requested_time_utc = "2026-07-20T03:35:27.873Z";
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    if (url.endsWith("/evidence")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => payload });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => successorStatus("INCONCLUSIVE") });
+  }, undefined, { confirmation: true, search: true, evidence: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  await settle();
+
+  assert.equal(harness.recordingSearchEndCaption.textContent, "검색 종료 관측");
+});
+
+test("a verified evidence image failure is reported separately from schema failure", async () => {
+  const payload = currentEvidenceManifest("INCONCLUSIVE");
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    if (url.endsWith("/evidence")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => payload });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => successorStatus("INCONCLUSIVE") });
+  }, undefined, { confirmation: true, search: true, evidence: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  await settle();
+
+  harness.recordingSearchEndImage.listeners.error();
+  assert.equal(harness.recordingSearchEvidenceStatus.textContent, "검증된 시각 증거 이미지를 불러올 수 없습니다.");
+});
+
+test("current evidence rejects malformed nested comparison data", async () => {
+  const payload = currentEvidenceManifest("INCONCLUSIVE");
+  payload.entries[1].comparison.unexpected_metric = 1;
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    if (url.endsWith("/evidence")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => payload });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => successorStatus("INCONCLUSIVE") });
+  }, undefined, { confirmation: true, search: true, evidence: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  await settle();
+
+  assert.equal(harness.recordingSearchEvidenceStatus.textContent, "시각 증거 형식을 안전하게 확인할 수 없습니다.");
+});
+
+test("current evidence rejects a resource identity mismatch", async () => {
+  const payload = currentEvidenceManifest("INCONCLUSIVE");
+  payload.entries[1].reference_frame_resource_id = "foreign-resource";
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    if (url.endsWith("/evidence")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => payload });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => successorStatus("INCONCLUSIVE") });
+  }, undefined, { confirmation: true, search: true, evidence: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  await settle();
+
+  assert.equal(harness.recordingSearchEvidenceStatus.textContent, "시각 증거 형식을 안전하게 확인할 수 없습니다.");
+});
+
+test("current evidence accepts all closed transport metadata values and rejects unknown keys", async () => {
+  const fields = [
+    ["acquisition_mode", "invalid"],
+    ["cadence_ms", -1],
+    ["cadence_ms", Number.NaN],
+    ["cadence_ms", Number.POSITIVE_INFINITY],
+    ["cadence_ms", 10001],
+    ["tolerance_ms", -1],
+    ["tolerance_ms", 2001],
+    ["cadence_source", "other"],
+    ["media_validation_outcome", "unknown"],
+    ["raw_segment_end_utc", "not-a-timestamp"],
+    ["target_delta_ms", -1],
+    ["target_delta_ms", 10001],
+    ["unknown_key", true],
+  ];
+  for (const [field, value] of fields) {
+    const payload = currentEvidenceManifest("INCONCLUSIVE");
+    payload.entries[1][field] = value;
+    const harness = createHarness((url) => {
+      if (url === "/api/v1/recording-searches") {
+        return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+      }
+      if (url.endsWith("/evidence")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => payload });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => successorStatus("INCONCLUSIVE") });
+    }, undefined, { confirmation: true, search: true, evidence: true, requestId: REQUEST_ID });
+    dispatchConfirmed(harness);
+    harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+    harness.recordingSearchEnd.listeners.input();
+    harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+    await settle();
+    harness.runTimers();
+    await settle();
+    await settle();
+    assert.equal(harness.recordingSearchEvidenceStatus.textContent, "시각 증거 형식을 안전하게 확인할 수 없습니다.", field);
+  }
 });
 
 test("an exact missing polled run never inherits another run and is permanent", async () => {

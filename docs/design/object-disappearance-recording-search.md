@@ -215,13 +215,18 @@ JPEGs (plus bounded ROI crops), actual frame timing, source dimensions, ROI and
 classifier metrics. The read-only evidence and digest-addressed JPEG routes are
 bound to the exact investigation/run identity and strictly reopen the manifest
 before serving bytes. The browser loads that projection lazily and fails closed
-for legacy runs without evidence; it shows the baseline/end comparison for
-every terminal result, and for `FOUND` also shows the persisted last-present and
-first-absent bracket frames. Images can be opened at full size, while additional
-coarse observations remain collapsed and text-only until expanded. It does
-not alter replay, thresholds, or classification policy. FOUND review clips
-remain unavailable until the Phase 8 contract supplies one, and are explicitly
-labelled unavailable without hiding the image evidence.
+for runs without evidence or with malformed evidence; legacy manifests and the
+current additive transport metadata are both accepted. It shows the verified
+baseline and the latest valid observation for every terminal result, including
+`INCONCLUSIVE` observations (which are labelled for direct visual review), and
+for `FOUND` also shows the persisted last-present and first-absent bracket
+frames. The latest observation is labelled as the search-end observation only
+when its timestamp reaches the terminal observed end; otherwise it is labelled
+as a recent valid observation. Images can be opened at full size, while
+additional coarse observations remain collapsed and text-only until expanded.
+It does not alter replay, thresholds, or classification policy. FOUND review
+clips remain unavailable until the Phase 8 contract supplies one, and are
+explicitly labelled unavailable without hiding the image evidence.
 
 Slice 2 separates the semantic observation horizon from its replay transport
 window. Each normalized coverage item retains its raw assigned segment bounds;

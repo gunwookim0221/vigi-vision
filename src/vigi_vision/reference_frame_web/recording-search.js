@@ -24,6 +24,7 @@
   const endImage = document.querySelector("#recording-search-end-image");
   const endRoi = document.querySelector("#recording-search-end-roi");
   const endTime = document.querySelector("#recording-search-end-time");
+  const endCaption = document.querySelector("#recording-search-end-caption");
   const endHighlight = document.querySelector("#recording-search-end-highlight");
   const evidenceMetrics = document.querySelector("#recording-search-evidence-metrics");
   const coarseEvidence = document.querySelector("#recording-search-coarse-evidence");
@@ -273,6 +274,16 @@
     return typeof value === "string"
       && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)$/.test(value)
       && !Number.isNaN(new Date(value).getTime());
+  }
+
+  function validEvidenceUtc(value) {
+    return typeof value === "string"
+      && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/.test(value)
+      && !Number.isNaN(new Date(value).getTime());
+  }
+
+  function evidenceUtcMillis(value) {
+    return validEvidenceUtc(value) ? new Date(value).getTime() : null;
   }
 
   function setStatus(message, state, busy = false) {
@@ -752,9 +763,148 @@
   }
 
   function evidenceUrl(entry) {
-    if (entry === null || typeof entry !== "object" || typeof entry.digest !== "string") return null;
-    if (!/^[0-9a-f]{64}$/.test(entry.digest) || activeRun === null) return null;
-    return `/api/v1/recording-searches/${encodeURIComponent(activeRun.investigationId)}/${encodeURIComponent(activeRun.runId)}/evidence/${entry.digest}`;
+    if (entry === null || typeof entry !== "object" || activeRun === null) return null;
+    const digest = typeof entry.digest === "string" ? entry.digest : entry.roi_digest;
+    if (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest)) return null;
+    return `/api/v1/recording-searches/${encodeURIComponent(activeRun.investigationId)}/${encodeURIComponent(activeRun.runId)}/evidence/${digest}`;
+  }
+
+  function evidenceDigest(entry) {
+    if (entry === null || typeof entry !== "object") return null;
+    return typeof entry.digest === "string" ? entry.digest
+      : typeof entry.roi_digest === "string" ? entry.roi_digest : null;
+  }
+
+  const LEGACY_EVIDENCE_ENTRY_KEYS = Object.freeze([
+    "role", "plan_id", "observation_id", "target_id", "acquisition_id",
+    "assigned_segment_id", "requested_time_utc", "frame_utc", "frame_pts_seconds",
+    "frame_ordinal", "frame_offset_seconds", "digest", "width", "height",
+    "authority_identity", "reference_frame_resource_id", "roi_identity",
+    "classifier_policy_identity", "acquisition_status", "state", "reason_code",
+    "comparison", "classifier_stage", "classifier_elapsed_ms", "path", "roi_path",
+    "roi_digest",
+  ]);
+  const CURRENT_EVIDENCE_ENTRY_KEYS = Object.freeze([
+    ...LEGACY_EVIDENCE_ENTRY_KEYS,
+    "acquisition_mode", "target_delta_ms", "cadence_source", "cadence_ms",
+    "tolerance_ms", "raw_segment_end_utc", "media_validation_outcome",
+  ]);
+  const EVIDENCE_ROLES = new Set(["baseline", "baseline_link", "anchor", "observation"]);
+  const EVIDENCE_ACQUISITION_STATUSES = new Set([
+    "FRAME_AVAILABLE", "UNAVAILABLE_GAP", "RECORDING_UNAVAILABLE", "REPLAY_TIMEOUT",
+    "REPLAY_FAILED", "DECODE_TIMEOUT", "DECODE_UNAVAILABLE",
+  ]);
+  const EVIDENCE_STATES = new Set([
+    "PRESENT", "ABSENT", "INDETERMINATE", "UNAVAILABLE_GAP", "RECORDING_UNAVAILABLE",
+    "REPLAY_TIMEOUT", "REPLAY_FAILED", "DECODE_TIMEOUT", "DECODE_UNAVAILABLE",
+    "CLASSIFIER_TIMEOUT", "CLASSIFIER_FAILED",
+  ]);
+  const EVIDENCE_REASONS = new Set([
+    "disappearance_confirmed", "complete_present_coverage", "incomplete_coverage",
+    "indeterminate_observation", "insufficient_visual_evidence", "invalid_frame_or_roi",
+    "frame_decode_failed", "frame_resolution_mismatch", "target_unavailable_gap",
+    "target_recording_unavailable", "target_replay_timeout", "target_replay_failed",
+    "target_decode_timeout", "target_decode_unavailable", "classifier_timeout",
+    "classifier_failed", "midpoint_gap", "midpoint_acquisition_unavailable",
+    "midpoint_indeterminate", "midpoint_classification_unavailable", "no_progress",
+    "no_present_absent_bracket", "cancelled", "internal_error", "invalid_mask",
+    "background_dominant", "insufficient_mask_overlap", "insufficient_comparison_area",
+    "zero_luma_variance",
+  ]);
+  const COMPARISON_KEYS = new Set([
+    "baseline_mask_pixel_count", "probe_mask_pixel_count", "roi_pixel_count",
+    "mask_intersection_pixel_count", "mask_union_pixel_count", "baseline_mask_coverage",
+    "probe_mask_coverage", "mask_iou", "effective_comparison_area", "roi_luma_ncc",
+    "comparison_mode", "baseline_support_pixel_count", "baseline_support_luma_similarity",
+    "baseline_support_luma_ncc", "baseline_support_edge_similarity",
+    "baseline_support_change_ratio", "baseline_support_foreground_retention",
+    "baseline_support_background_change_ratio", "baseline_support_alignment_dx",
+    "baseline_support_alignment_dy", "baseline_support_alignment_rotation_degrees",
+    "baseline_support_alignment_overlap", "baseline_support_alignment_score",
+    "baseline_support_alignment_margin", "visual_status", "unusable_reason",
+  ]);
+  const MAX_TARGET_METADATA_MS = 10_000;
+  const MAX_TOLERANCE_METADATA_MS = 2_000;
+
+  function validFiniteNumber(value) {
+    return typeof value === "number" && Number.isFinite(value);
+  }
+
+  function validNullableString(value) {
+    return value === null || (typeof value === "string" && value !== "");
+  }
+
+  function validComparison(value) {
+    if (value === null) return true;
+    if (typeof value !== "object" || Array.isArray(value)) return false;
+    if (Object.keys(value).some((key) => !COMPARISON_KEYS.has(key))) return false;
+    if (value.visual_status !== undefined && value.visual_status !== null
+      && !["comparable", "unusable", "COMPARABLE", "UNUSABLE"].includes(value.visual_status)) return false;
+    if (value.unusable_reason !== undefined
+      && value.unusable_reason !== null
+      && !["invalid_mask", "background_dominant", "insufficient_mask_overlap",
+        "insufficient_comparison_area", "zero_luma_variance"].includes(value.unusable_reason)) return false;
+    if (value.comparison_mode !== undefined
+      && value.comparison_mode !== null
+      && !["baseline_support_v1", "baseline_support_v2", "baseline_support_v3"].includes(value.comparison_mode)) return false;
+    return Object.entries(value).every(([key, item]) => [
+      "visual_status", "unusable_reason", "comparison_mode",
+    ].includes(key) || item === null || validFiniteNumber(item));
+  }
+
+  function validTransportMetadata(entry, current) {
+    if (!current) return true;
+    const validBoundedInt = (value, maximum, allowZero) => value === null
+      || (Number.isInteger(value) && (allowZero ? value >= 0 : value > 0) && value <= maximum);
+    return ["normal", "segment_end_fallback"].includes(entry.acquisition_mode)
+      && validBoundedInt(entry.target_delta_ms, MAX_TARGET_METADATA_MS, true)
+      && (entry.cadence_source === null || entry.cadence_source === "adjacent_pts")
+      && validBoundedInt(entry.cadence_ms, MAX_TARGET_METADATA_MS, false)
+      && validBoundedInt(entry.tolerance_ms, MAX_TOLERANCE_METADATA_MS, false)
+      && (entry.raw_segment_end_utc === null || validEvidenceUtc(entry.raw_segment_end_utc))
+      && ["not_attempted", "validated", "failed"].includes(entry.media_validation_outcome);
+  }
+
+  function validEvidenceEntry(entry, payload) {
+    const current = hasExactKeys(entry, CURRENT_EVIDENCE_ENTRY_KEYS);
+    const legacy = hasExactKeys(entry, LEGACY_EVIDENCE_ENTRY_KEYS);
+    if ((!current && !legacy)
+      || !EVIDENCE_ROLES.has(entry.role)
+      || entry.plan_id !== payload.plan_id
+      || entry.authority_identity !== payload.authority_identity
+      || entry.roi_identity !== payload.roi_identity
+      || !EVIDENCE_ACQUISITION_STATUSES.has(entry.acquisition_status)
+      || !EVIDENCE_STATES.has(entry.state)
+      || !validNullableString(entry.target_id)
+      || !validNullableString(entry.acquisition_id)
+      || !validNullableString(entry.assigned_segment_id)
+      || !validNullableString(entry.reference_frame_resource_id)
+      || !validNullableString(entry.classifier_policy_identity)
+      || !validEvidenceUtc(entry.requested_time_utc)
+      || (entry.frame_utc !== null && !validEvidenceUtc(entry.frame_utc))
+      || (entry.frame_pts_seconds !== null && (!validFiniteNumber(entry.frame_pts_seconds) || entry.frame_pts_seconds < 0))
+      || (entry.frame_ordinal !== null && (!Number.isInteger(entry.frame_ordinal) || entry.frame_ordinal <= 0))
+      || (entry.frame_offset_seconds !== null && !validFiniteNumber(entry.frame_offset_seconds))
+      || (entry.reason_code !== null && (!EVIDENCE_REASONS.has(entry.reason_code)))
+      || (entry.classifier_stage !== null && !["completed", "timeout", "failed"].includes(entry.classifier_stage))
+      || (entry.classifier_elapsed_ms !== null && (!Number.isInteger(entry.classifier_elapsed_ms) || entry.classifier_elapsed_ms < 0))
+      || !validComparison(entry.comparison)
+      || !validTransportMetadata(entry, current)) return false;
+    const validDigest = (value) => value === null || (typeof value === "string" && /^[0-9a-f]{64}$/.test(value));
+    if (!validDigest(entry.digest) || !validDigest(entry.roi_digest)
+      || (entry.digest === null) !== (entry.path === null)
+      || (entry.digest !== null && entry.path !== `frames/${entry.digest}.jpg`)
+      || (entry.roi_digest === null) !== (entry.roi_path === null)
+      || (entry.roi_digest !== null && entry.roi_path !== `frames/${entry.roi_digest}.jpg`)) return false;
+    if (entry.acquisition_status === "FRAME_AVAILABLE"
+      && (evidenceDigest(entry) === null || entry.frame_utc === null
+        || entry.width !== payload.source_width || entry.height !== payload.source_height)) return false;
+    if (entry.acquisition_status !== "FRAME_AVAILABLE"
+      && (entry.width !== null || entry.height !== null || entry.frame_utc !== null)) return false;
+    if (entry.role === "baseline" && (entry.observation_id !== null || evidenceDigest(entry) === null || entry.state !== "PRESENT")) return false;
+    if (entry.role !== "baseline" && !validNullableString(entry.observation_id)) return false;
+    if (entry.state === "INDETERMINATE" && entry.reason_code === null) return false;
+    return true;
   }
 
   function validEvidence(payload) {
@@ -781,50 +931,51 @@
       || payload.roi.x + payload.roi.width > payload.source_width
       || payload.roi.y + payload.roi.height > payload.source_height
       || !["FOUND", "NOT_FOUND", "INCONCLUSIVE", "FAILED", "INTERRUPTED"].includes(payload.terminal_status)
-      || (payload.terminal_reason !== null && typeof payload.terminal_reason !== "string")
+      || (payload.terminal_reason !== null && (!EVIDENCE_REASONS.has(payload.terminal_reason)))
       || (payload.last_present_observation_id !== null && typeof payload.last_present_observation_id !== "string")
       || (payload.first_absent_observation_id !== null && typeof payload.first_absent_observation_id !== "string")
       || !hasExactKeys(payload.review_clip, ["status", "reason"])
       || !["UNAVAILABLE", "READY"].includes(payload.review_clip.status)
       || typeof payload.review_clip.reason !== "string"
-      || !Array.isArray(payload.entries) || payload.entries.length === 0 || payload.entries.length > 64) {
-      return false;
-    }
-    const entryKeys = [
-      "role", "plan_id", "observation_id", "target_id", "acquisition_id",
-      "assigned_segment_id", "requested_time_utc", "frame_utc", "frame_pts_seconds",
-      "frame_ordinal", "frame_offset_seconds", "digest", "width", "height",
-      "authority_identity", "reference_frame_resource_id", "roi_identity",
-      "classifier_policy_identity", "acquisition_status", "state", "reason_code",
-      "comparison", "classifier_stage", "classifier_elapsed_ms", "path", "roi_path",
-      "roi_digest",
-    ];
-    return payload.entries.every((entry) => {
-      if (!hasExactKeys(entry, entryKeys)
-        || !["baseline", "baseline_link", "anchor", "observation"].includes(entry.role)
-        || entry.plan_id !== payload.plan_id
-        || entry.authority_identity !== payload.authority_identity
-        || entry.roi_identity !== payload.roi_identity
-        || !["FRAME_AVAILABLE", "UNAVAILABLE_GAP", "RECORDING_UNAVAILABLE", "REPLAY_TIMEOUT", "REPLAY_FAILED", "DECODE_TIMEOUT", "DECODE_UNAVAILABLE"].includes(entry.acquisition_status)
-        || !["PRESENT", "ABSENT", "INDETERMINATE", "UNAVAILABLE_GAP", "RECORDING_UNAVAILABLE", "REPLAY_TIMEOUT", "REPLAY_FAILED", "DECODE_TIMEOUT", "DECODE_UNAVAILABLE", "CLASSIFIER_TIMEOUT", "CLASSIFIER_FAILED"].includes(entry.state)) return false;
-      const validDigest = (value) => value === null || (typeof value === "string" && /^[0-9a-f]{64}$/.test(value));
-      if (!validDigest(entry.digest) || !validDigest(entry.roi_digest)) return false;
-      if ((entry.digest === null) !== (entry.path === null)
-        || (entry.digest !== null && entry.path !== `frames/${entry.digest}.jpg`)
-        || (entry.roi_digest === null) !== (entry.roi_path === null)
-        || (entry.roi_digest !== null && entry.roi_path !== `frames/${entry.roi_digest}.jpg`)) return false;
-      if (entry.acquisition_status === "FRAME_AVAILABLE"
-        && (entry.width !== payload.source_width || entry.height !== payload.source_height)) return false;
-      if (entry.acquisition_status !== "FRAME_AVAILABLE" && (entry.width !== null || entry.height !== null)) return false;
-      if (entry.comparison !== null && (typeof entry.comparison !== "object" || Array.isArray(entry.comparison))) return false;
-      return true;
-    });
+      || !Array.isArray(payload.entries) || payload.entries.length === 0 || payload.entries.length > 64
+      || payload.entries.filter((entry) => entry?.role === "baseline").length !== 1) return false;
+    if (!payload.entries.every((entry) => validEvidenceEntry(entry, payload))) return false;
+    const baseline = payload.entries.find((entry) => entry.role === "baseline");
+    if (baseline === undefined) return false;
+    return payload.entries.every((entry) => entry.reference_frame_resource_id === baseline.reference_frame_resource_id
+      && (entry.role !== "baseline_link" || entry.digest === baseline.digest));
   }
 
   function setEvidenceImage(image, src) {
     if (image == null) return;
     image.src = src;
     image.hidden = false;
+  }
+
+  function clearEvidencePresentation() {
+    for (const image of [
+      baselineImage, baselineRoi, endImage, endRoi,
+      lastPresentImage, lastPresentRoi, firstAbsentImage, firstAbsentRoi,
+    ]) {
+      if (image == null) continue;
+      image.hidden = true;
+      image.removeAttribute?.("src");
+    }
+    for (const highlight of [
+      baselineHighlight, endHighlight, lastPresentHighlight, firstAbsentHighlight,
+    ]) {
+      if (highlight != null) highlight.hidden = true;
+    }
+    if (foundEvidence != null) foundEvidence.hidden = true;
+    if (evidenceMetrics != null) {
+      evidenceMetrics.replaceChildren();
+      evidenceMetrics.hidden = true;
+    }
+    if (coarseList != null) coarseList.replaceChildren();
+    if (coarseEvidence != null) coarseEvidence.hidden = true;
+    if (endCaption != null) endCaption.textContent = "검색 종료 관측";
+    if (baselineTime != null) baselineTime.textContent = "";
+    if (endTime != null) endTime.textContent = "";
   }
 
   function setEvidenceHighlight(highlight, roi, sourceWidth, sourceHeight) {
@@ -845,21 +996,25 @@
     if (evidencePanel == null || !validEvidence(payload)) return;
     const entries = payload.entries.filter((item) => item && typeof item === "object");
     const baseline = entries.find((item) => item.role === "baseline");
-    const observed = entries.filter((item) => item.role !== "baseline"
-      && typeof item.frame_utc === "string" && typeof item.digest === "string")
-      .sort((left, right) => String(left.frame_utc).localeCompare(String(right.frame_utc)));
+    const observed = entries.filter((item) => item.role === "observation"
+      && validEvidenceUtc(item.frame_utc) && evidenceDigest(item) !== null)
+      .sort((left, right) => {
+        const byFrame = evidenceUtcMillis(left.frame_utc) - evidenceUtcMillis(right.frame_utc);
+        if (byFrame !== 0) return byFrame;
+        return String(left.observation_id).localeCompare(String(right.observation_id));
+      });
     const coarseObserved = observed.filter((item) => item.role === "observation");
     let ending = coarseObserved.at(-1) ?? null;
     if (ending === null && terminalPayload?.status === "FOUND") {
       const terminalAbsent = entries.find((item) => item.observation_id === payload.first_absent_observation_id
-        && typeof item.digest === "string");
+        && evidenceDigest(item) !== null);
       ending = terminalAbsent ?? null;
     }
     const roi = payload.roi;
     const sourceWidth = payload.source_width;
     const sourceHeight = payload.source_height;
     if (baseline === undefined || ending === null) {
-      evidenceStatus.textContent = "이 실행의 시각 증거를 사용할 수 없습니다.";
+      evidenceStatus.textContent = "이 실행에 보존된 시각 증거가 없습니다.";
       evidencePanel.hidden = false;
       return;
     }
@@ -880,14 +1035,22 @@
     setEvidenceImage(endRoi, endingRoiSrc);
     baselineTime.textContent = baseline.frame_utc ?? baseline.requested_time_utc;
     endTime.textContent = ending.frame_utc ?? ending.requested_time_utc;
+    const observedEnd = terminalPayload?.terminal_details?.observed_end_time_utc;
+    const observedEndMillis = evidenceUtcMillis(observedEnd);
+    const isSearchEnd = observedEndMillis !== null
+      && (evidenceUtcMillis(ending.frame_utc) === observedEndMillis
+        || evidenceUtcMillis(ending.requested_time_utc) === observedEndMillis);
+    if (endCaption != null) {
+      endCaption.textContent = isSearchEnd ? "검색 종료 관측" : "최근 유효 관측";
+    }
     setEvidenceHighlight(baselineHighlight, roi, sourceWidth, sourceHeight);
     setEvidenceHighlight(endHighlight, roi, sourceWidth, sourceHeight);
     if (foundEvidence != null) foundEvidence.hidden = true;
     if (terminalPayload?.status === "FOUND" && foundEvidence != null) {
       const present = entries.find((item) => item.observation_id === payload.last_present_observation_id
-        && typeof item.digest === "string");
+        && evidenceDigest(item) !== null);
       const absent = entries.find((item) => item.observation_id === payload.first_absent_observation_id
-        && typeof item.digest === "string");
+        && evidenceDigest(item) !== null);
       const presentSrc = evidenceUrl(present);
       const absentSrc = evidenceUrl(absent);
       if (present !== undefined && absent !== undefined && presentSrc !== null && absentSrc !== null) {
@@ -908,7 +1071,11 @@
         }
       }
     }
-    evidenceStatus.textContent = "기준 프레임과 실제 관측 프레임을 비교할 수 있습니다.";
+    evidenceStatus.textContent = (ending.state === "INDETERMINATE"
+      || terminalPayload?.status === "INCONCLUSIVE"
+      && ["indeterminate_observation", "insufficient_visual_evidence"].includes(terminalPayload.reason_code))
+      ? "자동 판정이 불확실하므로 직접 비교하세요."
+      : "기준 프레임과 실제 관측 프레임을 비교할 수 있습니다.";
     const comparison = ending.comparison;
     if (comparison !== null && typeof comparison === "object" && evidenceMetrics !== null) {
       evidenceMetrics.replaceChildren();
@@ -970,21 +1137,22 @@
   async function loadEvidence(payload) {
     if (evidencePanel == null || activeRun === null || !TERMINAL.has(payload?.status)) return;
     evidencePanel.hidden = false;
+    clearEvidencePresentation();
     evidenceStatus.textContent = "증거를 불러오는 중입니다…";
     try {
       const response = await fetch(`/api/v1/recording-searches/${encodeURIComponent(activeRun.investigationId)}/${encodeURIComponent(activeRun.runId)}/evidence`);
       const body = await response.json().catch(() => null);
       if (response.status === 404) {
-        evidenceStatus.textContent = "이전 실행에는 시각 증거가 보존되지 않았습니다.";
+        evidenceStatus.textContent = "이 실행에 보존된 시각 증거가 없습니다.";
         return;
       }
       if (!response.ok || !validEvidence(body)) {
-        evidenceStatus.textContent = "시각 증거를 안전하게 확인할 수 없습니다.";
+        evidenceStatus.textContent = "시각 증거 형식을 안전하게 확인할 수 없습니다.";
         return;
       }
       renderEvidence(body, payload);
     } catch (_caught) {
-      evidenceStatus.textContent = "시각 증거를 불러오지 못했습니다.";
+      evidenceStatus.textContent = "검증된 시각 증거 이미지를 불러올 수 없습니다.";
     }
   }
 
@@ -1006,7 +1174,7 @@
     image.addEventListener("click", open);
     image.addEventListener("error", () => {
       image.hidden = true;
-      if (evidenceStatus != null) evidenceStatus.textContent = "시각 증거 이미지를 안전하게 불러오지 못했습니다.";
+      if (evidenceStatus != null) evidenceStatus.textContent = "검증된 시각 증거 이미지를 불러올 수 없습니다.";
     });
     image.addEventListener("keydown", (event) => {
       if (event?.key !== "Enter" && event?.key !== " ") return;
