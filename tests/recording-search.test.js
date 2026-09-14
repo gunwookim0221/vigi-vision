@@ -931,6 +931,13 @@ test("Schema 8 evidence review projects scene and alignment observability", asyn
     baseline_support_alignment_state: "aligned",
     baseline_support_scene_stable: true,
     baseline_support_scene_stability_veto_reason: null,
+    baseline_support_present_gate_passed: false,
+    baseline_support_absent_gate_passed: true,
+    baseline_support_empty_background_evidence: true,
+    baseline_support_replacement_evidence: false,
+    baseline_support_occlusion_evidence: false,
+    baseline_support_decision_path: "absent",
+    baseline_support_decision_reason: "absent_empty_background",
   };
   const harness = createHarness((url) => {
     if (url === "/api/v1/recording-searches") {
@@ -954,6 +961,10 @@ test("Schema 8 evidence review projects scene and alignment observability", asyn
   assert.match(metrics, /Alignment statealigned/);
   assert.match(metrics, /Scene stabilitytrue/);
   assert.match(metrics, /Stability changed pixels100/);
+  assert.match(metrics, /Decision pathabsent/);
+  assert.match(metrics, /Decision reasonabsent_empty_background/);
+  assert.equal(harness.recordingSearchEvidenceDecision.textContent, "세부 판정 경로: 객체 없음 및 빈 배경 확인");
+  assert.equal(harness.recordingSearchEvidenceDecision.hidden, false);
 });
 
 test("current evidence uses the search-end caption only when the observation reaches the terminal end", async () => {

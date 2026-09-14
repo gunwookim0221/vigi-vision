@@ -271,6 +271,7 @@ function createHarness(
     [
       ["#recording-search-evidence", "section"],
       ["#recording-search-evidence-status", "p"],
+      ["#recording-search-evidence-decision", "p"],
       ["#recording-search-baseline-image", "img"],
       ["#recording-search-baseline-roi", "img"],
       ["#recording-search-baseline-time", "p"],
@@ -526,6 +527,7 @@ function createHarness(
     recordingSearchObservedRange: elements.get("#recording-search-observed-range"),
     recordingSearchEvidence: elements.get("#recording-search-evidence"),
     recordingSearchEvidenceStatus: elements.get("#recording-search-evidence-status"),
+    recordingSearchEvidenceDecision: elements.get("#recording-search-evidence-decision"),
     recordingSearchEvidenceMetrics: elements.get("#recording-search-evidence-metrics"),
     recordingSearchBaselineImage: elements.get("#recording-search-baseline-image"),
     recordingSearchBaselineRoi: elements.get("#recording-search-baseline-roi"),

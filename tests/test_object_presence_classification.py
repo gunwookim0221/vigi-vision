@@ -196,6 +196,48 @@ def _comparable(
     )
 
 
+def _run_b_ambiguous_absent_comparison() -> RawComparison:
+    """Redacted metric projection from the preserved real disappearance run."""
+    return RawComparison(
+        baseline_mask_pixel_count=9101,
+        probe_mask_pixel_count=13770,
+        roi_pixel_count=13770,
+        mask_intersection_pixel_count=9101,
+        mask_union_pixel_count=13770,
+        baseline_mask_coverage=0.66093,
+        probe_mask_coverage=1.0,
+        mask_iou=0.66093,
+        effective_comparison_area=None,
+        roi_luma_ncc=0.118991,
+        visual_status=VisualStatus.COMPARABLE,
+        unusable_reason=None,
+        comparison_mode="baseline_support_v3",
+        baseline_support_pixel_count=9101,
+        baseline_support_luma_similarity=0.78519,
+        baseline_support_luma_ncc=-0.010106,
+        baseline_support_edge_similarity=0.903789,
+        baseline_support_change_ratio=0.641138,
+        baseline_support_foreground_retention=0.140951,
+        baseline_support_background_change_ratio=0.188086,
+        baseline_support_alignment_dx=-15,
+        baseline_support_alignment_dy=8,
+        baseline_support_alignment_rotation_degrees=-5,
+        baseline_support_alignment_overlap=0.862982,
+        baseline_support_alignment_score=0.441883,
+        baseline_support_alignment_margin=0.001846,
+        baseline_support_stability_pixel_count=13770,
+        baseline_support_stability_changed_pixel_count=281,
+        baseline_support_stability_valid_pixel_count=1494,
+        baseline_support_stability_excluded_pixel_count=12276,
+        baseline_support_alignment_candidates_generated=385,
+        baseline_support_alignment_candidates_evaluated=385,
+        baseline_support_alignment_valid_candidates=385,
+        baseline_support_alignment_state="ambiguous",
+        baseline_support_scene_stable=True,
+        baseline_support_scene_stability_veto_reason=None,
+    )
+
+
 def _input(
     baseline_mask: BinaryMask | None = None,
     probe_mask: BinaryMask | None = None,
@@ -393,6 +435,30 @@ def test_baseline_support_v3_reclassifies_removed_shoe_as_absent() -> None:
     assert result.comparison.comparison_mode == "baseline_support_v3"
     assert result.comparison.baseline_support_alignment_margin is not None
     assert result.comparison.baseline_support_alignment_margin < 0.02
+    assert result.comparison.baseline_support_decision_path == "absent"
+    assert result.comparison.baseline_support_decision_reason == "absent_empty_background"
+    assert result.comparison.baseline_support_absent_gate_passed is True
+    assert result.comparison.baseline_support_empty_background_evidence is True
+
+
+def test_preserved_run_b_absence_does_not_require_alignment_success() -> None:
+    policy = ObjectPresenceDecisionPolicy(
+        classifier_policy_version="test-preserved-run-b-v3",
+        classifier_preprocessing_version="test-preserved-run-b-v3",
+        baseline_support_mode=True,
+        baseline_support_alignment_mode=True,
+        minimum_mask_overlap_for_comparison=0.1,
+        minimum_roi_pixels=1,
+        minimum_clipped_mask_pixels=1,
+    )
+    result = policy.decide(_run_b_ambiguous_absent_comparison())
+    assert result.outcome is ClassificationOutcome.ABSENT
+    assert result.comparison.baseline_support_alignment_state == "ambiguous"
+    assert result.comparison.baseline_support_present_gate_passed is False
+    assert result.comparison.baseline_support_absent_gate_passed is True
+    assert result.comparison.baseline_support_empty_background_evidence is True
+    assert result.comparison.baseline_support_decision_path == "absent"
+    assert result.comparison.baseline_support_decision_reason == "absent_empty_background"
 
 
 def test_baseline_support_v3_accepts_bounded_object_rotation() -> None:
@@ -433,6 +499,7 @@ def test_baseline_support_v3_keeps_large_camera_motion_indeterminate() -> None:
     )
     result = classifier.classify(_support_input(_shift_image(_support_scene(), 5, 5)))
     assert result.outcome is ClassificationOutcome.INDETERMINATE
+    assert result.comparison.baseline_support_decision_reason == "unstable_scene"
 
 
 def test_baseline_support_v3_keeps_occlusion_and_replacement_indeterminate() -> None:
@@ -447,9 +514,8 @@ def test_baseline_support_v3_keeps_occlusion_and_replacement_indeterminate() -> 
         for x in range(7, 15):
             rows[y][x] = (180, 180, 180)
     occluded = DecodedRgbImage.from_rows(tuple(tuple(row) for row in rows))
-    assert (
-        classifier.classify(_support_input(occluded)).outcome is ClassificationOutcome.INDETERMINATE
-    )
+    occluded_result = classifier.classify(_support_input(occluded))
+    assert occluded_result.outcome is ClassificationOutcome.INDETERMINATE
 
     rows = [list(row) for row in probe.pixels]
     for y in range(7, 15):
@@ -457,10 +523,12 @@ def test_baseline_support_v3_keeps_occlusion_and_replacement_indeterminate() -> 
             value = 70 + ((x + y) % 3)
             rows[y][x] = (value, value, value)
     replacement = DecodedRgbImage.from_rows(tuple(tuple(row) for row in rows))
-    assert (
-        classifier.classify(_support_input(replacement)).outcome
-        is ClassificationOutcome.INDETERMINATE
-    )
+    replacement_result = classifier.classify(_support_input(replacement))
+    assert replacement_result.outcome is ClassificationOutcome.INDETERMINATE
+    assert occluded_result.comparison.baseline_support_decision_reason == "roi_occluded"
+    assert occluded_result.comparison.baseline_support_occlusion_evidence is True
+    assert replacement_result.comparison.baseline_support_decision_reason == "replacement_candidate"
+    assert replacement_result.comparison.baseline_support_replacement_evidence is True
 
 
 def test_baseline_support_v3_does_not_let_probe_mask_block_present() -> None:

@@ -245,6 +245,18 @@ It does not alter replay, thresholds, or classification policy. FOUND review
 clips remain unavailable until the Phase 8 contract supplies one, and are
 explicitly labelled unavailable without hiding the image evidence.
 
+The successor classifier exposes an additive asymmetric decision trace in each
+comparable observation. `PRESENT` requires confident identity alignment plus
+stable support appearance. `ABSENT` instead requires independent support loss,
+empty fixed-background evidence, and a stable scene; an ambiguous alignment is
+not an absence veto. `replacement_candidate`, `roi_occluded`,
+`unstable_scene`, `conflicting_visual_evidence`, and
+`insufficient_visual_evidence` remain fail-closed indeterminate reasons. The
+persisted `baseline_support_*_gate_passed` booleans, `baseline_support_decision_path`,
+and `baseline_support_decision_reason` are closed, optional Schema 8 evidence
+for diagnostics and browser projection. Legacy Schema 5–7 rows and older
+successor rows without these fields remain readable.
+
 Slice 2 separates the semantic observation horizon from its replay transport
 window. Each normalized coverage item retains its raw assigned segment bounds;
 when that segment permits, acquisition requests up to five bounded seconds after

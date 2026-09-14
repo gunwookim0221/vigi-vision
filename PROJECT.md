@@ -292,7 +292,14 @@ comparison with bounded local alignment: probe masks remain diagnostic, while
 bounded baseline-support appearance, structure, change, foreground-retention,
 background-stability, and alignment-confidence signals drive the
 conservative `PRESENT`/`ABSENT`/`INDETERMINATE` mapping. Legacy Schema 5–7
-policy identities and reopen behavior remain unchanged.
+policy identities and reopen behavior remain unchanged. The successor decision
+contract is explicitly asymmetric: `PRESENT` requires identity/alignment
+confidence, while `ABSENT` can be established from strong baseline-support
+disappearance, empty fixed-background evidence, and scene stability without a
+successful alignment. Ambiguous registration alone is not an absence veto;
+occlusion, replacement, camera/scene instability, conflicts, and insufficient
+evidence remain fail-closed. Schema 8 persists additive gate booleans and the
+closed decision path/reason for diagnostics and browser review.
 Successor acquisition now preserves raw segment bounds separately from semantic
 coverage, uses bounded post-target replay context to finalize short RTSP media,
 and admits only a decoded frame at or before the requested target. Sentinel

@@ -242,6 +242,13 @@ def test_aligned_baseline_support_comparison_reopens_with_alignment_facts(tmp_pa
         "baseline_support_alignment_overlap": 0.95,
         "baseline_support_alignment_score": 0.87,
         "baseline_support_alignment_margin": 0.12,
+        "baseline_support_present_gate_passed": False,
+        "baseline_support_absent_gate_passed": True,
+        "baseline_support_empty_background_evidence": True,
+        "baseline_support_replacement_evidence": False,
+        "baseline_support_occlusion_evidence": False,
+        "baseline_support_decision_path": "absent",
+        "baseline_support_decision_reason": "absent_empty_background",
         "visual_status": "comparable",
         "unusable_reason": None,
     }

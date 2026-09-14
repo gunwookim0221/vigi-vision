@@ -279,6 +279,13 @@ RawComparison
   baseline_support_alignment_state: aligned | ambiguous | no_valid_candidate | not_required | null
   baseline_support_scene_stable: boolean | null
   baseline_support_scene_stability_veto_reason: global_scene_change | insufficient_stability_area | registration_failed | null
+  baseline_support_present_gate_passed: boolean | null
+  baseline_support_absent_gate_passed: boolean | null
+  baseline_support_empty_background_evidence: boolean | null
+  baseline_support_replacement_evidence: boolean | null
+  baseline_support_occlusion_evidence: boolean | null
+  baseline_support_decision_path: present | absent | indeterminate | null
+  baseline_support_decision_reason: present_identity_retained | absent_empty_background | replacement_candidate | roi_occluded | unstable_scene | conflicting_visual_evidence | insufficient_visual_evidence | null
   visual_status: comparable | unusable
   unusable_reason: closed reason | null
 ```
@@ -304,13 +311,16 @@ stability region excludes the baseline support and an adaptive, bounded
 dilation ring derived from its source-pixel area. It records total, changed,
 valid, and excluded pixels and combines luma, local-gradient, and spatial-extent
 checks: local changes remain stable while coherent broad changes veto the visual
-decision. `PRESENT` requires the positive support similarity,
-NCC, edge, low-change, and foreground-retention gates together. `ABSENT`
-in v2 requires low support NCC and low local-background foreground retention plus a
-stable background; similarity and pixel-change remain diagnostic because exposed
-flooring can preserve their aggregate values. Any conflict, occlusion, registration uncertainty, or
-insufficient support remains `INDETERMINATE` with
-`insufficient_visual_evidence`. These metrics describe the actual
+decision. `PRESENT` requires the positive support similarity, NCC, edge,
+low-change, foreground-retention, stable-scene, and confident-alignment gates
+together. `ABSENT` uses an independent support-disappearance path: low support
+NCC, low local-background foreground retention, sufficient valid fixed-background
+area, and a stable scene. In v2/v3, alignment confidence is deliberately not
+an absence prerequisite; ambiguous or unavailable registration cannot by itself
+veto strong empty-background evidence. Similarity and pixel-change remain
+diagnostic because exposed flooring can preserve their aggregate values. Any
+conflict, occlusion, registration/scene instability, or insufficient support
+remains `INDETERMINATE` with a closed decision reason. These metrics describe the actual
 baseline-coordinate pixels and are not a reinterpretation of legacy Schema
 5–7 evidence rows.
 
@@ -335,8 +345,9 @@ legacy Schema 5–7 policy identity.
 The deterministic fixture matrix fixes the successor gates at support
 similarity `>= 0.70`, support NCC `>= 0.50`, edge similarity `>= 0.60`,
 foreground retention `>= 0.70`, and change ratio `<= 0.30` for `PRESENT`.
-`ABSENT` v2/v3 requires support NCC `<= 0.20` and local-background foreground
-retention `<= 0.30`;
+`ABSENT` v2/v3 requires support NCC `<= 0.20`, local-background foreground
+retention `<= 0.30`, stable valid background support, and sufficient support
+change; it does not require successful alignment.
 support similarity and change ratio remain recorded diagnostics. Edge similarity is
 retained as diagnostic evidence because a stationary background can preserve
 edge energy after the target is removed. In v3, the explicit
@@ -345,7 +356,10 @@ background-change ratio remains diagnostic. A global scene-change or
 insufficient-area veto is persisted with its closed reason. This keeps locally
 revealed flooring from vetoing `ABSENT` while still failing closed for camera
 motion or broad scene instability. The separated bands leave partial
-occlusion and similar-object replacement in the indeterminate region.
+occlusion and similar-object replacement in the indeterminate region. The
+additive gate booleans, decision path, and closed reason are persisted for
+Schema 8 diagnostics and browser review; older rows without them remain
+strictly reopen-compatible.
 
 The local foreground floor is 40 luma levels, paired with the existing 32-level
 change detector; this is a contrast-occupancy definition, not a relaxed result

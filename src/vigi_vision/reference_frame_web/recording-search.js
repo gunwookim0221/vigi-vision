@@ -17,6 +17,7 @@
   const observedRange = document.querySelector("#recording-search-observed-range");
   const evidencePanel = document.querySelector("#recording-search-evidence");
   const evidenceStatus = document.querySelector("#recording-search-evidence-status");
+  const evidenceDecision = document.querySelector("#recording-search-evidence-decision");
   const baselineImage = document.querySelector("#recording-search-baseline-image");
   const baselineRoi = document.querySelector("#recording-search-baseline-roi");
   const baselineTime = document.querySelector("#recording-search-baseline-time");
@@ -164,6 +165,15 @@
     successor_publication_readback_failed: "검색 결과 기록을 다시 확인할 수 없습니다.",
     recording_search_execution_unavailable: "녹화 검색 실행기를 사용할 수 없습니다.",
     internal_error: "검색 작업을 안전하게 완료할 수 없습니다.",
+  });
+  const EVIDENCE_DECISION_MESSAGES = Object.freeze({
+    present_identity_retained: "기존 객체 유지",
+    absent_empty_background: "객체 없음 및 빈 배경 확인",
+    replacement_candidate: "다른 객체로 교체되었을 가능성",
+    roi_occluded: "가림으로 판정 보류",
+    unstable_scene: "카메라/장면 변화로 판정 보류",
+    conflicting_visual_evidence: "시각 증거가 서로 충돌하여 판정 보류",
+    insufficient_visual_evidence: "판정에 필요한 시각 증거가 충분하지 않습니다.",
   });
   let confirmation = null;
   let activeRun = null;
@@ -831,7 +841,11 @@
     "baseline_support_stability_excluded_pixel_count", "baseline_support_alignment_candidates_generated",
     "baseline_support_alignment_candidates_evaluated", "baseline_support_alignment_valid_candidates",
     "baseline_support_alignment_state", "baseline_support_scene_stable",
-    "baseline_support_scene_stability_veto_reason", "visual_status", "unusable_reason",
+    "baseline_support_scene_stability_veto_reason", "baseline_support_present_gate_passed",
+    "baseline_support_absent_gate_passed", "baseline_support_empty_background_evidence",
+    "baseline_support_replacement_evidence", "baseline_support_occlusion_evidence",
+    "baseline_support_decision_path", "baseline_support_decision_reason",
+    "visual_status", "unusable_reason",
   ]);
   const MAX_TARGET_METADATA_MS = 10_000;
   const MAX_TOLERANCE_METADATA_MS = 2_000;
@@ -857,6 +871,16 @@
     if (value.comparison_mode !== undefined
       && value.comparison_mode !== null
       && !["baseline_support_v1", "baseline_support_v2", "baseline_support_v3"].includes(value.comparison_mode)) return false;
+    const decisionValues = [value.baseline_support_present_gate_passed,
+      value.baseline_support_absent_gate_passed, value.baseline_support_empty_background_evidence,
+      value.baseline_support_replacement_evidence, value.baseline_support_occlusion_evidence,
+      value.baseline_support_decision_path, value.baseline_support_decision_reason];
+    if (decisionValues.some((item) => item !== undefined && item !== null)) {
+      if (decisionValues.some((item) => item === undefined || item === null)) return false;
+      if (decisionValues.slice(0, 5).some((item) => typeof item !== "boolean")) return false;
+      if (!["present", "absent", "indeterminate"].includes(value.baseline_support_decision_path)) return false;
+      if (!Object.prototype.hasOwnProperty.call(EVIDENCE_DECISION_MESSAGES, value.baseline_support_decision_reason)) return false;
+    }
     if (value.baseline_support_alignment_state !== undefined
       && value.baseline_support_alignment_state !== null
       && !["aligned", "ambiguous", "no_valid_candidate", "not_required"].includes(value.baseline_support_alignment_state)) return false;
@@ -903,6 +927,10 @@
     return Object.entries(value).every(([key, item]) => [
       "visual_status", "unusable_reason", "comparison_mode", "baseline_support_alignment_state",
       "baseline_support_scene_stable", "baseline_support_scene_stability_veto_reason",
+      "baseline_support_present_gate_passed", "baseline_support_absent_gate_passed",
+      "baseline_support_empty_background_evidence", "baseline_support_replacement_evidence",
+      "baseline_support_occlusion_evidence", "baseline_support_decision_path",
+      "baseline_support_decision_reason",
     ].includes(key) || item === null || validFiniteNumber(item));
   }
 
@@ -1029,6 +1057,10 @@
     if (evidenceMetrics != null) {
       evidenceMetrics.replaceChildren();
       evidenceMetrics.hidden = true;
+    }
+    if (evidenceDecision != null) {
+      evidenceDecision.textContent = "";
+      evidenceDecision.hidden = true;
     }
     if (coarseList != null) coarseList.replaceChildren();
     if (coarseEvidence != null) coarseEvidence.hidden = true;
@@ -1166,6 +1198,13 @@
       ? "자동 판정이 불확실하므로 직접 비교하세요."
       : "기준 프레임과 실제 관측 프레임을 비교할 수 있습니다.";
     const comparison = ending.comparison;
+    if (evidenceDecision != null && comparison !== null && typeof comparison === "object") {
+      const reason = comparison.baseline_support_decision_reason;
+      if (typeof reason === "string" && Object.prototype.hasOwnProperty.call(EVIDENCE_DECISION_MESSAGES, reason)) {
+        evidenceDecision.textContent = `세부 판정 경로: ${EVIDENCE_DECISION_MESSAGES[reason]}`;
+        evidenceDecision.hidden = false;
+      }
+    }
     if (comparison !== null && typeof comparison === "object" && evidenceMetrics !== null) {
       evidenceMetrics.replaceChildren();
       for (const [label, key] of [
@@ -1206,9 +1245,27 @@
         evidenceMetrics.append(row);
       }
       for (const [label, key] of [
+        ["Present gate", "baseline_support_present_gate_passed"],
+        ["Absent gate", "baseline_support_absent_gate_passed"],
+        ["Empty background evidence", "baseline_support_empty_background_evidence"],
+        ["Replacement evidence", "baseline_support_replacement_evidence"],
+        ["Occlusion evidence", "baseline_support_occlusion_evidence"],
+      ]) {
+        if (typeof comparison[key] !== "boolean") continue;
+        const row = document.createElement("div");
+        const term = document.createElement("dt");
+        const value = document.createElement("dd");
+        term.textContent = label;
+        value.textContent = comparison[key] ? "true" : "false";
+        row.append(term, value);
+        evidenceMetrics.append(row);
+      }
+      for (const [label, key] of [
         ["Alignment state", "baseline_support_alignment_state"],
         ["Scene stability", "baseline_support_scene_stable"],
         ["Scene stability veto", "baseline_support_scene_stability_veto_reason"],
+        ["Decision path", "baseline_support_decision_path"],
+        ["Decision reason", "baseline_support_decision_reason"],
       ]) {
         if (comparison[key] === undefined || comparison[key] === null) continue;
         const row = document.createElement("div");

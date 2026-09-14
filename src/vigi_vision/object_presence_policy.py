@@ -32,6 +32,7 @@ _HEX_DIGITS: Final = frozenset("0123456789abcdef")
 _ABSENCE_ALIGNMENT_MAX_TRANSLATION_PIXELS: Final = 2
 _ABSENCE_ALIGNMENT_MAX_ROTATION_DEGREES: Final = 5
 _ABSENCE_ALIGNMENT_NO_CANDIDATE_SCORE_MAXIMUM: Final = 0.40
+_REGISTRATION_STABILITY_MIN_OVERLAP: Final = 0.95
 
 
 class ObjectPresenceDecisionPolicy(BaseModel):
@@ -269,7 +270,7 @@ def _validate_comparable_gates(
 def _decide_baseline_support(
     policy: ObjectPresenceDecisionPolicy, comparison: RawComparison
 ) -> ClassificationResult:
-    """Apply the successor support-space matrix without probe-mask identity."""
+    """Apply asymmetric identity-retention and support-disappearance paths."""
     _validate_baseline_support_gates(policy, comparison)
     similarity = comparison.baseline_support_luma_similarity
     ncc = comparison.baseline_support_luma_ncc
@@ -291,23 +292,11 @@ def _decide_baseline_support(
         and comparison.baseline_support_scene_stable is not None
         else background_change <= policy.baseline_support_background_change_maximum
     )
-    if comparison.comparison_mode != "baseline_support_v3" or (
-        comparison.baseline_support_alignment_state in {"aligned", "not_required"}
-    ):
-        alignment_confident = True
-    elif comparison.baseline_support_alignment_state is not None:
-        alignment_confident = False
-    else:
-        alignment_confident = (
-            comparison.baseline_support_alignment_overlap is not None
-            and comparison.baseline_support_alignment_overlap
-            >= policy.baseline_support_alignment_min_support_overlap
-            and comparison.baseline_support_alignment_margin is not None
-            and comparison.baseline_support_alignment_margin
-            >= policy.baseline_support_alignment_margin_minimum
-        )
-    if (
-        background_stable
+    alignment_confident = _present_alignment_confident(comparison, policy)
+    registration_veto = _registration_stability_veto(comparison)
+    scene_stable = background_stable and not registration_veto
+    present_gate_passed = (
+        scene_stable
         and alignment_confident
         and similarity >= policy.baseline_support_present_similarity_minimum
         and ncc >= policy.baseline_support_present_ncc_minimum
@@ -315,63 +304,156 @@ def _decide_baseline_support(
         and edge >= policy.baseline_support_present_edge_minimum
         and change <= policy.baseline_support_present_change_maximum
         and foreground >= policy.baseline_support_present_foreground_minimum
-    ):
-        return ClassificationResult(
-            outcome=ClassificationOutcome.PRESENT, reason_code=None, comparison=comparison
+    )
+    empty_background = _empty_background_evidence(
+        policy,
+        comparison,
+        scene_stable=scene_stable,
+        ncc=ncc,
+        edge=edge,
+        change=change,
+        foreground=foreground,
+    )
+    occluded = (
+        ncc <= policy.baseline_support_absent_ncc_maximum
+        and policy.baseline_support_absent_foreground_maximum
+        < foreground
+        < policy.baseline_support_present_foreground_minimum
+        and change >= policy.baseline_support_present_change_maximum
+    )
+    replacement = (
+        ncc <= policy.baseline_support_absent_ncc_maximum
+        and foreground > policy.baseline_support_absent_foreground_maximum
+        and not occluded
+    )
+    absent_gate_passed = empty_background and (
+        comparison.comparison_mode in {"baseline_support_v2", "baseline_support_v3"}
+        or (
+            similarity <= policy.baseline_support_absent_similarity_maximum
+            and change >= policy.baseline_support_absent_change_minimum
         )
-    # v2 treats local-background foreground loss plus low support NCC as the
-    # independent absence evidence.  Similarity/change remain diagnostic and
-    # are intentionally not required to agree when newly exposed flooring has
-    # a similar luma distribution to the former object support.
-    if (
-        background_stable
-        and _absence_alignment_safe(comparison)
-        and ncc <= policy.baseline_support_absent_ncc_maximum
-        and foreground <= policy.baseline_support_absent_foreground_maximum
-        and (
-            comparison.comparison_mode in {"baseline_support_v2", "baseline_support_v3"}
-            or (
-                similarity <= policy.baseline_support_absent_similarity_maximum
-                and change >= policy.baseline_support_absent_change_minimum
-            )
-        )
-    ):
-        return ClassificationResult(
-            outcome=ClassificationOutcome.ABSENT, reason_code=None, comparison=comparison
-        )
+    )
+    conflict = present_gate_passed and absent_gate_passed
+    if conflict:
+        outcome = ClassificationOutcome.INDETERMINATE
+        reason = "conflicting_visual_evidence"
+    elif not scene_stable:
+        outcome = ClassificationOutcome.INDETERMINATE
+        reason = "unstable_scene"
+    elif occluded:
+        outcome = ClassificationOutcome.INDETERMINATE
+        reason = "roi_occluded"
+    elif replacement:
+        outcome = ClassificationOutcome.INDETERMINATE
+        reason = "replacement_candidate"
+    elif present_gate_passed:
+        outcome = ClassificationOutcome.PRESENT
+        reason = "present_identity_retained"
+    elif absent_gate_passed:
+        outcome = ClassificationOutcome.ABSENT
+        reason = "absent_empty_background"
+    else:
+        outcome = ClassificationOutcome.INDETERMINATE
+        reason = "insufficient_visual_evidence"
+    annotated = comparison.model_copy(
+        update={
+            "baseline_support_present_gate_passed": present_gate_passed,
+            "baseline_support_absent_gate_passed": absent_gate_passed,
+            "baseline_support_empty_background_evidence": empty_background,
+            "baseline_support_replacement_evidence": replacement,
+            "baseline_support_occlusion_evidence": occluded,
+            "baseline_support_decision_path": {
+                ClassificationOutcome.PRESENT: "present",
+                ClassificationOutcome.ABSENT: "absent",
+                ClassificationOutcome.INDETERMINATE: "indeterminate",
+            }[outcome],
+            "baseline_support_decision_reason": reason,
+        }
+    )
     return ClassificationResult(
-        outcome=ClassificationOutcome.INDETERMINATE,
-        reason_code=VisualReason.INSUFFICIENT_VISUAL_EVIDENCE,
-        comparison=comparison,
+        outcome=outcome,
+        reason_code=(
+            None
+            if outcome is not ClassificationOutcome.INDETERMINATE
+            else VisualReason.INSUFFICIENT_VISUAL_EVIDENCE
+        ),
+        comparison=annotated,
     )
 
 
-def _absence_alignment_safe(comparison: RawComparison) -> bool:
-    """Reject absence when the best transform indicates broad camera motion."""
+def _present_alignment_confident(
+    comparison: RawComparison, policy: ObjectPresenceDecisionPolicy
+) -> bool:
+    """Require trustworthy local identity alignment only for PRESENT."""
     if comparison.comparison_mode != "baseline_support_v3":
         return True
-    state = comparison.baseline_support_alignment_state
-    if state in {None, "aligned", "not_required", "no_valid_candidate"}:
+    if comparison.baseline_support_alignment_state in {"aligned", "not_required"}:
         return True
+    if comparison.baseline_support_alignment_state is not None:
+        return False
+    return (
+        comparison.baseline_support_alignment_overlap is not None
+        and comparison.baseline_support_alignment_overlap
+        >= policy.baseline_support_alignment_min_support_overlap
+        and comparison.baseline_support_alignment_margin is not None
+        and comparison.baseline_support_alignment_margin
+        >= policy.baseline_support_alignment_margin_minimum
+    )
+
+
+def _registration_stability_veto(comparison: RawComparison) -> bool:
+    """Treat a high-overlap, large ambiguous transform as camera instability.
+
+    This is a scene guard, not an ABSENT alignment gate.  An ambiguous
+    transform with low overlap is expected when the object has disappeared and
+    therefore remains eligible for the independent empty-background path.
+    """
+    if comparison.comparison_mode != "baseline_support_v3":
+        return False
+    if comparison.baseline_support_alignment_state != "ambiguous":
+        return False
     dx = comparison.baseline_support_alignment_dx
     dy = comparison.baseline_support_alignment_dy
     rotation = comparison.baseline_support_alignment_rotation_degrees
+    overlap = comparison.baseline_support_alignment_overlap
+    score = comparison.baseline_support_alignment_score
     return (
         dx is not None
         and dy is not None
         and rotation is not None
+        and overlap is not None
+        and overlap >= _REGISTRATION_STABILITY_MIN_OVERLAP
+        and score is not None
+        and score > _ABSENCE_ALIGNMENT_NO_CANDIDATE_SCORE_MAXIMUM
         and (
-            (
-                abs(dx) <= _ABSENCE_ALIGNMENT_MAX_TRANSLATION_PIXELS
-                and abs(dy) <= _ABSENCE_ALIGNMENT_MAX_TRANSLATION_PIXELS
-                and abs(rotation) < _ABSENCE_ALIGNMENT_MAX_ROTATION_DEGREES
-            )
-            or (
-                comparison.baseline_support_alignment_score is not None
-                and comparison.baseline_support_alignment_score
-                <= _ABSENCE_ALIGNMENT_NO_CANDIDATE_SCORE_MAXIMUM
-            )
+            abs(dx) > _ABSENCE_ALIGNMENT_MAX_TRANSLATION_PIXELS
+            or abs(dy) > _ABSENCE_ALIGNMENT_MAX_TRANSLATION_PIXELS
+            or abs(rotation) >= _ABSENCE_ALIGNMENT_MAX_ROTATION_DEGREES
         )
+    )
+
+
+def _empty_background_evidence(  # noqa: PLR0913 - explicit gate inputs keep the contract visible
+    policy: ObjectPresenceDecisionPolicy,
+    comparison: RawComparison,
+    *,
+    scene_stable: bool,
+    ncc: float,
+    edge: float | None,
+    change: float,
+    foreground: float,
+) -> bool:
+    """Combine support loss, reveal change, stable area, and scene safety."""
+    valid_area = comparison.baseline_support_stability_valid_pixel_count
+    return (
+        scene_stable
+        and valid_area is not None
+        and valid_area > 0
+        and ncc <= policy.baseline_support_absent_ncc_maximum
+        and foreground <= policy.baseline_support_absent_foreground_maximum
+        and change >= policy.baseline_support_present_change_maximum
+        and edge is not None
+        and edge >= policy.baseline_support_present_edge_minimum
     )
 
 

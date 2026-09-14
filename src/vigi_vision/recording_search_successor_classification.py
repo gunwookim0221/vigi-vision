@@ -1339,6 +1339,13 @@ def _safe_comparison(comparison: object) -> dict[str, object] | None:
         "baseline_support_alignment_state",
         "baseline_support_scene_stable",
         "baseline_support_scene_stability_veto_reason",
+        "baseline_support_present_gate_passed",
+        "baseline_support_absent_gate_passed",
+        "baseline_support_empty_background_evidence",
+        "baseline_support_replacement_evidence",
+        "baseline_support_occlusion_evidence",
+        "baseline_support_decision_path",
+        "baseline_support_decision_reason",
         "visual_status",
         "unusable_reason",
     }

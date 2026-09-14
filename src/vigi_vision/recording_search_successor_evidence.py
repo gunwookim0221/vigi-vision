@@ -163,6 +163,13 @@ _COMPARISON_KEYS = frozenset(
         "baseline_support_alignment_state",
         "baseline_support_scene_stable",
         "baseline_support_scene_stability_veto_reason",
+        "baseline_support_present_gate_passed",
+        "baseline_support_absent_gate_passed",
+        "baseline_support_empty_background_evidence",
+        "baseline_support_replacement_evidence",
+        "baseline_support_occlusion_evidence",
+        "baseline_support_decision_path",
+        "baseline_support_decision_reason",
         "visual_status",
         "unusable_reason",
     }
@@ -751,6 +758,8 @@ def _valid_comparison(value: object) -> bool:  # noqa: PLR0911
     unusable_reason = payload.get("unusable_reason")
     comparison_mode = payload.get("comparison_mode")
     alignment_state = payload.get("baseline_support_alignment_state")
+    decision_path = payload.get("baseline_support_decision_path")
+    decision_reason = payload.get("baseline_support_decision_reason")
     if alignment_state is not None and alignment_state not in {
         "aligned",
         "ambiguous",
@@ -769,6 +778,32 @@ def _valid_comparison(value: object) -> bool:  # noqa: PLR0911
         "baseline_support_v3",
     }:
         return False
+    decision_values = (
+        payload.get("baseline_support_present_gate_passed"),
+        payload.get("baseline_support_absent_gate_passed"),
+        payload.get("baseline_support_empty_background_evidence"),
+        payload.get("baseline_support_replacement_evidence"),
+        payload.get("baseline_support_occlusion_evidence"),
+        decision_path,
+        decision_reason,
+    )
+    if any(item is not None for item in decision_values):
+        if any(item is None for item in decision_values):
+            return False
+        if any(type(item) is not bool for item in decision_values[:5]):
+            return False
+        if decision_path not in {"present", "absent", "indeterminate"}:
+            return False
+        if decision_reason not in {
+            "present_identity_retained",
+            "absent_empty_background",
+            "replacement_candidate",
+            "roi_occluded",
+            "unstable_scene",
+            "conflicting_visual_evidence",
+            "insufficient_visual_evidence",
+        }:
+            return False
     alignment_keys = {
         "baseline_support_alignment_dx",
         "baseline_support_alignment_dy",
@@ -850,6 +885,13 @@ def _valid_comparison(value: object) -> bool:  # noqa: PLR0911
             "baseline_support_alignment_state",
             "baseline_support_scene_stability_veto_reason",
             "baseline_support_scene_stable",
+            "baseline_support_decision_path",
+            "baseline_support_decision_reason",
+            "baseline_support_present_gate_passed",
+            "baseline_support_absent_gate_passed",
+            "baseline_support_empty_background_evidence",
+            "baseline_support_replacement_evidence",
+            "baseline_support_occlusion_evidence",
         }:
             continue
         if item is None:

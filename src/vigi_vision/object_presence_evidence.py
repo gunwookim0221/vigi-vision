@@ -70,6 +70,13 @@ class RawComparison(BaseModel):
     baseline_support_alignment_state: StrictStr | None = None
     baseline_support_scene_stable: StrictBool | None = None
     baseline_support_scene_stability_veto_reason: StrictStr | None = None
+    baseline_support_present_gate_passed: StrictBool | None = None
+    baseline_support_absent_gate_passed: StrictBool | None = None
+    baseline_support_empty_background_evidence: StrictBool | None = None
+    baseline_support_replacement_evidence: StrictBool | None = None
+    baseline_support_occlusion_evidence: StrictBool | None = None
+    baseline_support_decision_path: StrictStr | None = None
+    baseline_support_decision_reason: StrictStr | None = None
 
     @model_validator(mode="after")
     def validate_closed_matrix(self) -> RawComparison:
@@ -411,6 +418,34 @@ def _validate_successor_observability(comparison: RawComparison) -> None:
         "not_required",
     }:
         raise ValueError
+    decision_values = (
+        comparison.baseline_support_present_gate_passed,
+        comparison.baseline_support_absent_gate_passed,
+        comparison.baseline_support_empty_background_evidence,
+        comparison.baseline_support_replacement_evidence,
+        comparison.baseline_support_occlusion_evidence,
+        comparison.baseline_support_decision_path,
+        comparison.baseline_support_decision_reason,
+    )
+    if any(value is not None for value in decision_values):
+        if any(value is None for value in decision_values):
+            raise ValueError
+        if comparison.baseline_support_decision_path not in {
+            "present",
+            "absent",
+            "indeterminate",
+        }:
+            raise ValueError
+        if comparison.baseline_support_decision_reason not in {
+            "present_identity_retained",
+            "absent_empty_background",
+            "replacement_candidate",
+            "roi_occluded",
+            "unstable_scene",
+            "conflicting_visual_evidence",
+            "insufficient_visual_evidence",
+        }:
+            raise ValueError
 
 
 def _validate_consistency(comparison: RawComparison) -> None:
