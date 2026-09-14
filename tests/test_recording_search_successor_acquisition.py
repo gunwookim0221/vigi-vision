@@ -108,8 +108,16 @@ class _FakeExtractor:
 
 
 class _FakeDecoder:
-    def __init__(self, pts_seconds: float = 5.0) -> None:
+    def __init__(
+        self,
+        pts_seconds: float = 5.0,
+        *,
+        cadence_ms: int | None = None,
+        tolerance_ms: int | None = None,
+    ) -> None:
         self.pts_seconds: float = pts_seconds
+        self.cadence_ms = cadence_ms
+        self.tolerance_ms = tolerance_ms
         self.calls: list[ReferenceFrameDecodeRequest] = []
 
     def decode(self, request: ReferenceFrameDecodeRequest) -> DecodedFrameEvidence:
@@ -122,6 +130,9 @@ class _FakeDecoder:
             48,
             TimingPrecisionStatus.MEASURED_CLIP_RELATIVE,
             (),
+            "adjacent_pts" if self.cadence_ms is not None else None,
+            self.cadence_ms,
+            self.tolerance_ms,
         )
 
 
@@ -172,6 +183,26 @@ def test_window_clips_to_segment_start_and_end() -> None:
     assert window.end_utc == target_time + timedelta(seconds=2)
 
 
+def test_contiguous_next_segment_supplies_normal_post_target_context(tmp_path: Path) -> None:
+    target_time = ANCHOR + timedelta(minutes=10)
+    plan = _plan(
+        (
+            _segment(ANCHOR, target_time),
+            _segment(target_time, ANCHOR + timedelta(minutes=30)),
+        )
+    )
+    target = next(item for item in plan.targets if item.requested_time_utc == target_time)
+    service, planner, extractor = _service(tmp_path, decoder=_FakeDecoder(0.0))
+
+    result = service.acquire(plan, target)
+
+    assert result.status is SuccessorTargetStatus.FRAME_AVAILABLE
+    assert result.acquisition_mode == "normal"
+    assert result.raw_segment_end_utc == plan.segments[1].raw_end_utc
+    assert planner.windows[0][0].start_utc == target_time
+    assert extractor.calls[0].window.end_utc == target_time + timedelta(seconds=5)
+
+
 def test_final_target_window_clips_to_search_end() -> None:
     search_end = ANCHOR + timedelta(seconds=600)
     plan = _plan((_segment(ANCHOR, search_end + timedelta(minutes=2)),), duration_seconds=600)
@@ -197,15 +228,52 @@ def test_transport_window_never_exceeds_raw_segment_end() -> None:
     assert plan.segments[-1].raw_end_utc == raw_end
 
 
-def test_target_without_post_target_segment_margin_does_not_call_replay(tmp_path: Path) -> None:
+def test_segment_end_fallback_acquires_target_before_segment_end(tmp_path: Path) -> None:
     plan = _plan(duration_seconds=600)
-    service, planner, extractor = _service(tmp_path)
+    service, planner, extractor = _service(
+        tmp_path,
+        decoder=_FakeDecoder(4.0, cadence_ms=1_000, tolerance_ms=1_100),
+    )
+
+    result = service.acquire(plan, plan.targets[-1])
+
+    assert result.status is SuccessorTargetStatus.FRAME_AVAILABLE
+    assert result.acquisition_mode == "segment_end_fallback"
+    assert result.frame_utc is not None
+    assert result.frame_utc <= result.requested_time_utc
+    assert result.target_delta_ms == 1_000
+    assert result.cadence_source == "adjacent_pts"
+    assert result.cadence_ms == 1_000
+    assert result.tolerance_ms == 1_100
+    assert result.raw_segment_end_utc == plan.search_end_utc
+    assert len(planner.windows) == len(extractor.calls) == 1
+    assert extractor.calls[0].window.end_utc == plan.search_end_utc
+
+
+def test_segment_end_fallback_without_cadence_fails_closed(tmp_path: Path) -> None:
+    plan = _plan(duration_seconds=600)
+    service, planner, extractor = _service(tmp_path, decoder=_FakeDecoder(4.0))
 
     result = service.acquire(plan, plan.targets[-1])
 
     assert result.status is SuccessorTargetStatus.DECODE_UNAVAILABLE
-    assert not planner.windows
-    assert not extractor.calls
+    assert result.acquisition_mode == "segment_end_fallback"
+    assert result.raw_segment_end_utc == plan.search_end_utc
+    assert len(planner.windows) == len(extractor.calls) == 1
+    assert not extractor.paths[0].exists()
+
+
+def test_segment_end_fallback_rejects_frame_beyond_cadence_tolerance(tmp_path: Path) -> None:
+    plan = _plan(duration_seconds=600)
+    service, _, extractor = _service(
+        tmp_path,
+        decoder=_FakeDecoder(2.0, cadence_ms=1_000, tolerance_ms=1_100),
+    )
+
+    result = service.acquire(plan, plan.targets[-1])
+
+    assert result.status is SuccessorTargetStatus.DECODE_UNAVAILABLE
+    assert not extractor.paths[0].exists()
 
 
 def test_gap_target_never_calls_replay(tmp_path: Path) -> None:
@@ -385,6 +453,72 @@ def test_production_decoder_selects_actual_pts_from_short_media(tmp_path: Path) 
     assert result.frame_utc <= result.requested_time_utc
     assert result.frame_size_bytes == len(result.frame_bytes or b"")
     assert not clip_path.exists()
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="ffmpeg and ffprobe are required for the production-shaped media check",
+)
+def test_production_decoder_accepts_verified_segment_end_frame(tmp_path: Path) -> None:
+    ffmpeg = Path(shutil.which("ffmpeg") or "ffmpeg")
+    ffprobe = Path(shutil.which("ffprobe") or "ffprobe")
+    fixture = tmp_path / "segment-end.mp4"
+    generated = subprocess.run(  # noqa: S603
+        (
+            str(ffmpeg),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x48:rate=10",
+            "-t",
+            "6.5",
+            "-pix_fmt",
+            "yuv420p",
+            "-y",
+            str(fixture),
+        ),
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=15,
+    )
+    assert generated.returncode == 0
+    plan = _plan(duration_seconds=600)
+
+    class FixtureExtractor:
+        def extract(self, request: ReplayRequest) -> ReplayClip:
+            return ReplayClip(
+                request.window.channel_id,
+                request.window.start_utc,
+                request.window.end_utc,
+                request.replay_url,
+                fixture,
+                request.window.duration_seconds,
+            )
+
+    service = SuccessorTargetAcquisitionService(
+        _FakePlanner(),
+        FixtureExtractor(),
+        FfmpegReferenceFrameDecoder(ffmpeg, ffprobe),
+        temporary_directory=tmp_path / "frames",
+    )
+
+    result = service.acquire(plan, plan.targets[-1])
+
+    assert result.status is SuccessorTargetStatus.FRAME_AVAILABLE
+    assert result.acquisition_mode == "segment_end_fallback"
+    assert result.frame_utc is not None
+    assert result.frame_utc <= result.requested_time_utc
+    assert result.target_delta_ms is not None
+    assert result.cadence_ms is not None
+    assert result.tolerance_ms is not None
+    assert result.target_delta_ms <= result.tolerance_ms
+    assert result.raw_segment_end_utc == plan.search_end_utc
+    assert result.media_validation_outcome == "validated"
+    assert not fixture.exists()
 
 
 @pytest.mark.skipif(

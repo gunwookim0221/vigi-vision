@@ -860,6 +860,15 @@ def _observation_record(item: SuccessorObservation) -> dict[str, object]:
         "classifier_stage": item.classifier_stage,
         "classifier_elapsed_ms": item.classifier_elapsed_ms,
         "assigned_segment_id": item.assigned_segment_id,
+        "acquisition_mode": item.acquisition_mode,
+        "target_delta_ms": item.target_delta_ms,
+        "cadence_source": item.cadence_source,
+        "cadence_ms": item.cadence_ms,
+        "tolerance_ms": item.tolerance_ms,
+        "raw_segment_end_utc": (
+            None if item.raw_segment_end_utc is None else _timestamp(item.raw_segment_end_utc)
+        ),
+        "media_validation_outcome": item.media_validation_outcome,
         "authority_identity": item.authority_identity,
         "reference_frame_resource_id": item.reference_frame_resource_id,
         "roi_identity": item.roi_identity,

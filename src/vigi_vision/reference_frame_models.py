@@ -237,6 +237,9 @@ class DecodedFrameEvidence:
     height: int
     timing_precision_status: TimingPrecisionStatus
     warnings: tuple[str, ...]
+    cadence_source: str | None = None
+    cadence_ms: int | None = None
+    tolerance_ms: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

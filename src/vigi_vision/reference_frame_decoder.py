@@ -29,6 +29,8 @@ _ONLY_BEFORE_WARNING: Final = (
     "Only decoded frames before the requested clip position were available."
 )
 _ONLY_AFTER_WARNING: Final = "Only decoded frames after the requested clip position were available."
+_CADENCE_TOLERANCE_EXTRA_MS: Final = 100
+_MAX_CADENCE_TOLERANCE_MS: Final = 2_000
 DecoderRunner = Callable[[tuple[str, ...], float], subprocess.CompletedProcess[str]]
 
 
@@ -58,6 +60,7 @@ class ReferenceFrameDecodeRequest:
     target_offset_seconds: float
     policy: FrameSelectionPolicy
     output_path: Path = field(repr=False)
+    allow_terminal_before: bool = False
 
 
 class ReferenceFrameDecoder(Protocol):
@@ -124,7 +127,10 @@ class FfmpegReferenceFrameDecoder:
         """Write the nearest policy-compliant JPEG from one local replay clip."""
         candidates, width, height = self._probe(request.clip_path)
         selected = select_nearest_candidate(
-            candidates, request.target_offset_seconds, request.policy
+            candidates,
+            request.target_offset_seconds,
+            request.policy,
+            allow_terminal_before=request.allow_terminal_before,
         )
         try:
             request.output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -159,6 +165,9 @@ class FfmpegReferenceFrameDecoder:
                 _SOURCE_MAPPING_WARNING,
                 *_candidate_warnings(candidates, request.target_offset_seconds),
             ),
+            cadence_source="adjacent_pts",
+            cadence_ms=_cadence_ms(candidates),
+            tolerance_ms=_cadence_tolerance_ms(candidates),
         )
 
     def _probe(self, clip_path: Path) -> tuple[tuple[DecodedFrameCandidate, ...], int, int]:
@@ -264,8 +273,10 @@ def select_nearest_candidate(
     candidates: tuple[DecodedFrameCandidate, ...],
     target_offset_seconds: float,
     policy: FrameSelectionPolicy,
+    *,
+    allow_terminal_before: bool = False,
 ) -> DecodedFrameCandidate:
-    """Select the nearest candidate, resolving exact ties toward the earlier frame."""
+    """Select a deterministic candidate without accepting future-only frames."""
     match policy:
         case FrameSelectionPolicy.NEAREST_DECODED_FRAME:
             if not candidates:
@@ -290,9 +301,36 @@ def select_nearest_candidate(
             )
             if exact:
                 return exact[0]
-            if not any(candidate.local_pts_seconds > target for candidate in candidates):
+            if not allow_terminal_before and not any(
+                candidate.local_pts_seconds > target for candidate in candidates
+            ):
                 raise ReferenceFrameNoCandidateError
             return max(eligible, key=lambda candidate: candidate.local_pts_seconds)
+
+
+def _cadence_ms(candidates: tuple[DecodedFrameCandidate, ...]) -> int | None:
+    """Return the median positive adjacent PTS interval in milliseconds."""
+    intervals = sorted(
+        round(float(current.local_pts_seconds - prior.local_pts_seconds) * 1_000)
+        for prior, current in pairwise(candidates)
+        if current.local_pts_seconds > prior.local_pts_seconds
+    )
+    if not intervals:
+        return None
+    middle = len(intervals) // 2
+    cadence = (
+        intervals[middle]
+        if len(intervals) % 2
+        else round((intervals[middle - 1] + intervals[middle]) / 2)
+    )
+    return cadence if cadence > 0 else None
+
+
+def _cadence_tolerance_ms(candidates: tuple[DecodedFrameCandidate, ...]) -> int | None:
+    cadence = _cadence_ms(candidates)
+    if cadence is None:
+        return None
+    return min(_MAX_CADENCE_TOLERANCE_MS, cadence + _CADENCE_TOLERANCE_EXTRA_MS)
 
 
 def _candidates(frames: tuple[_ProbeFrame, ...]) -> tuple[DecodedFrameCandidate, ...]:

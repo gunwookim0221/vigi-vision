@@ -228,12 +228,20 @@ window. Each normalized coverage item retains its raw assigned segment bounds;
 when that segment permits, acquisition requests up to five bounded seconds after
 the target even when the target is the semantic search end. FFmpeg progress is
 only a trigger for a cross-platform bounded graceful stop after one second of
-post-target transport context. The resulting MP4 is still accepted only after
+post-target transport context. When a target is exactly at (or safely beyond)
+the raw end of its assigned segment, acquisition uses a bounded
+`segment_end_fallback` window ending at that raw end and selects the nearest
+validated frame at or before the target. The fallback is admitted only when
+adjacent decoded PTS values provide a small cadence-derived tolerance; no future
+frame is used as an observation. The resulting MP4 is still accepted only after
 ffprobe-backed frame enumeration and JPEG decode succeed. Classification receives
 the latest decoded frame at or before the target; post-target sentinel frames can
 close selection but can never become observations or extend the terminal observed
-range. A target without any raw post-target margin, a clip without a frame at or
-before the target, corrupt media, or failed finalization remains unavailable.
+range. A target without any raw pre-target coverage, a clip without a frame at or
+before the target, an untrusted cadence, corrupt media, or failed finalization
+remains unavailable. Successor evidence records the acquisition mode, raw segment
+end, selected frame timing, cadence tolerance, and media validation outcome;
+legacy evidence manifests remain strictly readable.
 
 | Slice | User-visible outcome | Minimum tests | Acceptance criterion | Deferred hardening |
 | --- | --- | --- | --- | --- |

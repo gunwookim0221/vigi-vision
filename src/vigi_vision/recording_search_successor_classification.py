@@ -349,6 +349,13 @@ class SuccessorObservation:
     classifier_stage: str | None = None
     classifier_elapsed_ms: int | None = None
     assigned_segment_id: str | None = None
+    acquisition_mode: str = "normal"
+    target_delta_ms: int | None = None
+    cadence_source: str | None = None
+    cadence_ms: int | None = None
+    tolerance_ms: int | None = None
+    raw_segment_end_utc: datetime | None = None
+    media_validation_outcome: str = "not_attempted"
 
     def __post_init__(self) -> None:
         if (
@@ -391,6 +398,18 @@ class SuccessorObservation:
             and (type(self.classifier_elapsed_ms) is not int or self.classifier_elapsed_ms < 0)
             or self.assigned_segment_id is not None
             and not self.assigned_segment_id
+            or self.acquisition_mode not in {"normal", "segment_end_fallback"}
+            or self.target_delta_ms is not None
+            and (type(self.target_delta_ms) is not int or self.target_delta_ms < 0)
+            or self.cadence_source is not None
+            and self.cadence_source != "adjacent_pts"
+            or self.cadence_ms is not None
+            and (type(self.cadence_ms) is not int or self.cadence_ms <= 0)
+            or self.tolerance_ms is not None
+            and (type(self.tolerance_ms) is not int or self.tolerance_ms <= 0)
+            or self.raw_segment_end_utc is not None
+            and not _is_utc(self.raw_segment_end_utc)
+            or self.media_validation_outcome not in {"not_attempted", "validated", "failed"}
         ):
             raise SuccessorClassificationContractError
         if (
@@ -419,6 +438,21 @@ class SuccessorObservation:
                 SuccessorObservationState.DECODE_UNAVAILABLE,
             }
             and self.frame_utc is not None
+        ):
+            raise SuccessorClassificationContractError
+        if self.acquisition_mode == "segment_end_fallback" and (
+            self.raw_segment_end_utc is None or self.raw_segment_end_utc > self.requested_time_utc
+        ):
+            raise SuccessorClassificationContractError
+        if self.acquisition_mode == "segment_end_fallback" and (
+            self.acquisition_status is SuccessorTargetStatus.FRAME_AVAILABLE
+            and (
+                self.target_delta_ms is None
+                or self.cadence_source != "adjacent_pts"
+                or self.cadence_ms is None
+                or self.tolerance_ms is None
+                or self.target_delta_ms > self.tolerance_ms
+            )
         ):
             raise SuccessorClassificationContractError
 
@@ -723,6 +757,17 @@ def _observation(
         "timing_precision_status": acquisition.timing_precision_status,
         "frame_sha256": acquisition.frame_sha256,
         "assigned_segment_id": acquisition.assigned_segment_id,
+        "acquisition_mode": acquisition.acquisition_mode,
+        "target_delta_ms": acquisition.target_delta_ms,
+        "cadence_source": acquisition.cadence_source,
+        "cadence_ms": acquisition.cadence_ms,
+        "tolerance_ms": acquisition.tolerance_ms,
+        "raw_segment_end_utc": (
+            None
+            if acquisition.raw_segment_end_utc is None
+            else _timestamp(acquisition.raw_segment_end_utc)
+        ),
+        "media_validation_outcome": acquisition.media_validation_outcome,
     }
     identity = _digest_identity("successor-observation-v1-", payload)
     return SuccessorObservation(
@@ -753,6 +798,13 @@ def _observation(
         classifier_stage,
         classifier_elapsed_ms,
         acquisition.assigned_segment_id,
+        acquisition.acquisition_mode,
+        acquisition.target_delta_ms,
+        acquisition.cadence_source,
+        acquisition.cadence_ms,
+        acquisition.tolerance_ms,
+        acquisition.raw_segment_end_utc,
+        acquisition.media_validation_outcome,
     )
 
 
@@ -785,6 +837,13 @@ def _with_ordinal(item: SuccessorObservation, ordinal: int) -> SuccessorObservat
         item.classifier_stage,
         item.classifier_elapsed_ms,
         item.assigned_segment_id,
+        item.acquisition_mode,
+        item.target_delta_ms,
+        item.cadence_source,
+        item.cadence_ms,
+        item.tolerance_ms,
+        item.raw_segment_end_utc,
+        item.media_validation_outcome,
     )
 
 
@@ -810,6 +869,15 @@ def reidentify_observation(
         "timing_precision_status": item.timing_precision_status,
         "frame_sha256": item.frame_sha256,
         "assigned_segment_id": item.assigned_segment_id,
+        "acquisition_mode": item.acquisition_mode,
+        "target_delta_ms": item.target_delta_ms,
+        "cadence_source": item.cadence_source,
+        "cadence_ms": item.cadence_ms,
+        "tolerance_ms": item.tolerance_ms,
+        "raw_segment_end_utc": (
+            None if item.raw_segment_end_utc is None else _timestamp(item.raw_segment_end_utc)
+        ),
+        "media_validation_outcome": item.media_validation_outcome,
     }
     return SuccessorObservation(
         item.plan_id,
@@ -839,6 +907,13 @@ def reidentify_observation(
         item.classifier_stage,
         item.classifier_elapsed_ms,
         item.assigned_segment_id,
+        item.acquisition_mode,
+        item.target_delta_ms,
+        item.cadence_source,
+        item.cadence_ms,
+        item.tolerance_ms,
+        item.raw_segment_end_utc,
+        item.media_validation_outcome,
     )
 
 

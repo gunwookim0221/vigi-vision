@@ -112,6 +112,31 @@ def test_latest_at_or_before_rejects_media_that_never_crosses_target() -> None:
         )
 
 
+def test_latest_at_or_before_allows_verified_segment_end_without_future_frame() -> None:
+    candidates = (DecodedFrameCandidate(Decimal("4.9"), 1),)
+
+    selected = select_nearest_candidate(
+        candidates,
+        5.0,
+        FrameSelectionPolicy.LATEST_DECODED_FRAME_AT_OR_BEFORE,
+        allow_terminal_before=True,
+    )
+
+    assert selected.local_pts_seconds == Decimal("4.9")
+
+
+def test_segment_end_selector_still_rejects_future_only_media() -> None:
+    candidates = (DecodedFrameCandidate(Decimal("5.1"), 1),)
+
+    with pytest.raises(ReferenceFrameNoCandidateError):
+        _ = select_nearest_candidate(
+            candidates,
+            5.0,
+            FrameSelectionPolicy.LATEST_DECODED_FRAME_AT_OR_BEFORE,
+            allow_terminal_before=True,
+        )
+
+
 def test_ffmpeg_decoder_probes_pts_dimensions_and_writes_selected_jpeg(tmp_path: Path) -> None:
     # Given
     clip_path = tmp_path / "clip.mp4"
@@ -157,6 +182,9 @@ def test_ffmpeg_decoder_probes_pts_dimensions_and_writes_selected_jpeg(tmp_path:
     assert evidence.local_pts_seconds == 1.0
     assert (evidence.width, evidence.height) == (1280, 720)
     assert evidence.timing_precision_status is TimingPrecisionStatus.MEASURED_CLIP_RELATIVE
+    assert evidence.cadence_source == "adjacent_pts"
+    assert evidence.cadence_ms == 1_500
+    assert evidence.tolerance_ms == 1_600
     assert extract_arguments[10:12] == ("-vf", "select=eq(n\\,1)")
     assert output_path.read_bytes() == _JPEG_BYTES
 

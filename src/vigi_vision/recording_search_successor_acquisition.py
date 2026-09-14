@@ -46,6 +46,9 @@ MAXIMUM_TARGET_WINDOW_SECONDS = 10
 POST_TARGET_SENTINEL_SECONDS = 5
 MAXIMUM_FRAME_BYTES = 16 * 1024 * 1024
 _SHA256_HEX_LENGTH = 64
+_ACQUISITION_MODES = frozenset({"normal", "segment_end_fallback"})
+_CADENCE_SOURCES = frozenset({"adjacent_pts"})
+_MEDIA_VALIDATION_OUTCOMES = frozenset({"not_attempted", "validated", "failed"})
 
 
 class SuccessorTargetStatus(str, Enum):
@@ -120,8 +123,15 @@ class SuccessorTargetAcquisitionResult:
     frame_height: int | None = None
     frame_warnings: tuple[str, ...] = ()
     timing_precision_status: str | None = None
+    acquisition_mode: str = "normal"
+    target_delta_ms: int | None = None
+    cadence_source: str | None = None
+    cadence_ms: int | None = None
+    tolerance_ms: int | None = None
+    raw_segment_end_utc: datetime | None = None
+    media_validation_outcome: str = "not_attempted"
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> None:  # noqa: C901, PLR0912
         """Validate target identity, status, and frame evidence consistency."""
         if (
             not self.plan_id
@@ -131,9 +141,31 @@ class SuccessorTargetAcquisitionResult:
             or self.sequence <= 0
             or not _is_whole_utc(self.requested_time_utc)
             or type(self.status) is not SuccessorTargetStatus
+            or self.acquisition_mode not in _ACQUISITION_MODES
+            or self.media_validation_outcome not in _MEDIA_VALIDATION_OUTCOMES
+            or (self.raw_segment_end_utc is not None and not _is_utc(self.raw_segment_end_utc))
+            or (
+                self.target_delta_ms is not None
+                and (type(self.target_delta_ms) is not int or self.target_delta_ms < 0)
+            )
+            or (self.cadence_source is not None and self.cadence_source not in _CADENCE_SOURCES)
+            or (
+                self.cadence_ms is not None
+                and (type(self.cadence_ms) is not int or self.cadence_ms <= 0)
+            )
+            or (
+                self.tolerance_ms is not None
+                and (type(self.tolerance_ms) is not int or self.tolerance_ms <= 0)
+            )
         ):
             raise SuccessorAcquisitionContractError
         if self.replay_window is not None and self.replay_window.channel_id <= 0:
+            raise SuccessorAcquisitionContractError
+        if (
+            self.raw_segment_end_utc is not None
+            and self.replay_window is not None
+            and self.raw_segment_end_utc < self.replay_window.end_utc
+        ):
             raise SuccessorAcquisitionContractError
         if self.status is SuccessorTargetStatus.UNAVAILABLE_GAP:
             if self.assigned_segment_id is not None or self.replay_window is not None:
@@ -171,6 +203,33 @@ class SuccessorTargetAcquisitionResult:
                 self.frame_width,
                 self.frame_height,
             )
+        ):
+            raise SuccessorAcquisitionContractError
+        if self.acquisition_mode == "segment_end_fallback":
+            if (
+                self.raw_segment_end_utc is None
+                or self.raw_segment_end_utc > self.requested_time_utc
+            ):
+                raise SuccessorAcquisitionContractError
+            if self.status is SuccessorTargetStatus.FRAME_AVAILABLE and (
+                self.cadence_source is None
+                or self.cadence_ms is None
+                or self.tolerance_ms is None
+                or self.target_delta_ms is None
+                or self.target_delta_ms > self.tolerance_ms
+            ):
+                raise SuccessorAcquisitionContractError
+        elif (
+            any(
+                value is not None
+                for value in (
+                    self.target_delta_ms,
+                    self.cadence_source,
+                    self.cadence_ms,
+                    self.tolerance_ms,
+                )
+            )
+            and self.status is not SuccessorTargetStatus.FRAME_AVAILABLE
         ):
             raise SuccessorAcquisitionContractError
 
@@ -351,7 +410,10 @@ class SuccessorTargetAcquisitionService:
                 None,
                 SuccessorTargetStatus.UNAVAILABLE_GAP,
             )
-        if window.end_utc <= target.requested_time_utc:
+        coverage = _assigned_coverage(plan, target)
+        segment_end_fallback = _segment_end_fallback(coverage, target)
+        acquisition_mode = "segment_end_fallback" if segment_end_fallback else "normal"
+        if window.end_utc <= target.requested_time_utc and not segment_end_fallback:
             return self._unavailable_result(
                 plan,
                 target,
@@ -359,8 +421,9 @@ class SuccessorTargetAcquisitionService:
                 acquisition_id,
                 window,
                 SuccessorTargetStatus.DECODE_UNAVAILABLE,
+                acquisition_mode=acquisition_mode,
+                raw_segment_end_utc=coverage.raw_end_utc,
             )
-        coverage = _assigned_coverage(plan, target)
         replay_request: ReplayRequest
         try:
             replay_request = self.recording_planner.plan_for_segment(
@@ -374,6 +437,8 @@ class SuccessorTargetAcquisitionService:
                 acquisition_id,
                 window,
                 SuccessorTargetStatus.RECORDING_UNAVAILABLE,
+                acquisition_mode=acquisition_mode,
+                raw_segment_end_utc=coverage.raw_end_utc,
             )
         if replay_request.window != window:
             raise SuccessorAcquisitionContractError
@@ -383,7 +448,9 @@ class SuccessorTargetAcquisitionService:
                 target_offset_seconds = (
                     target.requested_time_utc - window.start_utc
                 ).total_seconds()
-                if callable(getattr(self.replay_extractor, "extract_for_target", None)):
+                if not segment_end_fallback and callable(
+                    getattr(self.replay_extractor, "extract_for_target", None)
+                ):
                     target_replay = cast(
                         "SuccessorTargetAwareReplayBoundary", cast("object", self.replay_extractor)
                     )
@@ -398,6 +465,8 @@ class SuccessorTargetAcquisitionService:
                     acquisition_id,
                     window,
                     SuccessorTargetStatus.RECORDING_UNAVAILABLE,
+                    acquisition_mode=acquisition_mode,
+                    raw_segment_end_utc=coverage.raw_end_utc,
                 )
             except ReplayTimeoutError:
                 result = self._unavailable_result(
@@ -407,6 +476,8 @@ class SuccessorTargetAcquisitionService:
                     acquisition_id,
                     window,
                     SuccessorTargetStatus.REPLAY_TIMEOUT,
+                    acquisition_mode=acquisition_mode,
+                    raw_segment_end_utc=coverage.raw_end_utc,
                 )
             except (ReplayAuthenticationError, ReplayExtractionError, ReplayError):
                 result = self._unavailable_result(
@@ -416,6 +487,8 @@ class SuccessorTargetAcquisitionService:
                     acquisition_id,
                     window,
                     SuccessorTargetStatus.REPLAY_FAILED,
+                    acquisition_mode=acquisition_mode,
+                    raw_segment_end_utc=coverage.raw_end_utc,
                 )
             else:
                 if (
@@ -424,7 +497,16 @@ class SuccessorTargetAcquisitionService:
                     or clip.requested_end_utc != window.end_utc
                 ):
                     raise SuccessorAcquisitionContractError
-                result = self._decode_target(plan, target, target_id, acquisition_id, window, clip)
+                result = self._decode_target(
+                    plan,
+                    target,
+                    target_id,
+                    acquisition_id,
+                    window,
+                    clip,
+                    acquisition_mode=acquisition_mode,
+                    raw_segment_end_utc=coverage.raw_end_utc,
+                )
             return result
         finally:
             if clip is not None:
@@ -433,7 +515,7 @@ class SuccessorTargetAcquisitionService:
                 except OSError as exc:
                     raise SuccessorAcquisitionCleanupError from exc
 
-    def _decode_target(  # noqa: C901, PLR0911, PLR0913
+    def _decode_target(  # noqa: C901, PLR0911, PLR0912, PLR0913
         self,
         plan: MultiSegmentCoarsePlan,
         target: CoarseTargetAssignment,
@@ -441,6 +523,9 @@ class SuccessorTargetAcquisitionService:
         acquisition_id: str,
         window: RecordingWindow,
         clip: ReplayClip,
+        *,
+        acquisition_mode: str,
+        raw_segment_end_utc: datetime,
     ) -> SuccessorTargetAcquisitionResult:
         if self.temporary_directory is not None:
             try:
@@ -459,6 +544,7 @@ class SuccessorTargetAcquisitionService:
                         (target.requested_time_utc - window.start_utc).total_seconds(),
                         self.policy.frame_selection_policy,
                         frame_path,
+                        allow_terminal_before=window.end_utc <= target.requested_time_utc,
                     )
                 )
             except ReferenceFrameDecodeTimeoutError:
@@ -469,6 +555,9 @@ class SuccessorTargetAcquisitionService:
                     acquisition_id,
                     window,
                     SuccessorTargetStatus.DECODE_TIMEOUT,
+                    acquisition_mode=acquisition_mode,
+                    raw_segment_end_utc=raw_segment_end_utc,
+                    media_validation_outcome="failed",
                 )
             except (ReferenceFrameDecodeError, ReferenceFrameNoCandidateError):
                 return self._unavailable_result(
@@ -478,6 +567,9 @@ class SuccessorTargetAcquisitionService:
                     acquisition_id,
                     window,
                     SuccessorTargetStatus.DECODE_UNAVAILABLE,
+                    acquisition_mode=acquisition_mode,
+                    raw_segment_end_utc=raw_segment_end_utc,
+                    media_validation_outcome="failed",
                 )
             frame_path = evidence.jpeg_path
             if not _is_contained_file(frame_path, frame_root):
@@ -495,6 +587,9 @@ class SuccessorTargetAcquisitionService:
                     acquisition_id,
                     window,
                     SuccessorTargetStatus.DECODE_UNAVAILABLE,
+                    acquisition_mode=acquisition_mode,
+                    raw_segment_end_utc=raw_segment_end_utc,
+                    media_validation_outcome="failed",
                 )
             try:
                 frame_bytes = frame_path.read_bytes()
@@ -506,6 +601,9 @@ class SuccessorTargetAcquisitionService:
                     acquisition_id,
                     window,
                     SuccessorTargetStatus.DECODE_UNAVAILABLE,
+                    acquisition_mode=acquisition_mode,
+                    raw_segment_end_utc=raw_segment_end_utc,
+                    media_validation_outcome="failed",
                 )
             if not frame_bytes or len(frame_bytes) > self.policy.maximum_frame_bytes:
                 return self._unavailable_result(
@@ -515,6 +613,9 @@ class SuccessorTargetAcquisitionService:
                     acquisition_id,
                     window,
                     SuccessorTargetStatus.DECODE_UNAVAILABLE,
+                    acquisition_mode=acquisition_mode,
+                    raw_segment_end_utc=raw_segment_end_utc,
+                    media_validation_outcome="failed",
                 )
             frame_utc = window.start_utc + timedelta(seconds=evidence.local_pts_seconds)
             if (
@@ -529,6 +630,39 @@ class SuccessorTargetAcquisitionService:
                     acquisition_id,
                     window,
                     SuccessorTargetStatus.DECODE_UNAVAILABLE,
+                    acquisition_mode=acquisition_mode,
+                    raw_segment_end_utc=raw_segment_end_utc,
+                    media_validation_outcome="failed",
+                )
+            target_delta_ms = round((target.requested_time_utc - frame_utc).total_seconds() * 1_000)
+            if target_delta_ms < 0:
+                return self._unavailable_result(
+                    plan,
+                    target,
+                    target_id,
+                    acquisition_id,
+                    window,
+                    SuccessorTargetStatus.DECODE_UNAVAILABLE,
+                    acquisition_mode=acquisition_mode,
+                    raw_segment_end_utc=raw_segment_end_utc,
+                    media_validation_outcome="failed",
+                )
+            if window.end_utc <= target.requested_time_utc and (
+                evidence.cadence_source != "adjacent_pts"
+                or evidence.cadence_ms is None
+                or evidence.tolerance_ms is None
+                or target_delta_ms > evidence.tolerance_ms
+            ):
+                return self._unavailable_result(
+                    plan,
+                    target,
+                    target_id,
+                    acquisition_id,
+                    window,
+                    SuccessorTargetStatus.DECODE_UNAVAILABLE,
+                    acquisition_mode=acquisition_mode,
+                    raw_segment_end_utc=raw_segment_end_utc,
+                    media_validation_outcome="failed",
                 )
             return SuccessorTargetAcquisitionResult(
                 plan.plan_id,
@@ -549,6 +683,13 @@ class SuccessorTargetAcquisitionService:
                 evidence.height,
                 evidence.warnings,
                 evidence.timing_precision_status.value,
+                acquisition_mode=acquisition_mode,
+                target_delta_ms=target_delta_ms,
+                cadence_source=evidence.cadence_source,
+                cadence_ms=evidence.cadence_ms,
+                tolerance_ms=evidence.tolerance_ms,
+                raw_segment_end_utc=raw_segment_end_utc,
+                media_validation_outcome="validated",
             )
         finally:
             try:
@@ -564,6 +705,10 @@ class SuccessorTargetAcquisitionService:
         acquisition_id: str,
         window: RecordingWindow,
         status: SuccessorTargetStatus,
+        *,
+        acquisition_mode: str = "normal",
+        raw_segment_end_utc: datetime | None = None,
+        media_validation_outcome: str | None = None,
     ) -> SuccessorTargetAcquisitionResult:
         return SuccessorTargetAcquisitionResult(
             plan.plan_id,
@@ -574,6 +719,17 @@ class SuccessorTargetAcquisitionService:
             target.segment_id,
             window,
             status,
+            acquisition_mode=acquisition_mode,
+            raw_segment_end_utc=raw_segment_end_utc,
+            media_validation_outcome=(
+                media_validation_outcome
+                if media_validation_outcome is not None
+                else (
+                    "not_attempted"
+                    if status is SuccessorTargetStatus.DECODE_UNAVAILABLE
+                    else "failed"
+                )
+            ),
         )
 
 
@@ -639,6 +795,14 @@ def _assigned_coverage(
     if len(matches) != 1:
         raise SuccessorAcquisitionContractError
     return matches[0]
+
+
+def _segment_end_fallback(coverage: SegmentCoverage, target: CoarseTargetAssignment) -> bool:
+    """Return whether a target has no raw post-target transport context."""
+    return (
+        coverage.raw_end_utc <= target.requested_time_utc
+        and coverage.start_utc < target.requested_time_utc
+    )
 
 
 def _recording_segment(coverage: SegmentCoverage) -> RecordingSegment:

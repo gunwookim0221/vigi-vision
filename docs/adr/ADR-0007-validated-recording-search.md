@@ -33,7 +33,12 @@ Phase 7 terminal state.
 Successor short-target acquisition separates semantic search bounds from raw
 segment transport bounds. A bounded post-target sentinel may finalize replay
 transport, but only a decoded frame at or before the requested target is
-admitted as observation evidence; terminal timing remains semantic.
+admitted as observation evidence; terminal timing remains semantic. If the
+requested target coincides with an assigned raw segment end, a bounded
+segment-end fallback may instead use validated pre-target media and a
+cadence-derived tolerance. Its mode and measured frame delta are additive
+evidence, while missing or untrusted timing remains a closed decode-unavailable
+outcome.
 
 ## Context
 

@@ -106,8 +106,24 @@ _ENTRY_KEYS = frozenset(
         "path",
         "roi_path",
         "roi_digest",
+        "acquisition_mode",
+        "target_delta_ms",
+        "cadence_source",
+        "cadence_ms",
+        "tolerance_ms",
+        "raw_segment_end_utc",
+        "media_validation_outcome",
     }
 )
+_LEGACY_ENTRY_KEYS = _ENTRY_KEYS - {
+    "acquisition_mode",
+    "target_delta_ms",
+    "cadence_source",
+    "cadence_ms",
+    "tolerance_ms",
+    "raw_segment_end_utc",
+    "media_validation_outcome",
+}
 _COMPARISON_KEYS = frozenset(
     {
         "baseline_mask_pixel_count",
@@ -389,6 +405,13 @@ def _baseline_entry(prepared: SuccessorPreparedExecution) -> dict[str, object] |
         "path": f"frames/{digest}.jpg",
         "roi_path": None,
         "roi_digest": None,
+        "acquisition_mode": "normal",
+        "target_delta_ms": None,
+        "cadence_source": None,
+        "cadence_ms": None,
+        "tolerance_ms": None,
+        "raw_segment_end_utc": None,
+        "media_validation_outcome": "validated",
     }
 
 
@@ -438,6 +461,15 @@ def _observation_entry(
         "path": None if digest is None else f"frames/{digest}.jpg",
         "roi_path": None,
         "roi_digest": None,
+        "acquisition_mode": item.acquisition_mode,
+        "target_delta_ms": item.target_delta_ms,
+        "cadence_source": item.cadence_source,
+        "cadence_ms": item.cadence_ms,
+        "tolerance_ms": item.tolerance_ms,
+        "raw_segment_end_utc": (
+            None if item.raw_segment_end_utc is None else _timestamp(item.raw_segment_end_utc)
+        ),
+        "media_validation_outcome": item.media_validation_outcome,
     }
 
 
@@ -531,7 +563,8 @@ def _validate_manifest(value: object, investigation_id: str, run_id: str) -> Non
     for item in cast("list[object]", entries):
         if not isinstance(item, dict):
             raise SuccessorEvidenceError("evidence_corrupt")
-        if set(item) != _ENTRY_KEYS:
+        item_keys = set(item)
+        if not (item_keys == set(_ENTRY_KEYS) or item_keys == set(_LEGACY_ENTRY_KEYS)):
             raise SuccessorEvidenceError("evidence_corrupt")
         if item.get("role") not in _ENTRY_ROLES or item.get("plan_id") != plan_id:
             raise SuccessorEvidenceError("evidence_corrupt")
@@ -542,6 +575,8 @@ def _validate_manifest(value: object, investigation_id: str, run_id: str) -> Non
             or item.get("roi_identity") != roi_identity
         ):
             raise SuccessorEvidenceError("evidence_corrupt")
+        if item_keys == _ENTRY_KEYS:
+            _validate_transport_metadata(item)
         acquisition_status = item.get("acquisition_status")
         state = item.get("state")
         if acquisition_status not in _ACQUISITION_STATUSES or state not in _OBSERVATION_STATES:
@@ -618,6 +653,41 @@ def _valid_roi(value: dict[object, object], source_width: int, source_height: in
         and value["y"] + value["height"] <= source_height
         and value.get("coordinate_space") == "source_pixels"
     )
+
+
+def _validate_transport_metadata(item: dict[str, object]) -> None:
+    mode = item.get("acquisition_mode")
+    if mode not in {"normal", "segment_end_fallback"}:
+        raise SuccessorEvidenceError("evidence_corrupt")
+    delta = item.get("target_delta_ms")
+    if delta is not None and (type(delta) is not int or delta < 0):
+        raise SuccessorEvidenceError("evidence_corrupt")
+    source = item.get("cadence_source")
+    if source is not None and source != "adjacent_pts":
+        raise SuccessorEvidenceError("evidence_corrupt")
+    for key in ("cadence_ms", "tolerance_ms"):
+        value = item.get(key)
+        if value is not None and (type(value) is not int or value <= 0):
+            raise SuccessorEvidenceError("evidence_corrupt")
+    raw_end = item.get("raw_segment_end_utc")
+    if raw_end is not None and not _valid_timestamp(raw_end):
+        raise SuccessorEvidenceError("evidence_corrupt")
+    if item.get("media_validation_outcome") not in {"not_attempted", "validated", "failed"}:
+        raise SuccessorEvidenceError("evidence_corrupt")
+    if mode == "segment_end_fallback" and raw_end is None:
+        raise SuccessorEvidenceError("evidence_corrupt")
+    if (
+        mode == "segment_end_fallback"
+        and item.get("acquisition_status") == "FRAME_AVAILABLE"
+        and (
+            delta is None
+            or item.get("cadence_source") != "adjacent_pts"
+            or item.get("cadence_ms") is None
+            or item.get("tolerance_ms") is None
+            or delta > item["tolerance_ms"]
+        )
+    ):
+        raise SuccessorEvidenceError("evidence_corrupt")
 
 
 def _valid_timestamp(value: object) -> bool:
