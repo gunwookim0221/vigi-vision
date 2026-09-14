@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { createHarness, deferred } = require("./reference-frame-ui-harness");
+const { createHarness, deferred, textOf } = require("./reference-frame-ui-harness");
 
 const INVESTIGATION_ID = "object-disappearance-v3-ch1-20260720T033418Z";
 const REQUEST_ID = "12345678-1234-4234-8234-123456789abc";
@@ -913,6 +913,47 @@ test("current 34-key evidence renders an INDETERMINATE observation for visual re
   assert.match(harness.recordingSearchEndImage.src, /evidence\/b{64}$/);
   assert.equal(harness.recordingSearchEndCaption.textContent, "최근 유효 관측");
   assert.equal(harness.recordingSearchEndFrameMeta.hidden, true);
+});
+
+test("Schema 8 evidence review projects scene and alignment observability", async () => {
+  const payload = currentEvidenceManifest("INCONCLUSIVE");
+  payload.entries[1].state = "INDETERMINATE";
+  payload.entries[1].reason_code = "insufficient_visual_evidence";
+  payload.entries[1].comparison = {
+    ...payload.entries[1].comparison,
+    baseline_support_stability_pixel_count: 43200,
+    baseline_support_stability_changed_pixel_count: 100,
+    baseline_support_stability_valid_pixel_count: 200,
+    baseline_support_stability_excluded_pixel_count: 43000,
+    baseline_support_alignment_candidates_generated: 25,
+    baseline_support_alignment_candidates_evaluated: 25,
+    baseline_support_alignment_valid_candidates: 25,
+    baseline_support_alignment_state: "aligned",
+    baseline_support_scene_stable: true,
+    baseline_support_scene_stability_veto_reason: null,
+  };
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    if (url.endsWith("/evidence")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => payload });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => successorStatus("INCONCLUSIVE") });
+  }, undefined, { confirmation: true, search: true, evidence: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  await settle();
+
+  const metrics = textOf(harness.recordingSearchEvidenceMetrics);
+  assert.match(metrics, /Alignment statealigned/);
+  assert.match(metrics, /Scene stabilitytrue/);
+  assert.match(metrics, /Stability changed pixels100/);
 });
 
 test("current evidence uses the search-end caption only when the observation reaches the terminal end", async () => {

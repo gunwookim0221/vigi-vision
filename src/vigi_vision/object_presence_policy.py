@@ -29,6 +29,9 @@ _METRIC_DECIMAL_PLACES: Final = 6
 _SOURCE_COMMIT_LENGTH: Final = 40
 _DIGEST_LENGTH: Final = 64
 _HEX_DIGITS: Final = frozenset("0123456789abcdef")
+_ABSENCE_ALIGNMENT_MAX_TRANSLATION_PIXELS: Final = 2
+_ABSENCE_ALIGNMENT_MAX_ROTATION_DEGREES: Final = 5
+_ABSENCE_ALIGNMENT_NO_CANDIDATE_SCORE_MAXIMUM: Final = 0.40
 
 
 class ObjectPresenceDecisionPolicy(BaseModel):
@@ -282,15 +285,27 @@ def _decide_baseline_support(
         or background_change is None
     ):
         raise ValueError
-    background_stable = background_change <= policy.baseline_support_background_change_maximum
-    alignment_confident = comparison.comparison_mode != "baseline_support_v3" or (
-        comparison.baseline_support_alignment_overlap is not None
-        and comparison.baseline_support_alignment_overlap
-        >= policy.baseline_support_alignment_min_support_overlap
-        and comparison.baseline_support_alignment_margin is not None
-        and comparison.baseline_support_alignment_margin
-        >= policy.baseline_support_alignment_margin_minimum
+    background_stable = (
+        comparison.baseline_support_scene_stable
+        if comparison.comparison_mode == "baseline_support_v3"
+        and comparison.baseline_support_scene_stable is not None
+        else background_change <= policy.baseline_support_background_change_maximum
     )
+    if comparison.comparison_mode != "baseline_support_v3" or (
+        comparison.baseline_support_alignment_state in {"aligned", "not_required"}
+    ):
+        alignment_confident = True
+    elif comparison.baseline_support_alignment_state is not None:
+        alignment_confident = False
+    else:
+        alignment_confident = (
+            comparison.baseline_support_alignment_overlap is not None
+            and comparison.baseline_support_alignment_overlap
+            >= policy.baseline_support_alignment_min_support_overlap
+            and comparison.baseline_support_alignment_margin is not None
+            and comparison.baseline_support_alignment_margin
+            >= policy.baseline_support_alignment_margin_minimum
+        )
     if (
         background_stable
         and alignment_confident
@@ -310,6 +325,7 @@ def _decide_baseline_support(
     # a similar luma distribution to the former object support.
     if (
         background_stable
+        and _absence_alignment_safe(comparison)
         and ncc <= policy.baseline_support_absent_ncc_maximum
         and foreground <= policy.baseline_support_absent_foreground_maximum
         and (
@@ -327,6 +343,35 @@ def _decide_baseline_support(
         outcome=ClassificationOutcome.INDETERMINATE,
         reason_code=VisualReason.INSUFFICIENT_VISUAL_EVIDENCE,
         comparison=comparison,
+    )
+
+
+def _absence_alignment_safe(comparison: RawComparison) -> bool:
+    """Reject absence when the best transform indicates broad camera motion."""
+    if comparison.comparison_mode != "baseline_support_v3":
+        return True
+    state = comparison.baseline_support_alignment_state
+    if state in {None, "aligned", "not_required", "no_valid_candidate"}:
+        return True
+    dx = comparison.baseline_support_alignment_dx
+    dy = comparison.baseline_support_alignment_dy
+    rotation = comparison.baseline_support_alignment_rotation_degrees
+    return (
+        dx is not None
+        and dy is not None
+        and rotation is not None
+        and (
+            (
+                abs(dx) <= _ABSENCE_ALIGNMENT_MAX_TRANSLATION_PIXELS
+                and abs(dy) <= _ABSENCE_ALIGNMENT_MAX_TRANSLATION_PIXELS
+                and abs(rotation) < _ABSENCE_ALIGNMENT_MAX_ROTATION_DEGREES
+            )
+            or (
+                comparison.baseline_support_alignment_score is not None
+                and comparison.baseline_support_alignment_score
+                <= _ABSENCE_ALIGNMENT_NO_CANDIDATE_SCORE_MAXIMUM
+            )
+        )
     )
 
 

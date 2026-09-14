@@ -153,6 +153,16 @@ _COMPARISON_KEYS = frozenset(
         "baseline_support_alignment_overlap",
         "baseline_support_alignment_score",
         "baseline_support_alignment_margin",
+        "baseline_support_stability_pixel_count",
+        "baseline_support_stability_changed_pixel_count",
+        "baseline_support_stability_valid_pixel_count",
+        "baseline_support_stability_excluded_pixel_count",
+        "baseline_support_alignment_candidates_generated",
+        "baseline_support_alignment_candidates_evaluated",
+        "baseline_support_alignment_valid_candidates",
+        "baseline_support_alignment_state",
+        "baseline_support_scene_stable",
+        "baseline_support_scene_stability_veto_reason",
         "visual_status",
         "unusable_reason",
     }
@@ -740,6 +750,14 @@ def _valid_comparison(value: object) -> bool:  # noqa: PLR0911
     visual_status = payload.get("visual_status")
     unusable_reason = payload.get("unusable_reason")
     comparison_mode = payload.get("comparison_mode")
+    alignment_state = payload.get("baseline_support_alignment_state")
+    if alignment_state is not None and alignment_state not in {
+        "aligned",
+        "ambiguous",
+        "no_valid_candidate",
+        "not_required",
+    }:
+        return False
     if visual_status is not None and visual_status not in _VISUAL_STATUSES:
         return False
     if unusable_reason is not None and unusable_reason not in _UNUSABLE_REASONS:
@@ -763,8 +781,76 @@ def _valid_comparison(value: object) -> bool:  # noqa: PLR0911
         item is not None for key, item in payload.items() if key in alignment_keys
     ):
         return False
+    if alignment_state in {"no_valid_candidate", "not_required"}:
+        alignment_values = [
+            payload.get(key)
+            for key in (
+                "baseline_support_alignment_dx",
+                "baseline_support_alignment_dy",
+                "baseline_support_alignment_rotation_degrees",
+                "baseline_support_alignment_overlap",
+                "baseline_support_alignment_score",
+                "baseline_support_alignment_margin",
+            )
+        ]
+        if any(item is None for item in alignment_values) and any(
+            item is not None for item in alignment_values
+        ):
+            return False
+    total = payload.get("baseline_support_stability_pixel_count")
+    changed = payload.get("baseline_support_stability_changed_pixel_count")
+    valid = payload.get("baseline_support_stability_valid_pixel_count")
+    excluded = payload.get("baseline_support_stability_excluded_pixel_count")
+    stable = payload.get("baseline_support_scene_stable")
+    veto = payload.get("baseline_support_scene_stability_veto_reason")
+    if any(item is not None for item in (total, changed, valid, excluded, stable, veto)) and (
+        type(total) is not int
+        or type(changed) is not int
+        or type(valid) is not int
+        or type(excluded) is not int
+        or type(stable) is not bool
+        or total <= 0
+        or changed < 0
+        or valid <= 0
+        or excluded < 0
+        or total != payload.get("roi_pixel_count")
+        or changed > valid
+        or valid + excluded != total
+        or (stable and veto is not None)
+        or (
+            not stable
+            and veto
+            not in {
+                "global_scene_change",
+                "insufficient_stability_area",
+                "registration_failed",
+            }
+        )
+    ):
+        return False
+    generated = payload.get("baseline_support_alignment_candidates_generated")
+    evaluated = payload.get("baseline_support_alignment_candidates_evaluated")
+    valid_candidates = payload.get("baseline_support_alignment_valid_candidates")
+    if any(item is not None for item in (generated, evaluated, valid_candidates)) and (
+        type(generated) is not int
+        or type(evaluated) is not int
+        or type(valid_candidates) is not int
+        or generated <= 0
+        or evaluated < 0
+        or valid_candidates < 0
+        or evaluated > generated
+        or valid_candidates > evaluated
+    ):
+        return False
     for key, item in payload.items():
-        if key in {"visual_status", "unusable_reason", "comparison_mode"}:
+        if key in {
+            "visual_status",
+            "unusable_reason",
+            "comparison_mode",
+            "baseline_support_alignment_state",
+            "baseline_support_scene_stability_veto_reason",
+            "baseline_support_scene_stable",
+        }:
             continue
         if item is None:
             continue
@@ -795,6 +881,10 @@ def _valid_comparison(value: object) -> bool:  # noqa: PLR0911
                     "baseline_support_alignment_margin",
                 }
             )
+            if alignment_state in {"no_valid_candidate", "not_required"} and all(
+                payload.get(key) is None for key in alignment_keys
+            ):
+                required.difference_update(alignment_keys)
         if not required.issubset(payload) or payload.get("visual_status") != "comparable":
             return False
         for key in required:

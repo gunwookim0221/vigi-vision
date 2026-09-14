@@ -217,6 +217,14 @@ The independently predicted probe mask remains diagnostic only, so a
 background-sized probe mask cannot redefine the target. Legacy Schema 5–7
 policy identities and reopen behavior are preserved, and persisted v1/v2
 successor evidence remains readable.
+Schema 8 additionally records stability-region pixel counts, alignment
+candidate counts/state, an explicit scene-stability result, and a closed veto
+reason. The stability region is the immutable baseline support plus a bounded
+source-pixel dilation exclusion; local revealed flooring is therefore not a
+global-scene veto. Robust location/spread normalization tolerates bounded local
+ring changes, while broad coherent changes or insufficient valid area remain
+fail-closed. The browser projects these additive facts without changing the
+legacy Schema 5–7 contract; Slice 3 consumes the resulting target states.
 
 The successor result now exposes an additive visual-evidence review projection.
 Each terminal run may publish immutable, digest-addressed baseline and observed

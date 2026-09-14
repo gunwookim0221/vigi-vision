@@ -826,7 +826,12 @@
     "baseline_support_background_change_ratio", "baseline_support_alignment_dx",
     "baseline_support_alignment_dy", "baseline_support_alignment_rotation_degrees",
     "baseline_support_alignment_overlap", "baseline_support_alignment_score",
-    "baseline_support_alignment_margin", "visual_status", "unusable_reason",
+    "baseline_support_alignment_margin", "baseline_support_stability_pixel_count",
+    "baseline_support_stability_changed_pixel_count", "baseline_support_stability_valid_pixel_count",
+    "baseline_support_stability_excluded_pixel_count", "baseline_support_alignment_candidates_generated",
+    "baseline_support_alignment_candidates_evaluated", "baseline_support_alignment_valid_candidates",
+    "baseline_support_alignment_state", "baseline_support_scene_stable",
+    "baseline_support_scene_stability_veto_reason", "visual_status", "unusable_reason",
   ]);
   const MAX_TARGET_METADATA_MS = 10_000;
   const MAX_TOLERANCE_METADATA_MS = 2_000;
@@ -852,8 +857,52 @@
     if (value.comparison_mode !== undefined
       && value.comparison_mode !== null
       && !["baseline_support_v1", "baseline_support_v2", "baseline_support_v3"].includes(value.comparison_mode)) return false;
+    if (value.baseline_support_alignment_state !== undefined
+      && value.baseline_support_alignment_state !== null
+      && !["aligned", "ambiguous", "no_valid_candidate", "not_required"].includes(value.baseline_support_alignment_state)) return false;
+    const alignmentKeys = ["baseline_support_alignment_dx", "baseline_support_alignment_dy",
+        "baseline_support_alignment_rotation_degrees", "baseline_support_alignment_overlap",
+        "baseline_support_alignment_score", "baseline_support_alignment_margin"];
+    const alignmentValues = alignmentKeys.map((key) => value[key]);
+    if (["no_valid_candidate", "not_required"].includes(value.baseline_support_alignment_state)) {
+      const hasNull = alignmentValues.some((item) => item === undefined || item === null);
+      const hasValue = alignmentValues.some((item) => item !== undefined && item !== null);
+      if (hasNull && hasValue) return false;
+    }
+    if (value.comparison_mode === "baseline_support_v3"
+      && !["no_valid_candidate", "not_required"].includes(value.baseline_support_alignment_state)
+      && alignmentValues.some((item) => item === undefined || item === null)) return false;
+    const stabilityKeys = ["baseline_support_stability_pixel_count",
+      "baseline_support_stability_changed_pixel_count", "baseline_support_stability_valid_pixel_count",
+      "baseline_support_stability_excluded_pixel_count", "baseline_support_scene_stable",
+      "baseline_support_scene_stability_veto_reason"];
+    if (stabilityKeys.some((key) => value[key] !== undefined && value[key] !== null)) {
+      const total = value.baseline_support_stability_pixel_count;
+      const changed = value.baseline_support_stability_changed_pixel_count;
+      const valid = value.baseline_support_stability_valid_pixel_count;
+      const excluded = value.baseline_support_stability_excluded_pixel_count;
+      const stable = value.baseline_support_scene_stable;
+      const veto = value.baseline_support_scene_stability_veto_reason;
+      if (![total, changed, valid, excluded].every(Number.isInteger)
+        || typeof stable !== "boolean"
+        || total <= 0 || changed < 0 || valid <= 0 || excluded < 0
+        || changed > valid || valid + excluded !== value.roi_pixel_count
+        || (stable && veto !== null)
+        || (!stable && !["global_scene_change", "insufficient_stability_area", "registration_failed"].includes(veto))) return false;
+    }
+    const alignmentCounts = ["baseline_support_alignment_candidates_generated",
+      "baseline_support_alignment_candidates_evaluated", "baseline_support_alignment_valid_candidates"];
+    if (alignmentCounts.some((key) => value[key] !== undefined && value[key] !== null)) {
+      const generated = value.baseline_support_alignment_candidates_generated;
+      const evaluated = value.baseline_support_alignment_candidates_evaluated;
+      const valid = value.baseline_support_alignment_valid_candidates;
+      if (![generated, evaluated, valid].every(Number.isInteger)
+        || generated <= 0 || evaluated < 0 || valid < 0
+        || evaluated > generated || valid > evaluated) return false;
+    }
     return Object.entries(value).every(([key, item]) => [
-      "visual_status", "unusable_reason", "comparison_mode",
+      "visual_status", "unusable_reason", "comparison_mode", "baseline_support_alignment_state",
+      "baseline_support_scene_stable", "baseline_support_scene_stability_veto_reason",
     ].includes(key) || item === null || validFiniteNumber(item));
   }
 
@@ -1139,6 +1188,13 @@
         ["Alignment overlap", "baseline_support_alignment_overlap"],
         ["Alignment score", "baseline_support_alignment_score"],
         ["Alignment margin", "baseline_support_alignment_margin"],
+        ["Stability pixels", "baseline_support_stability_pixel_count"],
+        ["Stability changed pixels", "baseline_support_stability_changed_pixel_count"],
+        ["Stability valid pixels", "baseline_support_stability_valid_pixel_count"],
+        ["Stability excluded pixels", "baseline_support_stability_excluded_pixel_count"],
+        ["Alignment candidates generated", "baseline_support_alignment_candidates_generated"],
+        ["Alignment candidates evaluated", "baseline_support_alignment_candidates_evaluated"],
+        ["Alignment valid candidates", "baseline_support_alignment_valid_candidates"],
       ]) {
         if (typeof comparison[key] !== "number") continue;
         const row = document.createElement("div");
@@ -1146,6 +1202,20 @@
         const value = document.createElement("dd");
         term.textContent = label;
         value.textContent = Number(comparison[key]).toFixed(6);
+        row.append(term, value);
+        evidenceMetrics.append(row);
+      }
+      for (const [label, key] of [
+        ["Alignment state", "baseline_support_alignment_state"],
+        ["Scene stability", "baseline_support_scene_stable"],
+        ["Scene stability veto", "baseline_support_scene_stability_veto_reason"],
+      ]) {
+        if (comparison[key] === undefined || comparison[key] === null) continue;
+        const row = document.createElement("div");
+        const term = document.createElement("dt");
+        const value = document.createElement("dd");
+        term.textContent = label;
+        value.textContent = String(comparison[key]);
         row.append(term, value);
         evidenceMetrics.append(row);
       }

@@ -269,6 +269,16 @@ RawComparison
   baseline_support_alignment_overlap: finite decimal | null
   baseline_support_alignment_score: finite decimal | null
   baseline_support_alignment_margin: finite decimal | null
+  baseline_support_stability_pixel_count: integer | null
+  baseline_support_stability_changed_pixel_count: integer | null
+  baseline_support_stability_valid_pixel_count: integer | null
+  baseline_support_stability_excluded_pixel_count: integer | null
+  baseline_support_alignment_candidates_generated: integer | null
+  baseline_support_alignment_candidates_evaluated: integer | null
+  baseline_support_alignment_valid_candidates: integer | null
+  baseline_support_alignment_state: aligned | ambiguous | no_valid_candidate | not_required | null
+  baseline_support_scene_stable: boolean | null
+  baseline_support_scene_stability_veto_reason: global_scene_change | insufficient_stability_area | registration_failed | null
   visual_status: comparable | unusable
   unusable_reason: closed reason | null
 ```
@@ -282,15 +292,19 @@ mask is retained only as diagnostic context; its occupancy or IoU cannot make
 the target appear present.
 
 The comparator maps probe pixels at the baseline support coordinates after
-bounded background-based brightness/contrast normalization. It records support
-luma similarity, support luma NCC, edge similarity, pixel change ratio,
+bounded background-based brightness/contrast normalization. Its location and
+spread anchors are robust to a bounded fraction of local ring outliers, so a
+person moving outside the object does not rescale the shoe away. It records
+support luma similarity, support luma NCC, edge similarity, pixel change ratio,
 local-background foreground-retention ratio, and a structural background-change
 ratio. Foreground retention counts baseline support pixels whose probe values
 retain a bounded contrast against the normalized fixed-background ring; it does
-not treat newly exposed flooring (which matches that ring) as foreground. The stability region excludes the
-baseline support and a four-pixel dilation ring, and combines luma and local
-gradient changes so object removal does not become a scene-change veto while
-camera motion remains fail-closed. `PRESENT` requires the positive support similarity,
+not treat newly exposed flooring (which matches that ring) as foreground. The
+stability region excludes the baseline support and an adaptive, bounded
+dilation ring derived from its source-pixel area. It records total, changed,
+valid, and excluded pixels and combines luma, local-gradient, and spatial-extent
+checks: local changes remain stable while coherent broad changes veto the visual
+decision. `PRESENT` requires the positive support similarity,
 NCC, edge, low-change, and foreground-retention gates together. `ABSENT`
 in v2 requires low support NCC and low local-background foreground retention plus a
 stable background; similarity and pixel-change remain diagnostic because exposed
@@ -311,6 +325,13 @@ expanded stability exclusion covers the bounded alignment sweep so an object
 moving inside the ROI is not counted as camera motion, while fixed background
 changes still fail closed.
 
+Each new v3 row also records alignment candidates generated, evaluated, and
+valid, plus a closed alignment state. A `no_valid_candidate` or `not_required`
+row carries null selection coordinates rather than a fabricated numeric
+sentinel; older persisted numeric rows remain readable. Stability counts and
+the scene-stability veto are additive Schema 8 evidence and are ignored by the
+legacy Schema 5–7 policy identity.
+
 The deterministic fixture matrix fixes the successor gates at support
 similarity `>= 0.70`, support NCC `>= 0.50`, edge similarity `>= 0.60`,
 foreground retention `>= 0.70`, and change ratio `<= 0.30` for `PRESENT`.
@@ -318,9 +339,12 @@ foreground retention `>= 0.70`, and change ratio `<= 0.30` for `PRESENT`.
 retention `<= 0.30`;
 support similarity and change ratio remain recorded diagnostics. Edge similarity is
 retained as diagnostic evidence because a stationary background can preserve
-edge energy after the target is removed. Both states require background change
-ratio `<= 0.10`; a larger change is treated as camera motion or scene
-instability. The separated bands leave partial
+edge energy after the target is removed. In v3, the explicit
+`baseline_support_scene_stable` result is the stability gate; the raw
+background-change ratio remains diagnostic. A global scene-change or
+insufficient-area veto is persisted with its closed reason. This keeps locally
+revealed flooring from vetoing `ABSENT` while still failing closed for camera
+motion or broad scene instability. The separated bands leave partial
 occlusion and similar-object replacement in the indeterminate region.
 
 The local foreground floor is 40 luma levels, paired with the existing 32-level

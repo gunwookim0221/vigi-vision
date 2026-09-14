@@ -526,6 +526,7 @@ function createHarness(
     recordingSearchObservedRange: elements.get("#recording-search-observed-range"),
     recordingSearchEvidence: elements.get("#recording-search-evidence"),
     recordingSearchEvidenceStatus: elements.get("#recording-search-evidence-status"),
+    recordingSearchEvidenceMetrics: elements.get("#recording-search-evidence-metrics"),
     recordingSearchBaselineImage: elements.get("#recording-search-baseline-image"),
     recordingSearchBaselineRoi: elements.get("#recording-search-baseline-roi"),
     recordingSearchBaselineTime: elements.get("#recording-search-baseline-time"),

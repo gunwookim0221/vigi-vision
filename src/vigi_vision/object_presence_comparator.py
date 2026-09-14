@@ -54,6 +54,10 @@ _SUPPORT_CHANGE_THRESHOLD: Final[float] = 32.0
 _FOREGROUND_CONTRAST_THRESHOLD: Final[float] = 40.0
 _STABILITY_DILATION_PIXELS: Final[int] = 4
 _BACKGROUND_GRADIENT_CHANGE_THRESHOLD: Final[float] = 32.0
+_GLOBAL_CHANGE_RATIO_THRESHOLD: Final[float] = 0.30
+_GLOBAL_CHANGE_SPAN_THRESHOLD: Final[float] = 0.60
+_GLOBAL_CHANGE_QUADRANT_COUNT: Final[int] = 4
+_GLOBAL_CHANGE_FALLBACK_RATIO: Final[float] = 0.65
 _ALIGNMENT_ROTATIONS: Final[tuple[int, ...]] = (-10, -5, 0, 5, 10)
 _ALIGNMENT_DISTINCT_ROTATION_DEGREES: Final[int] = 5
 _DENSE_ALIGNMENT_RADIUS_THRESHOLD: Final[int] = 4
@@ -139,6 +143,26 @@ class _AlignmentChoice:
     overlap: float
     score: float
     margin: float
+
+
+@dataclass(frozen=True, slots=True)
+class _AlignmentResolution:
+    """Bounded alignment result plus safe candidate counters."""
+
+    choice: _AlignmentChoice
+    generated: int
+    evaluated: int
+    valid: int
+
+
+@dataclass(frozen=True, slots=True)
+class _LumaNormalization:
+    """Cached fixed-ring normalization shared by alignment candidates."""
+
+    baseline_location: float
+    probe_location: float
+    scale: float
+    normalized_background: tuple[float, ...]
 
 
 def binarize_mask_logits(logits: object, threshold: float = 0.0) -> BinaryMask:
@@ -307,7 +331,10 @@ def _compare_with_baseline_support(  # noqa: PLR0915 - explicit evidence-gate as
         for index, excluded in enumerate(value for row in alignment_stability_mask for value in row)
         if not excluded
     )
-    fixed_stability_mask = _dilated_exclusion_mask(baseline_mask, _STABILITY_DILATION_PIXELS)
+    fixed_stability_radius = _stability_dilation_radius(
+        values.roi.width, values.roi.height, baseline_count
+    )
+    fixed_stability_mask = _dilated_exclusion_mask(baseline_mask, fixed_stability_radius)
     fixed_background_indices = tuple(
         index
         for index, excluded in enumerate(value for row in fixed_stability_mask for value in row)
@@ -325,6 +352,17 @@ def _compare_with_baseline_support(  # noqa: PLR0915 - explicit evidence-gate as
     fixed_support_ncc = (
         None if fixed_support_ncc_raw is None else quantize_metric(fixed_support_ncc_raw)
     )
+    fixed_stability = _stable_background_profile(
+        fixed_background_baseline,
+        _normalize_probe_values(
+            fixed_background_baseline, fixed_background_probe, fixed_background_probe
+        )[1]
+        or fixed_background_probe,
+        fixed_background_indices,
+        values.roi.width,
+        values.roi.height,
+        roi_pixels,
+    )
     (
         fixed_similarity,
         fixed_change,
@@ -338,6 +376,7 @@ def _compare_with_baseline_support(  # noqa: PLR0915 - explicit evidence-gate as
         fixed_background_probe,
         (fixed_background_indices, values.roi.width),
     )
+    alignment: _AlignmentResolution | None = None
     if policy.baseline_support_alignment_mode:
         alignment = _aligned_support_choice(
             baseline_luma,
@@ -354,17 +393,17 @@ def _compare_with_baseline_support(  # noqa: PLR0915 - explicit evidence-gate as
             diagnostics_sink=diagnostics_sink,
         )
         alignment_is_confident = (
-            alignment.overlap >= policy.baseline_support_alignment_min_support_overlap
-            and alignment.margin >= policy.baseline_support_alignment_margin_minimum
+            alignment.choice.overlap >= policy.baseline_support_alignment_min_support_overlap
+            and alignment.choice.margin >= policy.baseline_support_alignment_margin_minimum
         )
         if alignment_is_confident:
-            support_luma_similarity = alignment.similarity
-            support_luma_ncc = alignment.ncc
-            edge_similarity = alignment.edge
-            change_ratio = alignment.change
-            foreground_retention = alignment.foreground
-            background_change_ratio = alignment.background_change
-            normalized_probe = alignment.normalized_probe
+            support_luma_similarity = alignment.choice.similarity
+            support_luma_ncc = alignment.choice.ncc
+            edge_similarity = alignment.choice.edge
+            change_ratio = alignment.choice.change
+            foreground_retention = alignment.choice.foreground
+            background_change_ratio = alignment.choice.background_change
+            normalized_probe = alignment.choice.normalized_probe
         else:
             # A low-margin alignment is ambiguous.  Preserve fixed baseline
             # support metrics so removal remains observable instead of letting
@@ -380,27 +419,33 @@ def _compare_with_baseline_support(  # noqa: PLR0915 - explicit evidence-gate as
             )
             change_ratio = fixed_change
             foreground_retention = fixed_foreground
-            background_change_ratio = alignment.background_change
-            if (
-                fixed_foreground is not None
-                and fixed_foreground > 0.0
-                and fixed_background_change is not None
-            ):
+            background_change_ratio = fixed_background_change
+            if alignment.choice.background_change is not None:
                 background_change_ratio = max(
-                    background_change_ratio or 0.0,
-                    fixed_background_change,
+                    alignment.choice.background_change,
+                    fixed_background_change or 0.0,
                 )
             normalized_probe = fixed_normalized_probe
         alignment_fields: tuple[
             int | None, int | None, int | None, float | None, float | None, float | None
         ] = (
-            alignment.dx if alignment.overlap > 0.0 else 0,
-            alignment.dy if alignment.overlap > 0.0 else 0,
-            alignment.rotation_degrees if alignment.overlap > 0.0 else 0,
-            alignment.overlap if alignment.overlap > 0.0 else 1.0,
-            alignment.score if alignment.overlap > 0.0 else -1.0,
-            alignment.margin,
+            alignment.choice.dx if alignment.choice.overlap > 0.0 else None,
+            alignment.choice.dy if alignment.choice.overlap > 0.0 else None,
+            alignment.choice.rotation_degrees if alignment.choice.overlap > 0.0 else None,
+            alignment.choice.overlap if alignment.choice.overlap > 0.0 else None,
+            alignment.choice.score if alignment.choice.overlap > 0.0 else None,
+            alignment.choice.margin if alignment.choice.overlap > 0.0 else None,
         )
+        alignment_state = (
+            "aligned"
+            if alignment.choice.overlap >= policy.baseline_support_alignment_min_support_overlap
+            and alignment.choice.margin >= policy.baseline_support_alignment_margin_minimum
+            else "ambiguous"
+        )
+        if alignment.valid == 0:
+            alignment_state = (
+                "not_required" if fixed_stability.scene_stable else "no_valid_candidate"
+            )
     else:
         support_luma_similarity = fixed_similarity
         support_luma_ncc = fixed_support_ncc
@@ -416,6 +461,7 @@ def _compare_with_baseline_support(  # noqa: PLR0915 - explicit evidence-gate as
             support_indices,
         )
         alignment_fields = (None, None, None, None, None, None)
+        alignment_state = "not_required"
     roi_ncc_raw = mean_centered_ncc(baseline_luma, probe_luma)
     roi_ncc = None if roi_ncc_raw is None else quantize_metric(roi_ncc_raw)
     if (
@@ -471,15 +517,32 @@ def _compare_with_baseline_support(  # noqa: PLR0915 - explicit evidence-gate as
         baseline_support_alignment_overlap=alignment_fields[3],
         baseline_support_alignment_score=alignment_fields[4],
         baseline_support_alignment_margin=alignment_fields[5],
+        baseline_support_stability_pixel_count=fixed_stability.total_pixel_count,
+        baseline_support_stability_changed_pixel_count=fixed_stability.changed_pixel_count,
+        baseline_support_stability_valid_pixel_count=fixed_stability.valid_pixel_count,
+        baseline_support_stability_excluded_pixel_count=fixed_stability.excluded_pixel_count,
+        baseline_support_alignment_candidates_generated=(
+            alignment.generated if alignment is not None else None
+        ),
+        baseline_support_alignment_candidates_evaluated=(
+            alignment.evaluated if alignment is not None else None
+        ),
+        baseline_support_alignment_valid_candidates=(
+            alignment.valid if alignment is not None else None
+        ),
+        baseline_support_alignment_state=alignment_state,
+        baseline_support_scene_stable=fixed_stability.scene_stable,
+        baseline_support_scene_stability_veto_reason=fixed_stability.veto_reason,
     )
 
 
-def _support_luma_metrics(
+def _support_luma_metrics(  # noqa: PLR0913 - explicit support/background inputs
     baseline: tuple[float, ...],
     probe: tuple[float, ...],
     baseline_background: tuple[float, ...],
     probe_background: tuple[float, ...],
     stability: tuple[tuple[int, ...], int],
+    normalization: _LumaNormalization | None = None,
 ) -> tuple[float | None, float | None, float | None, float | None, tuple[float, ...]]:
     if (
         not baseline
@@ -488,33 +551,16 @@ def _support_luma_metrics(
         or not probe_background
     ):
         return None, None, None, None, ()
-    baseline_background_mean = sum(baseline_background) / len(baseline_background)
-    probe_background_mean = sum(probe_background) / len(probe_background)
-    baseline_variance = sum(
-        (value - baseline_background_mean) ** 2 for value in baseline_background
-    )
-    probe_variance = sum((value - probe_background_mean) ** 2 for value in probe_background)
-    if not math.isfinite(baseline_variance) or not math.isfinite(probe_variance):
-        return None, None, None, None, ()
-    if probe_variance <= 0.0 or baseline_variance <= 0.0:
-        scale = 1.0
+    if normalization is None:
+        normalized, normalized_background, baseline_background_mean = _normalize_probe_values(
+            baseline_background, probe_background, probe
+        )
     else:
-        scale = math.sqrt(baseline_variance / probe_variance)
-        scale = min(2.0, max(0.5, scale))
-    normalized = tuple(
-        min(
-            255.0,
-            max(0.0, (value - probe_background_mean) * scale + baseline_background_mean),
-        )
-        for value in probe
-    )
-    normalized_background = tuple(
-        min(
-            255.0,
-            max(0.0, (value - probe_background_mean) * scale + baseline_background_mean),
-        )
-        for value in probe_background
-    )
+        normalized = _apply_luma_normalization(probe, normalization)
+        normalized_background = normalization.normalized_background
+        baseline_background_mean = normalization.baseline_location
+    if normalized is None or normalized_background is None or baseline_background_mean is None:
+        return None, None, None, None, ()
     mean_difference = sum(
         abs(left - right) for left, right in zip(baseline, normalized, strict=True)
     ) / len(baseline)
@@ -561,6 +607,86 @@ def _support_luma_metrics(
     )
 
 
+def _normalize_probe_values(
+    baseline_background: tuple[float, ...],
+    probe_background: tuple[float, ...],
+    probe: tuple[float, ...],
+) -> tuple[tuple[float, ...] | None, tuple[float, ...] | None, float | None]:
+    """Normalize probe luma to the fixed-background baseline scale."""
+    if not baseline_background or not probe_background:
+        return None, None, None
+    context = _build_luma_normalization(baseline_background, probe_background)
+    if context is None:
+        return None, None, None
+    return (
+        _apply_luma_normalization(probe, context),
+        context.normalized_background,
+        context.baseline_location,
+    )
+
+
+def _build_luma_normalization(
+    baseline_background: tuple[float, ...], probe_background: tuple[float, ...]
+) -> _LumaNormalization | None:
+    """Build robust ring normalization once per aligned replay window."""
+    # A local person/object in the ring must not move the global brightness
+    # anchor.  Medians keep the registration/contrast normalization stable
+    # when a bounded portion of the external scene changes.
+    baseline_ordered = sorted(baseline_background)
+    probe_ordered = sorted(probe_background)
+    middle = len(baseline_ordered) // 2
+    baseline_mean = (
+        baseline_ordered[middle]
+        if len(baseline_ordered) % 2
+        else (baseline_ordered[middle - 1] + baseline_ordered[middle]) / 2.0
+    )
+    middle = len(probe_ordered) // 2
+    probe_mean = (
+        probe_ordered[middle]
+        if len(probe_ordered) % 2
+        else (probe_ordered[middle - 1] + probe_ordered[middle]) / 2.0
+    )
+    baseline_variance = _robust_variance(baseline_background, baseline_mean)
+    probe_variance = _robust_variance(probe_background, probe_mean)
+    if not math.isfinite(baseline_variance) or not math.isfinite(probe_variance):
+        return None
+    if probe_variance <= 0.0 or baseline_variance <= 0.0:
+        scale = 1.0
+    else:
+        scale = min(2.0, max(0.5, math.sqrt(baseline_variance / probe_variance)))
+
+    context = _LumaNormalization(baseline_mean, probe_mean, scale, ())
+    return _LumaNormalization(
+        context.baseline_location,
+        context.probe_location,
+        context.scale,
+        _apply_luma_normalization(probe_background, context),
+    )
+
+
+def _apply_luma_normalization(
+    values: tuple[float, ...], context: _LumaNormalization
+) -> tuple[float, ...]:
+    return tuple(
+        min(
+            255.0,
+            max(
+                0.0,
+                (value - context.probe_location) * context.scale + context.baseline_location,
+            ),
+        )
+        for value in values
+    )
+
+
+def _robust_variance(values: tuple[float, ...], center: float) -> float:
+    """Estimate spread after trimming a bounded fraction of scene outliers."""
+    deviations = sorted((value - center) ** 2 for value in values)
+    trim = min(len(deviations) // 4, len(deviations) // 5)
+    core = deviations[trim : len(deviations) - trim] if trim else deviations
+    return sum(core)
+
+
 def _alignment_radii(
     roi_width: int, roi_height: int, policy: ObjectPresenceDecisionPolicy
 ) -> tuple[int, int]:
@@ -571,6 +697,116 @@ def _alignment_radii(
     cap = policy.baseline_support_alignment_max_translation_pixels
     return min(cap, max(0, math.floor(roi_width * fraction))), min(
         cap, max(0, math.floor(roi_height * fraction))
+    )
+
+
+def _stability_dilation_radius(roi_width: int, roi_height: int, support_pixels: int) -> int:
+    """Choose a bounded reveal ring from the confirmed support scale.
+
+    A fixed four-pixel ring is too small for a source-sized CCTV ROI.  The
+    radius grows with the square-root support scale, while retaining a
+    bounded minimum/maximum and never consuming more than a quarter of the
+    shorter ROI edge.  This excludes newly revealed flooring without turning
+    the whole ROI into an unobserved area.
+    """
+    shorter_edge = min(roi_width, roi_height)
+    if shorter_edge <= 0:
+        return 0
+    scale_radius = math.ceil(math.sqrt(max(1, support_pixels)) / 8.0)
+    return min(shorter_edge // 4, max(_STABILITY_DILATION_PIXELS, scale_radius))
+
+
+@dataclass(frozen=True, slots=True)
+class _StabilityProfile:
+    total_pixel_count: int
+    changed_pixel_count: int
+    valid_pixel_count: int
+    excluded_pixel_count: int
+    scene_stable: bool
+    veto_reason: str | None
+
+
+def _stable_background_profile(  # noqa: PLR0913 - profile inputs remain explicit
+    baseline: tuple[float, ...],
+    probe: tuple[float, ...],
+    indices: tuple[int, ...],
+    width: int,
+    height: int,
+    total_pixel_count: int,
+) -> _StabilityProfile:
+    """Measure bounded background change and distinguish local from global motion."""
+    valid_pixel_count = len(indices)
+    excluded_pixel_count = max(0, total_pixel_count - valid_pixel_count)
+    if (
+        not indices
+        or width <= 0
+        or height <= 0
+        or len(baseline) != len(probe)
+        or len(baseline) != valid_pixel_count
+    ):
+        return _StabilityProfile(
+            total_pixel_count,
+            0,
+            valid_pixel_count,
+            excluded_pixel_count,
+            scene_stable=False,
+            veto_reason="insufficient_stability_area",
+        )
+    stable = set(indices)
+    baseline_by_index = dict(zip(indices, baseline, strict=True))
+    probe_by_index = dict(zip(indices, probe, strict=True))
+    changed: set[int] = {
+        index
+        for index in indices
+        if abs(baseline_by_index[index] - probe_by_index[index]) > _SUPPORT_CHANGE_THRESHOLD
+    }
+    for index in indices:
+        x = index % width
+        for neighbor in (
+            (index + 1) if x + 1 < width else -1,
+            (index + width) if index + width in stable else -1,
+        ):
+            if neighbor not in stable:
+                continue
+            baseline_gradient = abs(baseline_by_index[index] - baseline_by_index[neighbor])
+            probe_gradient = abs(probe_by_index[index] - probe_by_index[neighbor])
+            if abs(baseline_gradient - probe_gradient) > _BACKGROUND_GRADIENT_CHANGE_THRESHOLD:
+                changed.add(index)
+                changed.add(neighbor)
+    changed_count = len(changed)
+    if changed_count == 0:
+        return _StabilityProfile(
+            total_pixel_count,
+            0,
+            valid_pixel_count,
+            excluded_pixel_count,
+            scene_stable=True,
+            veto_reason=None,
+        )
+
+    # A local person/object movement may change many pixels but cannot move
+    # all independent quadrants coherently.  Camera translation/scene cuts do.
+    xs = [index % width for index in changed]
+    ys = [index // width for index in changed]
+    span_x = (max(xs) - min(xs) + 1) / width
+    span_y = (max(ys) - min(ys) + 1) / height
+    quadrants = {
+        (0 if x < width / 2 else 1, 0 if y < height / 2 else 1) for x, y in zip(xs, ys, strict=True)
+    }
+    changed_ratio = changed_count / valid_pixel_count
+    global_change = (
+        changed_ratio >= _GLOBAL_CHANGE_RATIO_THRESHOLD
+        and span_x >= _GLOBAL_CHANGE_SPAN_THRESHOLD
+        and span_y >= _GLOBAL_CHANGE_SPAN_THRESHOLD
+        and len(quadrants) >= _GLOBAL_CHANGE_QUADRANT_COUNT
+    ) or changed_ratio >= _GLOBAL_CHANGE_FALLBACK_RATIO
+    return _StabilityProfile(
+        total_pixel_count,
+        changed_count,
+        valid_pixel_count,
+        excluded_pixel_count,
+        not global_change,
+        None if not global_change else "global_scene_change",
     )
 
 
@@ -588,7 +824,7 @@ def _aligned_support_choice(  # noqa: PLR0913 - each alignment boundary is expli
     policy: ObjectPresenceDecisionPolicy,
     *,
     diagnostics_sink: Callable[[str, int], None] | None = None,
-) -> _AlignmentChoice:
+) -> _AlignmentResolution:
     """Choose one deterministic bounded translation/rotation candidate.
 
     A coarse translation grid is refined around the best few candidates.  The
@@ -606,6 +842,7 @@ def _aligned_support_choice(  # noqa: PLR0913 - each alignment boundary is expli
     )
     translation_x = _alignment_offsets(radius_x, dense=dense_grid)
     translation_y = _alignment_offsets(radius_y, dense=dense_grid)
+    normalization = _build_luma_normalization(background_baseline, background_probe)
 
     def evaluate(transforms: Sequence[tuple[int, int, int]]) -> None:
         nonlocal comparison_count
@@ -642,6 +879,7 @@ def _aligned_support_choice(  # noqa: PLR0913 - each alignment boundary is expli
                 background_baseline,
                 background_probe,
                 (background_indices, width),
+                normalization,
             )
             support_ncc_raw = mean_centered_ncc(candidate_baseline, support_probe)
             support_ncc = None if support_ncc_raw is None else quantize_metric(support_ncc_raw)
@@ -704,6 +942,7 @@ def _aligned_support_choice(  # noqa: PLR0913 - each alignment boundary is expli
             )
         )
         evaluate(refine_transforms)
+    generated_count = len(translation_x) * len(translation_y) * len(_ALIGNMENT_ROTATIONS)
     if not candidates:
         _emit_alignment_diagnostics(
             diagnostics_sink,
@@ -712,20 +951,25 @@ def _aligned_support_choice(  # noqa: PLR0913 - each alignment boundary is expli
             comparison_count,
             started,
         )
-        return _AlignmentChoice(
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            (),
+        return _AlignmentResolution(
+            _AlignmentChoice(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                (),
+                0,
+                0,
+                0,
+                0.0,
+                -1.0,
+                0.0,
+            ),
+            max(generated_count, comparison_count),
+            comparison_count,
             0,
-            0,
-            0,
-            0.0,
-            -1.0,
-            0.0,
         )
     ordered = sorted(candidates, key=_alignment_sort_key, reverse=True)
     best = ordered[0]
@@ -745,7 +989,12 @@ def _aligned_support_choice(  # noqa: PLR0913 - each alignment boundary is expli
         comparison_count,
         started,
     )
-    return replace(best, margin=margin)
+    return _AlignmentResolution(
+        replace(best, margin=margin),
+        max(generated_count, comparison_count),
+        comparison_count,
+        len(candidates),
+    )
 
 
 def _alignment_offsets(radius: int, *, dense: bool) -> tuple[int, ...]:
@@ -875,30 +1124,15 @@ def _stable_background_change_ratio(
     width: int,
 ) -> float | None:
     """Measure luma and local-gradient changes only on fixed background pixels."""
-    if not indices or width <= 0 or len(baseline) != len(probe):
-        return None
-    stable = set(indices)
-    baseline_by_index = dict(zip(indices, baseline, strict=True))
-    probe_by_index = dict(zip(indices, probe, strict=True))
-    changed = {
-        index
-        for index in indices
-        if abs(baseline_by_index[index] - probe_by_index[index]) > _SUPPORT_CHANGE_THRESHOLD
-    }
-    for index in indices:
-        x = index % width
-        for neighbor in (
-            (index + 1) if x + 1 < width else -1,
-            (index + width) if width and index + width in stable else -1,
-        ):
-            if neighbor not in stable:
-                continue
-            baseline_gradient = abs(baseline_by_index[index] - baseline_by_index[neighbor])
-            probe_gradient = abs(probe_by_index[index] - probe_by_index[neighbor])
-            if abs(baseline_gradient - probe_gradient) > _BACKGROUND_GRADIENT_CHANGE_THRESHOLD:
-                changed.add(index)
-                changed.add(neighbor)
-    return quantize_metric(len(changed) / len(indices))
+    profile = _stable_background_profile(
+        baseline,
+        probe,
+        indices,
+        width,
+        max(1, math.ceil(len(baseline) / max(1, width))),
+        len(indices),
+    )
+    return quantize_metric(profile.changed_pixel_count / len(indices)) if indices else None
 
 
 def _support_edge_similarity(

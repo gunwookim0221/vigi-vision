@@ -9,6 +9,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StrictFloat,
     StrictInt,
     StrictStr,
@@ -59,6 +60,16 @@ class RawComparison(BaseModel):
     baseline_support_alignment_overlap: StrictFloat | None = None
     baseline_support_alignment_score: StrictFloat | None = None
     baseline_support_alignment_margin: StrictFloat | None = None
+    baseline_support_stability_pixel_count: StrictInt | None = None
+    baseline_support_stability_changed_pixel_count: StrictInt | None = None
+    baseline_support_stability_valid_pixel_count: StrictInt | None = None
+    baseline_support_stability_excluded_pixel_count: StrictInt | None = None
+    baseline_support_alignment_candidates_generated: StrictInt | None = None
+    baseline_support_alignment_candidates_evaluated: StrictInt | None = None
+    baseline_support_alignment_valid_candidates: StrictInt | None = None
+    baseline_support_alignment_state: StrictStr | None = None
+    baseline_support_scene_stable: StrictBool | None = None
+    baseline_support_scene_stability_veto_reason: StrictStr | None = None
 
     @model_validator(mode="after")
     def validate_closed_matrix(self) -> RawComparison:
@@ -84,6 +95,7 @@ class RawComparison(BaseModel):
             )
         ):
             raise ValueError
+        _validate_successor_observability(self)
         match self.visual_status:
             case VisualStatus.COMPARABLE:
                 if self.unusable_reason is not None:
@@ -281,6 +293,29 @@ def _require_complete_baseline_support(comparison: RawComparison) -> None:
 
 def _require_alignment_evidence(comparison: RawComparison) -> None:
     """Require bounded local-alignment facts for the v3 successor row."""
+    state = comparison.baseline_support_alignment_state
+    if state is not None and state not in {
+        "aligned",
+        "ambiguous",
+        "no_valid_candidate",
+        "not_required",
+    }:
+        raise ValueError
+    if state in {"no_valid_candidate", "not_required"} and all(
+        value is None
+        for value in (
+            # Older v3 rows used a numeric no-candidate sentinel.  Accept
+            # those rows for strict reopen compatibility; newly produced rows
+            # use null selection facts with the explicit state.
+            comparison.baseline_support_alignment_dx,
+            comparison.baseline_support_alignment_dy,
+            comparison.baseline_support_alignment_rotation_degrees,
+            comparison.baseline_support_alignment_overlap,
+            comparison.baseline_support_alignment_score,
+            comparison.baseline_support_alignment_margin,
+        )
+    ):
+        return
     required = (
         comparison.baseline_support_alignment_dx,
         comparison.baseline_support_alignment_dy,
@@ -302,6 +337,79 @@ def _require_alignment_evidence(comparison: RawComparison) -> None:
         or comparison.baseline_support_alignment_overlap is None
         or not 0.0 < comparison.baseline_support_alignment_overlap <= 1.0
     ):
+        raise ValueError
+
+
+def _validate_successor_observability(comparison: RawComparison) -> None:
+    """Validate additive scene/alignment facts without breaking old rows."""
+    stability_values = (
+        comparison.baseline_support_stability_pixel_count,
+        comparison.baseline_support_stability_changed_pixel_count,
+        comparison.baseline_support_stability_valid_pixel_count,
+        comparison.baseline_support_stability_excluded_pixel_count,
+        comparison.baseline_support_scene_stable,
+        comparison.baseline_support_scene_stability_veto_reason,
+    )
+    if any(value is not None for value in stability_values):
+        total = comparison.baseline_support_stability_pixel_count
+        changed = comparison.baseline_support_stability_changed_pixel_count
+        valid = comparison.baseline_support_stability_valid_pixel_count
+        excluded = comparison.baseline_support_stability_excluded_pixel_count
+        stable = comparison.baseline_support_scene_stable
+        veto = comparison.baseline_support_scene_stability_veto_reason
+        if (
+            total is None
+            or changed is None
+            or valid is None
+            or excluded is None
+            or stable is None
+            or total != comparison.roi_pixel_count
+            or total <= 0
+            or changed < 0
+            or valid <= 0
+            or excluded < 0
+            or changed > valid
+            or valid + excluded != total
+            or (stable and veto is not None)
+            or (
+                not stable
+                and (
+                    veto is None
+                    or veto
+                    not in {
+                        "global_scene_change",
+                        "insufficient_stability_area",
+                        "registration_failed",
+                    }
+                )
+            )
+        ):
+            raise ValueError
+    alignment_counts = (
+        comparison.baseline_support_alignment_candidates_generated,
+        comparison.baseline_support_alignment_candidates_evaluated,
+        comparison.baseline_support_alignment_valid_candidates,
+    )
+    if any(value is not None for value in alignment_counts):
+        generated, evaluated, valid = alignment_counts
+        if (
+            generated is None
+            or evaluated is None
+            or valid is None
+            or generated <= 0
+            or evaluated < 0
+            or valid < 0
+            or evaluated > generated
+            or valid > evaluated
+        ):
+            raise ValueError
+    state = comparison.baseline_support_alignment_state
+    if state is not None and state not in {
+        "aligned",
+        "ambiguous",
+        "no_valid_candidate",
+        "not_required",
+    }:
         raise ValueError
 
 
