@@ -145,6 +145,69 @@ def test_publish_reopens_identity_bound_full_and_roi_frames(tmp_path):
     assert repository.read(prepared.request.investigation_id, prepared.request.run_id) == manifest
 
 
+def test_found_bracket_ids_match_second_precision_terminal_times(tmp_path):
+    prepared, observations, _terminal = _fixture(tmp_path)
+    present = replace(
+        observations[-1],
+        requested_time_utc=NOW,
+        frame_utc=NOW.replace(microsecond=987654),
+        observation_id="successor-observation-v1-present",
+    )
+    absent = replace(
+        observations[-1],
+        requested_time_utc=NOW.replace(second=2),
+        frame_utc=NOW.replace(second=2, microsecond=123456),
+        observation_id="successor-observation-v1-absent",
+        state=SuccessorObservationState.ABSENT,
+    )
+    terminal = SimpleNamespace(
+        status="FOUND",
+        reason_code="disappearance_confirmed",
+        last_present_time_utc="2026-09-12T05:00:00Z",
+        first_absent_time_utc="2026-09-12T05:00:02Z",
+    )
+    repository = SuccessorEvidenceRepository(tmp_path / ".successor")
+
+    manifest = repository.publish(prepared, (observations[0], present, absent), terminal)
+
+    assert manifest["last_present_observation_id"] == present.observation_id
+    assert manifest["first_absent_observation_id"] == absent.observation_id
+
+
+def test_found_bracket_id_stays_unavailable_for_ambiguous_second(tmp_path):
+    prepared, observations, _terminal = _fixture(tmp_path)
+    present = replace(
+        observations[-1],
+        requested_time_utc=NOW,
+        frame_utc=NOW.replace(microsecond=100000),
+        observation_id="successor-observation-v1-present-a",
+    )
+    duplicate = replace(
+        present,
+        frame_utc=NOW.replace(microsecond=900000),
+        observation_id="successor-observation-v1-present-b",
+    )
+    absent = replace(
+        observations[-1],
+        requested_time_utc=NOW.replace(second=2),
+        frame_utc=NOW.replace(second=2, microsecond=123456),
+        observation_id="successor-observation-v1-absent",
+        state=SuccessorObservationState.ABSENT,
+    )
+    terminal = SimpleNamespace(
+        status="FOUND",
+        reason_code="disappearance_confirmed",
+        last_present_time_utc="2026-09-12T05:00:00Z",
+        first_absent_time_utc="2026-09-12T05:00:02Z",
+    )
+    repository = SuccessorEvidenceRepository(tmp_path / ".successor")
+
+    manifest = repository.publish(prepared, (observations[0], present, duplicate, absent), terminal)
+
+    assert manifest["last_present_observation_id"] is None
+    assert manifest["first_absent_observation_id"] == absent.observation_id
+
+
 def test_digest_mismatch_fails_closed(tmp_path):
     prepared, observations, terminal = _fixture(tmp_path)
     observation = observations[-1]

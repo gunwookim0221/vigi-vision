@@ -4708,6 +4708,15 @@ controlled failure. Threshold tuning creates a named policy successor and never
 weakens the rule that uncertainty or infrastructure failure cannot become
 `ABSENT`.
 
+For a successor `FOUND` result, the evidence manifest binds
+`last_present_observation_id` and `first_absent_observation_id` to the actual
+PRESENT and ABSENT observation entries that formed the terminal bracket. The
+publisher compares parsed UTC instants (with the execution boundary's
+whole-second precision) rather than serialized timestamp strings. The browser
+renders bracket cards only after those identity-bound entries, states, and
+digests validate; missing, ambiguous, or inconsistent links remain unavailable
+and never fall back to the baseline or latest observation.
+
 ## Deferred resilience reference
 
 Lease/fencing ownership, takeover, resume, multi-host coordination, full

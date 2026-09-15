@@ -342,10 +342,10 @@ class SuccessorEvidenceRepository:
                 "terminal_status": terminal.status,
                 "terminal_reason": terminal.reason_code,
                 "last_present_observation_id": _observation_for_time(
-                    observations, terminal.last_present_time_utc
+                    observations, terminal.last_present_time_utc, "PRESENT"
                 ),
                 "first_absent_observation_id": _observation_for_time(
-                    observations, terminal.first_absent_time_utc
+                    observations, terminal.first_absent_time_utc, "ABSENT"
                 ),
                 "review_clip": {"status": "UNAVAILABLE", "reason": "phase8_not_requested"},
                 "entries": entries,
@@ -532,14 +532,46 @@ def _publish_roi_crop(
 
 
 def _observation_for_time(
-    observations: tuple[SuccessorObservation, ...], value: str | None
+    observations: tuple[SuccessorObservation, ...], value: str | None, state: str
 ) -> str | None:
-    if value is None:
+    if value is None or not isinstance(value, str) or not value.endswith("Z"):
         return None
-    for item in observations:
-        if item.frame_utc is not None and _timestamp(item.frame_utc) == value:
-            return item.observation_id
-    return None
+    try:
+        target = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        return None
+    if target.tzinfo is None:
+        return None
+    target = target.astimezone(timezone.utc).replace(microsecond=0)
+    matches: list[tuple[int, int, str]] = []
+    for index, item in enumerate(observations):
+        if (
+            item.observation_id is None
+            or item.frame_utc is None
+            or item.state.value != state
+            or item.frame_utc.astimezone(timezone.utc).replace(microsecond=0) != target
+        ):
+            continue
+        # Prefer a real search observation over the anchor/baseline link when
+        # timestamp precision is reduced to whole seconds at publication.
+        target_id = item.target_id
+        role_rank = (
+            2
+            if target_id.startswith("successor-baseline-v1-")
+            else 1
+            if target_id.startswith("successor-anchor-target-v1-")
+            else 0
+        )
+        matches.append((role_rank, index, item.observation_id))
+    if not matches:
+        return None
+    best_rank = min(item[0] for item in matches)
+    best = [item for item in matches if item[0] == best_rank]
+    # Whole-second terminal timing cannot safely distinguish two real search
+    # observations in the same second; refuse to invent a bracket identity.
+    if len(best) != 1:
+        return None
+    return best[0][2]
 
 
 def _validate_manifest(value: object, investigation_id: str, run_id: str) -> None:

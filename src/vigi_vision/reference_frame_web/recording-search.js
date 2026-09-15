@@ -1022,6 +1022,12 @@
       || (payload.terminal_reason !== null && (!EVIDENCE_REASONS.has(payload.terminal_reason)))
       || (payload.last_present_observation_id !== null && typeof payload.last_present_observation_id !== "string")
       || (payload.first_absent_observation_id !== null && typeof payload.first_absent_observation_id !== "string")
+      || (payload.terminal_status === "FOUND"
+        && (typeof payload.last_present_observation_id !== "string"
+          || payload.last_present_observation_id === ""
+          || typeof payload.first_absent_observation_id !== "string"
+          || payload.first_absent_observation_id === ""
+          || payload.last_present_observation_id === payload.first_absent_observation_id))
       || !hasExactKeys(payload.review_clip, ["status", "reason"])
       || !["UNAVAILABLE", "READY"].includes(payload.review_clip.status)
       || typeof payload.review_clip.reason !== "string"
@@ -1168,10 +1174,13 @@
     setEvidenceHighlight(baselineHighlight, roi, sourceWidth, sourceHeight);
     setEvidenceHighlight(endHighlight, roi, sourceWidth, sourceHeight);
     if (foundEvidence != null) foundEvidence.hidden = true;
+    let bracketEvidenceAvailable = terminalPayload?.status !== "FOUND";
     if (terminalPayload?.status === "FOUND" && foundEvidence != null) {
       const present = entries.find((item) => item.observation_id === payload.last_present_observation_id
+        && item.role === "observation" && item.state === "PRESENT"
         && evidenceDigest(item) !== null);
       const absent = entries.find((item) => item.observation_id === payload.first_absent_observation_id
+        && item.role === "observation" && item.state === "ABSENT"
         && evidenceDigest(item) !== null);
       const presentSrc = evidenceUrl(present);
       const absentSrc = evidenceUrl(absent);
@@ -1190,10 +1199,13 @@
           setEvidenceHighlight(lastPresentHighlight, roi, sourceWidth, sourceHeight);
           setEvidenceHighlight(firstAbsentHighlight, roi, sourceWidth, sourceHeight);
           foundEvidence.hidden = false;
+          bracketEvidenceAvailable = true;
         }
       }
     }
-    evidenceStatus.textContent = (ending.state === "INDETERMINATE"
+    evidenceStatus.textContent = !bracketEvidenceAvailable
+      ? "소실 구간의 관측 증거를 안전하게 확인할 수 없습니다."
+      : (ending.state === "INDETERMINATE"
       || terminalPayload?.status === "INCONCLUSIVE"
       && ["indeterminate_observation", "insufficient_visual_evidence"].includes(terminalPayload.reason_code))
       ? "자동 판정이 불확실하므로 직접 비교하세요."

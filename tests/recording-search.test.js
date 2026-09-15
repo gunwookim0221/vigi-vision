@@ -811,6 +811,61 @@ test("terminal FOUND loads identity-bound visual evidence and both bracket frame
   assert.match(harness.recordingSearchReviewClipStatus.textContent, /사용할 수 없습니다/);
 });
 
+test("FOUND never substitutes baseline evidence when a bracket observation is missing", async () => {
+  const payload = evidenceManifest("FOUND");
+  payload.entries = payload.entries.filter((entry) => entry.state !== "ABSENT");
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    if (url.endsWith("/evidence")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => payload });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => foundStatusWithTiming() });
+  }, undefined, { confirmation: true, search: true, evidence: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  await settle();
+
+  assert.equal(harness.recordingSearchFoundEvidence.hidden, true);
+  assert.equal(harness.recordingSearchLastPresentImage.hidden, true);
+  assert.equal(harness.recordingSearchFirstAbsentImage.hidden, true);
+  assert.equal(harness.recordingSearchEvidenceStatus.textContent,
+    "소실 구간의 관측 증거를 안전하게 확인할 수 없습니다.");
+});
+
+test("FOUND evidence with missing bracket identities is rejected safely", async () => {
+  const payload = evidenceManifest("FOUND");
+  payload.last_present_observation_id = null;
+  payload.first_absent_observation_id = null;
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    if (url.endsWith("/evidence")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => payload });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => foundStatusWithTiming() });
+  }, undefined, { confirmation: true, search: true, evidence: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  await settle();
+
+  assert.equal(harness.recordingSearchEvidenceStatus.textContent,
+    "시각 증거 형식을 안전하게 확인할 수 없습니다.");
+  assert.equal(harness.recordingSearchFoundEvidence.hidden, true);
+});
+
 test("search-end evidence selection is role and time based, not array order", async () => {
   const payload = evidenceManifest("FOUND");
   payload.entries = [payload.entries[0], payload.entries[2], payload.entries[1]];
