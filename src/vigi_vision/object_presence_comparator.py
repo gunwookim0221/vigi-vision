@@ -629,6 +629,11 @@ def _build_luma_normalization(
     baseline_background: tuple[float, ...], probe_background: tuple[float, ...]
 ) -> _LumaNormalization | None:
     """Build robust ring normalization once per aligned replay window."""
+    if not baseline_background or not probe_background:
+        # A tight ROI can leave no pixels outside the alignment exclusion ring.
+        # Treat that as unavailable normalization so the bounded alignment
+        # search can fail closed and fall back to fixed-support evidence.
+        return None
     # A local person/object in the ring must not move the global brightness
     # anchor.  Medians keep the registration/contrast normalization stable
     # when a bounded portion of the external scene changes.

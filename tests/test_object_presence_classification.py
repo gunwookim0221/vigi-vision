@@ -441,6 +441,52 @@ def test_baseline_support_v3_reclassifies_removed_shoe_as_absent() -> None:
     assert result.comparison.baseline_support_empty_background_evidence is True
 
 
+def test_baseline_support_v3_handles_empty_alignment_background_for_tight_roi() -> None:
+    """A tight source ROI may have fixed stability pixels but no alignment ring."""
+    width, height = 66, 125
+    mask_rows = tuple(
+        tuple(16 <= x < 50 and 16 <= y < 110 for x in range(width)) for y in range(height)
+    )
+    empty_probe_rows = tuple(tuple(False for _ in range(width)) for _ in range(height))
+    baseline_rows = []
+    probe_rows = []
+    for y in range(height):
+        baseline_row = []
+        probe_row = []
+        for x in range(width):
+            background = 150 + ((x + y) % 5)
+            if 16 <= x < 50 and 16 <= y < 110:
+                baseline_row.append((20 + ((x + y) % 10),) * 3)
+                probe_row.append((150 + ((3 * x + 7 * y) % 5),) * 3)
+            else:
+                baseline_row.append((background,) * 3)
+                probe_row.append((background,) * 3)
+        baseline_rows.append(tuple(baseline_row))
+        probe_rows.append(tuple(probe_row))
+    classifier = _support_classifier(
+        classifier_policy_version="test-tight-roi-v3",
+        classifier_preprocessing_version="test-tight-roi-v3",
+        baseline_support_alignment_mode=True,
+    )
+    result = classifier.classify(
+        ClassifierInput(
+            baseline_image=DecodedRgbImage.from_rows(tuple(baseline_rows)),
+            probe_image=DecodedRgbImage.from_rows(tuple(probe_rows)),
+            baseline_mask=BinaryMask.from_rows(mask_rows),
+            probe_mask=BinaryMask.from_rows(empty_probe_rows),
+            roi=ConfirmationRoi(
+                x=0,
+                y=0,
+                width=width,
+                height=height,
+                coordinate_space="source_pixels",
+                provenance=RoiProvenance.MANUAL,
+            ),
+        )
+    )
+    assert result.outcome is ClassificationOutcome.ABSENT
+
+
 def test_preserved_run_b_absence_does_not_require_alignment_success() -> None:
     policy = ObjectPresenceDecisionPolicy(
         classifier_policy_version="test-preserved-run-b-v3",

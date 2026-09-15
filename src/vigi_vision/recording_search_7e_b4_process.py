@@ -401,6 +401,8 @@ def run_b4_in_process(
         }
         if isinstance(primary_error, B4ProcessTimeout):
             event["timeout_stage"] = primary_error.stage
+        if isinstance(primary_error, B4ProcessError):
+            event["error_code"] = primary_error.code
         if process_started_at is not None:
             if ready and ready_received_at is not None:
                 event["startup_ms"] = _elapsed_ms(process_started_at, ready_received_at)

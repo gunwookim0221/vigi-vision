@@ -226,6 +226,7 @@ def test_invalid_classifier_output_is_reaped_immediately() -> None:
     baseline, probe, _baseline_mask, _probe_mask, roi, policy = _values()
     empty = BinaryMask.from_rows(tuple(tuple(False for _ in range(32)) for _ in range(32)))
     pids: list[int] = []
+    events: list[dict[str, int | str]] = []
     with pytest.raises(B4ProcessError) as raised:
         run_b4_in_process(
             baseline_image=baseline,
@@ -238,10 +239,12 @@ def test_invalid_classifier_output_is_reaped_immediately() -> None:
             correlation_id="invalid-output",
             timeout_seconds=3.0,
             pid_observer=pids.append,
+            timing_sink=events.append,
         )
     assert raised.value.code == "invalid_classifier_output"
     assert raised.value.cleanup_failed is False
     assert len(pids) == 1
+    assert events[-1]["error_code"] == "invalid_classifier_output"
     _assert_reaped(pids)
 
 
@@ -521,6 +524,7 @@ def test_inference_timeout_reports_stage_and_safe_timing() -> None:
         "event",
         "stage",
         "timeout_stage",
+        "error_code",
         "cleanup_ms",
         "startup_ms",
         "ipc_result_ms",
