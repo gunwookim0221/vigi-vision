@@ -44,11 +44,17 @@ from vigi_vision.recording_search_successor_acquisition import SuccessorTargetAc
 from vigi_vision.recording_search_successor_classification import (
     SuccessorClassifierResult,
     SuccessorCoarseClassificationService,
+    SuccessorObservation,
 )
-from vigi_vision.recording_search_successor_evidence import SuccessorEvidenceRepository
+from vigi_vision.recording_search_successor_evidence import (
+    SuccessorEvidenceError,
+    SuccessorEvidenceRepository,
+)
 from vigi_vision.recording_search_successor_execution import (
     SuccessorExecutionError,
     SuccessorExecutionService,
+    SuccessorPreparedExecution,
+    SuccessorTerminal,
     SuccessorTerminalRepository,
 )
 from vigi_vision.recording_search_successor_narrowing import SuccessorBinaryNarrowingService
@@ -72,7 +78,11 @@ def _free_port() -> int:
 
 
 def _http_json(
-    base_url: str, path: str, body: dict[str, object] | None = None
+    base_url: str,
+    path: str,
+    body: dict[str, object] | None = None,
+    *,
+    timeout: float = 3,
 ) -> tuple[int, dict[str, object]]:
     data = None if body is None else json.dumps(body).encode("utf-8")
     request = Request(  # noqa: S310 - loopback URL is fixed by the test.
@@ -81,7 +91,7 @@ def _http_json(
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         method="POST" if body is not None else "GET",
     )
-    with urlopen(request, timeout=3) as response:  # noqa: S310 - loopback test URL.
+    with urlopen(request, timeout=timeout) as response:  # noqa: S310 - loopback test URL.
         return response.status, json.load(response)
 
 
@@ -214,6 +224,19 @@ class _Classifier:
             ClassificationOutcome.ABSENT if probe.pixels[0][0][0] else ClassificationOutcome.PRESENT
         )
         return SuccessorClassifierResult(outcome)
+
+
+class _PublishThenFailEvidence(SuccessorEvidenceRepository):
+    """Persist evidence, then fail the terminal publication boundary."""
+
+    def publish(
+        self,
+        prepared: SuccessorPreparedExecution,
+        observations: tuple[SuccessorObservation, ...],
+        terminal: SuccessorTerminal,
+    ) -> None:
+        _ = super().publish(prepared, observations, terminal)
+        raise SuccessorEvidenceError
 
 
 class _IndeterminateClassifier(_Classifier):
@@ -591,6 +614,29 @@ def test_visual_indeterminate_reason_is_not_collapsed_in_terminal(tmp_path: Path
     )
 
 
+def test_successor_publication_failure_gets_durable_terminal_fallback(tmp_path: Path) -> None:
+    service = _service(tmp_path, ANCHOR + timedelta(hours=2))
+    service.evidence_repository = _PublishThenFailEvidence(tmp_path / "successor")
+    confirmed = replace(
+        _confirmed(tmp_path),
+        jpeg_sha256=hashlib.sha256(b"baseline").hexdigest(),
+    )
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:27:32",
+        run_id="search-run-ffffffffffffffffffffffffffffffff",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+
+    with pytest.raises(SuccessorExecutionError, match="publication_failed"):
+        service.execute(prepared)
+
+    terminal = service.publisher.read(confirmed.investigation_id, prepared.request.run_id)
+    assert terminal is not None
+    assert terminal["status"] == "FAILED"
+    assert terminal["reason_code"] == "internal_error"
+
+
 def test_anchor_indeterminate_still_acquires_and_publishes_search_end_evidence(
     tmp_path: Path,
 ) -> None:
@@ -655,6 +701,24 @@ def test_successor_durable_running_state_recovers_as_interrupted(tmp_path: Path)
     recovered = repository.read(prepared.request.investigation_id, prepared.request.run_id)
     assert recovered is not None
     assert recovered["status"] == "INTERRUPTED"
+
+
+def test_successor_terminal_is_not_reactivated_by_late_worker(tmp_path: Path) -> None:
+    service = _service(tmp_path, ANCHOR + timedelta(minutes=15))
+    confirmed = _confirmed(tmp_path)
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-dddddddddddddddddddddddddddddddd",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    result = service.execute(prepared)
+    assert result.status == "FOUND"
+    service.publisher.publish_running(prepared)
+    reopened = service.publisher.read(confirmed.investigation_id, prepared.request.run_id)
+    assert reopened is not None
+    assert reopened["status"] == "FOUND"
+    assert reopened["terminal_result_id"] == result.terminal_result_id
 
 
 def test_schema8_reopen_rejects_coercion_and_malformed_lists(tmp_path: Path) -> None:
@@ -846,7 +910,10 @@ def test_successor_browser_surface_runs_through_uvicorn_http_and_reload(  # noqa
         cwd=Path(__file__).parents[1],
         env=environment,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        # The worker emits bounded structured lifecycle diagnostics.  This
+        # integration test does not inspect the stream; discard it so a
+        # platform pipe buffer cannot backpressure the application worker.
+        stderr=subprocess.DEVNULL,
         text=True,
         encoding="utf-8",
         errors="replace",
@@ -891,11 +958,16 @@ def test_successor_browser_surface_runs_through_uvicorn_http_and_reload(  # noqa
         )
         assert code == 202
         status_payload: dict[str, object] = {}
-        for _ in range(100):
-            _, status_payload = _http_json(base_url, str(accepted["status_url"]))
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            _, status_payload = _http_json(
+                base_url,
+                str(accepted["status_url"]),
+                timeout=10,
+            )
             if status_payload["status"] not in {"ACCEPTED", "RUNNING"}:
                 break
-            time.sleep(0.03)
+            time.sleep(0.05)
         assert status_payload["status"] == "FOUND"
         assert status_payload["schema_version"] == 8
         _, restored = _http_json(base_url, str(accepted["status_url"]))

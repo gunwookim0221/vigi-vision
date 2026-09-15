@@ -765,6 +765,24 @@ class Phase7EPublicService:
             )
         return self.status(request_domain.investigation_id, request_domain.run_id)
 
+    def publish_background_terminal(
+        self,
+        prepared: Phase7EPreparedRequest,
+        *,
+        status: str,
+        reason_code: str,
+    ) -> Phase7EPublicStatus:
+        """Close a worker/watchdog failure through the durable successor boundary."""
+        if prepared.successor is not None:
+            if self.successor_execution is None:
+                raise Phase7EPublicError("recording_search_execution_unavailable")
+            self.successor_execution.publish_safety_terminal(
+                prepared.successor,
+                status=status,
+                reason_code=reason_code,
+            )
+        return self.status(prepared.request.investigation_id, prepared.request.run_id)
+
     def status(self, investigation_id: str, run_id: str) -> Phase7EPublicStatus:
         if self.successor_execution is not None:
             successor_record = self.successor_execution.publisher.read(investigation_id, run_id)

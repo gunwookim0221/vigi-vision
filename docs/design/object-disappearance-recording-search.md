@@ -1555,10 +1555,19 @@ payloads, or internal manifests.
 The application owns one fixed one-worker executor and a bounded 64-entry
 request ledger; it has no unbounded queue. The worker calls the same
 `Phase7EPublicService` used by CLI, holds existing invocation ownership across
-1C/1D, and uses the same cumulative deadline and cancellation checks. Shutdown
-cancels and joins the worker. Startup scans at most 1,024 durable run
-directories, interrupts strictly reopened unowned RUNNING schemas, and never
-resumes decode/classification. Durable state wins over process-memory state.
+1C/1D, and uses the same cumulative deadline and cancellation checks. A
+process-local execution watchdog (one hour by default) bounds the browser
+worker independently of those per-operation budgets. If narrowing makes no
+strict progress, an indeterminate target has no usable bounded fallback, or a
+worker/publication exception escapes, the service publishes one closed safe
+terminal (`INCONCLUSIVE/execution_deadline_exhausted` for watchdog expiry or
+`FAILED/internal_error` for an unexpected worker failure). Terminal publication
+is idempotent and never overwrites an existing terminal. Watchdog cancellation
+continues through the normal invocation cleanup path; no partial evidence is
+promoted. Shutdown cancels and joins the worker. Startup scans at most 1,024
+durable run directories, interrupts strictly reopened unowned RUNNING schemas,
+and never resumes decode/classification. Durable state wins over
+process-memory state.
 `GET /api/v1/recording-searches/{investigation_id}/{run_id}` is read-only and
 projects strict schema 1–4 legacy status, schema 5–7 Phase 7 status, or Schema
 8 successor status joined

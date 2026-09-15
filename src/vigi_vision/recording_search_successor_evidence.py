@@ -210,6 +210,7 @@ _REASONS = frozenset(
         "no_present_absent_bracket",
         "cancelled",
         "internal_error",
+        "execution_deadline_exhausted",
         "roi_occluded",
     }
 )

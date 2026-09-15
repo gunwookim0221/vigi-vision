@@ -374,7 +374,11 @@ existing process-owned handle through terminalization. GET status stays
 read-only. Exact request-ID duplicates reuse the same derived run identity;
 conflicting or concurrent starts do not create overlapping work. Startup marks
 strictly reopened, unowned RUNNING schemas interrupted and never resumes their
-decode or classification work. There is no lease or takeover behavior.
+decode or classification work. A one-hour process-local watchdog bounds a live
+browser worker; cancellation follows the normal child/media cleanup path and
+publishes a durable safe terminal if execution or publication escapes. Terminal
+publication never overwrites an existing terminal, and there is no lease or
+takeover behavior.
 
 The selected comparator uses the existing verified EfficientSAM-Ti point-mask
 path plus aligned source-ROI mask IoU and mean-centered luma correlation. Its

@@ -149,6 +149,59 @@ class _BlockingService:
         )
 
 
+class _WatchdogService(_BlockingService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.durable = "RUNNING"
+        self.durable_reason: str | None = None
+        self.publish_calls = 0
+
+    def publish_background_terminal(
+        self,
+        prepared: object,
+        *,
+        status: str,
+        reason_code: str,
+    ) -> Phase7EPublicStatus:
+        self.publish_calls += 1
+        self.durable = status
+        self.durable_reason = reason_code
+        request = prepared.request
+        return Phase7EPublicStatus(
+            Phase7EStatus(
+                request.investigation_id,
+                request.run_id,
+                8,
+                status,
+                reason_code,
+                "successor-terminal-v1-" + "a" * 64,
+            )
+        )
+
+    def status(self, investigation_id: str, run_id: str) -> Phase7EPublicStatus:
+        if self.durable == "RUNNING":
+            return Phase7EPublicStatus(
+                Phase7EStatus(investigation_id, run_id, 8, "RUNNING", None, None)
+            )
+        return Phase7EPublicStatus(
+            Phase7EStatus(
+                investigation_id,
+                run_id,
+                8,
+                self.durable,
+                self.durable_reason,
+                "successor-terminal-v1-" + "a" * 64,
+            )
+        )
+
+
+class _WorkerFailureService(_WatchdogService):
+    def execute_prepared(self, prepared: object, *, cancellation: object) -> Phase7EPublicStatus:
+        _ = (prepared, cancellation)
+        self.started.set()
+        raise RuntimeError
+
+
 class _FailingService(_BlockingService):
     def __init__(self, *, durable_interrupted: bool) -> None:
         super().__init__()
@@ -346,6 +399,40 @@ def test_background_shutdown_cancels_and_joins_the_only_worker() -> None:
     manager.close()
     assert service.active == 0
     assert service.calls == 1
+
+
+def test_background_watchdog_publishes_bounded_terminal() -> None:
+    service = _WatchdogService()
+    manager = Phase7EBackgroundManager(
+        cast("Any", service),
+        execution_deadline_seconds=0.05,
+    )
+    receipt = manager.start("inv-01", "2026-07-20T12:00:05", _REQUEST_ID)
+    deadline = time.monotonic() + 1
+    projected = manager.status(receipt.investigation_id, receipt.run_id)
+    while projected.phase7.status == "RUNNING" and time.monotonic() < deadline:
+        time.sleep(0.01)
+        projected = manager.status(receipt.investigation_id, receipt.run_id)
+    assert projected.phase7.status == "INCONCLUSIVE"
+    assert projected.phase7.reason_code == "execution_deadline_exhausted"
+    assert service.publish_calls == 1
+    manager.close()
+
+
+def test_background_worker_exception_publishes_durable_terminal() -> None:
+    service = _WorkerFailureService()
+    manager = Phase7EBackgroundManager(cast("Any", service))
+    receipt = manager.start("inv-01", "2026-07-20T12:00:05", _REQUEST_ID)
+    assert service.started.wait(1)
+    deadline = time.monotonic() + 1
+    projected = manager.status(receipt.investigation_id, receipt.run_id)
+    while projected.phase7.status == "RUNNING" and time.monotonic() < deadline:
+        time.sleep(0.01)
+        projected = manager.status(receipt.investigation_id, receipt.run_id)
+    assert projected.phase7.status == "FAILED"
+    assert projected.phase7.reason_code == "internal_error"
+    assert service.publish_calls == 1
+    manager.close()
 
 
 def test_phase7e_http_rejects_authoritative_overrides_and_noncanonical_time() -> None:

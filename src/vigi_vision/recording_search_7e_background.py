@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import logging
+import math
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from threading import Event, Lock
-from typing import TYPE_CHECKING, Protocol, final
+from threading import Event, Lock, Timer
+from typing import TYPE_CHECKING, Protocol, cast, final
 
 from vigi_vision.recording_search_7e_1d import Phase7EStatus
 from vigi_vision.recording_search_7e_public import (
@@ -19,6 +22,8 @@ from vigi_vision.recording_search_7e_public import (
 _UNAVAILABLE = "recording_search_execution_unavailable"
 _CONFLICT = "request_conflict"
 _ALREADY_RUNNING = "already_running"
+_DEFAULT_EXECUTION_DEADLINE_SECONDS = 60.0 * 60.0
+_LOGGER = logging.getLogger("uvicorn.error.vigi_vision.phase7e")
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -48,6 +53,14 @@ class Phase7EBackgroundService(Protocol):
 
     def recover_abandoned(self) -> int: ...
 
+    def publish_background_terminal(
+        self,
+        prepared: Phase7EPreparedRequest,
+        *,
+        status: str,
+        reason_code: str,
+    ) -> Phase7EPublicStatus: ...
+
 
 @dataclass(frozen=True, slots=True)
 class Phase7EStartReceipt:
@@ -75,6 +88,7 @@ class _Job:
     error_code: str | None = None
     failure_diagnostic: Phase7EFailureDiagnostic | None = None
     future: Future[None] | None = field(default=None, repr=False)
+    watchdog: Timer | None = field(default=None, repr=False)
 
     @property
     def run_id(self) -> str:
@@ -95,9 +109,17 @@ class Phase7EBackgroundManager:
 
     _MAX_RECENT = 64
 
-    def __init__(self, service: Phase7EBackgroundService) -> None:
+    def __init__(
+        self,
+        service: Phase7EBackgroundService,
+        *,
+        execution_deadline_seconds: float = _DEFAULT_EXECUTION_DEADLINE_SECONDS,
+    ) -> None:
         """Create one fixed worker and an empty bounded request ledger."""
+        if not math.isfinite(execution_deadline_seconds) or execution_deadline_seconds <= 0:
+            raise ValueError
         self._service = service
+        self._execution_deadline_seconds = float(execution_deadline_seconds)
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="phase7e-browser")
         self._admission_lock = Lock()
         self._lock = Lock()
@@ -163,6 +185,13 @@ class Phase7EBackgroundManager:
             self._remember(job)
             self._active_request_id = request_id
             job.future = self._executor.submit(self._run, job)
+            job.watchdog = Timer(
+                self._execution_deadline_seconds,
+                self._watchdog_expired,
+                args=(job,),
+            )
+            job.watchdog.daemon = True
+            job.watchdog.start()
             return Phase7EStartReceipt(request_id, investigation_id, job.run_id, "ACCEPTED")
 
     def status(self, investigation_id: str, run_id: str) -> Phase7EPublicStatus:
@@ -218,6 +247,8 @@ class Phase7EBackgroundManager:
             active = self._jobs.get(self._active_request_id or "")
             if active is not None:
                 active.cancellation.set()
+                if active.watchdog is not None:
+                    active.watchdog.cancel()
         self._executor.shutdown(wait=True, cancel_futures=True)
 
     def recover_startup(self) -> None:
@@ -237,11 +268,27 @@ class Phase7EBackgroundManager:
                 job.error_code = result.phase7.reason_code
                 job.failure_diagnostic = None
         except Phase7EPublicError as error:
+            diagnostic = error.diagnostic or _fallback_public_diagnostic(error.code)
+            _safe_log(
+                "phase7e.worker_lifecycle",
+                stage="worker_exception",
+                phase="successor_execution",
+                status="RUNNING",
+                error_code=diagnostic.category,
+            )
             self._record_failure(
                 job,
-                error.diagnostic or _fallback_public_diagnostic(error.code),
+                diagnostic,
             )
+            self._publish_worker_terminal(job)
         except Exception:  # noqa: BLE001 - worker state is a fixed safe projection.
+            _safe_log(
+                "phase7e.worker_lifecycle",
+                stage="worker_exception",
+                phase="successor_execution",
+                status="RUNNING",
+                error_code="internal_error",
+            )
             self._record_failure(
                 job,
                 Phase7EFailureDiagnostic(
@@ -251,11 +298,116 @@ class Phase7EBackgroundManager:
                     "unknown",
                 ),
             )
+            self._publish_worker_terminal(job)
         finally:
+            if job.watchdog is not None:
+                job.watchdog.cancel()
             self._recover_unexpected_running(job)
             with self._lock:
                 if self._active_request_id == job.request_id:
                     self._active_request_id = None
+
+    def _publish_worker_terminal(self, job: _Job) -> None:
+        """Persist a safe terminal when the worker exits without one."""
+        publisher = getattr(self._service, "publish_background_terminal", None)
+        if not callable(publisher):
+            return
+        publisher = cast("Callable[..., Phase7EPublicStatus]", publisher)
+        if job.cancellation.is_set():
+            status, reason_code = "INTERRUPTED", "cancelled"
+        else:
+            status, reason_code = "FAILED", "internal_error"
+        try:
+            result = publisher(
+                job.prepared,
+                status=status,
+                reason_code=reason_code,
+            )
+        except Exception:  # noqa: BLE001 - retain the closed in-memory diagnostic.
+            _safe_log(
+                "phase7e.worker_lifecycle",
+                stage="terminal_publication_failed",
+                phase="successor_execution",
+                status=status,
+                reason_code=reason_code,
+            )
+            return
+        if result.phase7.status != "UNAVAILABLE":
+            with self._lock:
+                job.status = result.phase7.status
+                job.error_code = result.phase7.reason_code
+        _safe_log(
+            "phase7e.worker_lifecycle",
+            stage="terminal_published",
+            phase="successor_execution",
+            status=result.phase7.status,
+            reason_code=result.phase7.reason_code,
+        )
+
+    def _watchdog_expired(self, job: _Job) -> None:
+        """Stop an unbounded worker and publish a durable safe terminal."""
+        with self._lock:
+            if self._closed or job.future is None or job.future.done():
+                return
+            if job.status not in {"ACCEPTED", "RUNNING"}:
+                return
+            job.cancellation.set()
+        _safe_log(
+            "phase7e.execution_watchdog",
+            stage="deadline_expired",
+            phase="successor_execution",
+            status="RUNNING",
+            reason_code="execution_deadline_exhausted",
+        )
+        publisher = getattr(self._service, "publish_background_terminal", None)
+        if not callable(publisher):
+            self._record_failure(
+                job,
+                Phase7EFailureDiagnostic(
+                    "internal",
+                    "internal_error",
+                    "unexpected_exception",
+                    "unknown",
+                ),
+            )
+            return
+        publisher = cast("Callable[..., Phase7EPublicStatus]", publisher)
+        try:
+            result = publisher(
+                job.prepared,
+                status="INCONCLUSIVE",
+                reason_code="execution_deadline_exhausted",
+            )
+        except Exception:  # noqa: BLE001 - the worker will perform final cleanup.
+            self._record_failure(
+                job,
+                Phase7EFailureDiagnostic(
+                    "internal",
+                    "internal_error",
+                    "unexpected_exception",
+                    "unknown",
+                ),
+            )
+            _safe_log(
+                "phase7e.execution_watchdog",
+                stage="terminal_publication_failed",
+                phase="successor_execution",
+                status="RUNNING",
+                reason_code="execution_deadline_exhausted",
+            )
+            return
+        if result.phase7.status != "UNAVAILABLE":
+            with self._lock:
+                job.status = result.phase7.status
+                job.error_code = result.phase7.reason_code
+                job.failure_diagnostic = None
+        _safe_log(
+            "phase7e.execution_watchdog",
+            stage="terminal_published",
+            phase="successor_execution",
+            status=result.phase7.status,
+            reason_code=result.phase7.reason_code,
+        )
 
     def _record_failure(
         self,
@@ -328,6 +480,13 @@ def _fallback_public_diagnostic(code: str) -> Phase7EFailureDiagnostic:
         "Phase7EPublicError",
         "unknown",
     )
+
+
+def _safe_log(event: str, **fields: object) -> None:
+    try:
+        _LOGGER.info("%s %s", event, json.dumps(fields, sort_keys=True, separators=(",", ":")))
+    except Exception:  # noqa: BLE001 - diagnostics never alter lifecycle behavior.
+        return
 
 
 __all__ = ["Phase7EBackgroundManager", "Phase7EStartReceipt"]

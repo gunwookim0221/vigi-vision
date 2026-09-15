@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -56,6 +57,7 @@ _SAFE_REASON_CODES = frozenset(
         "historical_baseline_boundary",
     }
 )
+_LOGGER = logging.getLogger("uvicorn.error.vigi_vision.phase7e")
 
 
 class SuccessorNarrowingContractError(ValueError):
@@ -200,6 +202,7 @@ class SuccessorBinaryNarrowingService:
         midpoint_observations: list[SuccessorObservation] = []
         seen_midpoints: set[datetime] = set()
         iterations = 0
+        progress_generation = 0
         completion = SuccessorNarrowingCompletion.NARROWED
         reason_code = "target_width_reached"
 
@@ -228,13 +231,55 @@ class SuccessorBinaryNarrowingService:
             if midpoint in seen_midpoints or midpoint <= left_frame or midpoint >= right_frame:
                 completion = SuccessorNarrowingCompletion.NO_PROGRESS
                 reason_code = "no_progress"
+                _safe_progress_log(
+                    stage="no_progress",
+                    left_frame_utc=left_frame,
+                    right_frame_utc=right_frame,
+                    requested_target_utc=midpoint,
+                    selected_frame_time_utc=None,
+                    observation_outcome=None,
+                    observation_reason=None,
+                    next_left_frame_utc=left_frame,
+                    next_right_frame_utc=right_frame,
+                    iteration_count=iterations,
+                    progress_generation=progress_generation,
+                    no_progress_reason=reason_code,
+                )
                 break
             seen_midpoints.add(midpoint)
             iterations += 1
+            _safe_progress_log(
+                stage="target_requested",
+                left_frame_utc=left_frame,
+                right_frame_utc=right_frame,
+                requested_target_utc=midpoint,
+                selected_frame_time_utc=None,
+                observation_outcome=None,
+                observation_reason=None,
+                next_left_frame_utc=None,
+                next_right_frame_utc=None,
+                iteration_count=iterations,
+                progress_generation=progress_generation,
+                no_progress_reason=None,
+            )
             segment_id = _segment_for_midpoint(plan, midpoint)
             if segment_id is None:
                 completion = SuccessorNarrowingCompletion.INCOMPLETE_COVERAGE
                 reason_code = "midpoint_gap"
+                _safe_progress_log(
+                    stage="terminal",
+                    left_frame_utc=left_frame,
+                    right_frame_utc=right_frame,
+                    requested_target_utc=midpoint,
+                    selected_frame_time_utc=None,
+                    observation_outcome=None,
+                    observation_reason=reason_code,
+                    next_left_frame_utc=left_frame,
+                    next_right_frame_utc=right_frame,
+                    iteration_count=iterations,
+                    progress_generation=progress_generation,
+                    no_progress_reason=None,
+                )
                 break
             target = CoarseTargetAssignment(
                 len(midpoint_observations) + 1,
@@ -248,9 +293,24 @@ class SuccessorBinaryNarrowingService:
                 plan, target, acquisition, authority
             )
             midpoint_observations.append(observation)
+            progress_generation += 1
             outcome = _completion_for_observation(observation)
             if outcome is not None:
                 completion, reason_code = outcome
+                _safe_progress_log(
+                    stage="terminal",
+                    left_frame_utc=left_frame,
+                    right_frame_utc=right_frame,
+                    requested_target_utc=midpoint,
+                    selected_frame_time_utc=observation.frame_utc,
+                    observation_outcome=observation.state.value,
+                    observation_reason=observation.reason_code,
+                    next_left_frame_utc=left_frame,
+                    next_right_frame_utc=right_frame,
+                    iteration_count=iterations,
+                    progress_generation=progress_generation,
+                    no_progress_reason=None,
+                )
                 break
             if (
                 observation.frame_utc is None
@@ -259,6 +319,20 @@ class SuccessorBinaryNarrowingService:
             ):
                 completion = SuccessorNarrowingCompletion.NO_PROGRESS
                 reason_code = "no_progress"
+                _safe_progress_log(
+                    stage="no_progress",
+                    left_frame_utc=left_frame,
+                    right_frame_utc=right_frame,
+                    requested_target_utc=midpoint,
+                    selected_frame_time_utc=observation.frame_utc,
+                    observation_outcome=observation.state.value,
+                    observation_reason=observation.reason_code,
+                    next_left_frame_utc=left_frame,
+                    next_right_frame_utc=right_frame,
+                    iteration_count=iterations,
+                    progress_generation=progress_generation,
+                    no_progress_reason=reason_code,
+                )
                 break
             if observation.state is SuccessorObservationState.PRESENT:
                 left = observation
@@ -267,6 +341,20 @@ class SuccessorBinaryNarrowingService:
             else:
                 completion = SuccessorNarrowingCompletion.INDETERMINATE_OBSERVATION
                 reason_code = "midpoint_indeterminate"
+                _safe_progress_log(
+                    stage="terminal",
+                    left_frame_utc=left_frame,
+                    right_frame_utc=right_frame,
+                    requested_target_utc=midpoint,
+                    selected_frame_time_utc=observation.frame_utc,
+                    observation_outcome=observation.state.value,
+                    observation_reason=observation.reason_code,
+                    next_left_frame_utc=left_frame,
+                    next_right_frame_utc=right_frame,
+                    iteration_count=iterations,
+                    progress_generation=progress_generation,
+                    no_progress_reason=None,
+                )
                 break
             if _width_seconds(left, right) <= self.policy.target_width_seconds:
                 completion = SuccessorNarrowingCompletion.NARROWED
@@ -286,6 +374,22 @@ class SuccessorBinaryNarrowingService:
             reason_code = "iteration_limit"
         if iterations > self.policy.maximum_iterations:
             raise SuccessorNarrowingContractError
+        _safe_progress_log(
+            stage="completed",
+            left_frame_utc=left.frame_utc,
+            right_frame_utc=right.frame_utc,
+            requested_target_utc=None,
+            selected_frame_time_utc=None,
+            observation_outcome=completion.value,
+            observation_reason=reason_code,
+            next_left_frame_utc=left.frame_utc,
+            next_right_frame_utc=right.frame_utc,
+            iteration_count=iterations,
+            progress_generation=progress_generation,
+            no_progress_reason=(
+                reason_code if completion is SuccessorNarrowingCompletion.NO_PROGRESS else None
+            ),
+        )
         return _result(
             plan,
             source_bracket_id,
@@ -491,6 +595,53 @@ def _timestamp(value: datetime | None) -> str | None:
     return (
         None if value is None else value.astimezone(timezone.utc).isoformat(timespec="microseconds")
     )
+
+
+def _safe_progress_log(
+    *,
+    stage: str,
+    left_frame_utc: datetime | None,
+    right_frame_utc: datetime | None,
+    requested_target_utc: datetime | None,
+    selected_frame_time_utc: datetime | None,
+    observation_outcome: str | None,
+    observation_reason: str | None,
+    next_left_frame_utc: datetime | None,
+    next_right_frame_utc: datetime | None,
+    iteration_count: int,
+    progress_generation: int,
+    no_progress_reason: str | None,
+) -> None:
+    fields = {
+        "phase": "narrowing",
+        "stage": stage,
+        "current_interval": {
+            "start_utc": _timestamp(left_frame_utc),
+            "end_utc": _timestamp(right_frame_utc),
+        },
+        "previous_interval": {
+            "start_utc": _timestamp(left_frame_utc),
+            "end_utc": _timestamp(right_frame_utc),
+        },
+        "requested_target_utc": _timestamp(requested_target_utc),
+        "selected_frame_time_utc": _timestamp(selected_frame_time_utc),
+        "observation_outcome": observation_outcome,
+        "observation_reason": observation_reason,
+        "next_interval": {
+            "start_utc": _timestamp(next_left_frame_utc),
+            "end_utc": _timestamp(next_right_frame_utc),
+        },
+        "iteration_count": iteration_count,
+        "progress_generation": progress_generation,
+        "no_progress_reason": no_progress_reason,
+    }
+    try:
+        _LOGGER.info(
+            "phase7e.narrowing_progress %s",
+            json.dumps(fields, sort_keys=True, separators=(",", ":")),
+        )
+    except Exception:  # noqa: BLE001 - diagnostics never alter narrowing.
+        return
 
 
 __all__ = (

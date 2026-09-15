@@ -144,7 +144,9 @@ UUIDv4 `request_id`; strict Phase 6 reopen supplies every server-owned fact.
 The UUID deterministically derives the run ID, making exact retries compatible
 and conflicting reuse rejectable. One fixed single-worker executor provides
 prompt HTTP `202` acceptance and feeds cancellation into the existing
-invocation-wide budget. The per-investigation OS lock remains execution
+invocation-wide budget. A process-local watchdog also bounds browser execution
+and publishes one durable safe terminal on deadline or uncaught worker failure;
+the per-investigation OS lock remains execution
 authority. GET never recovers or mutates; bounded server startup interrupts
 unowned RUNNING schemas and never resumes abandoned work. There is no lease,
 takeover, Phase 8 executor/UI, or Phase 9 behavior. The internal Phase 7E B4

@@ -164,6 +164,7 @@
     successor_publication_corrupt: "검색 결과 기록이 손상되었습니다.",
     successor_publication_readback_failed: "검색 결과 기록을 다시 확인할 수 없습니다.",
     recording_search_execution_unavailable: "녹화 검색 실행기를 사용할 수 없습니다.",
+    execution_deadline_exhausted: "검색 작업이 제한 시간 안에 완료되지 않아 안전하게 종료되었습니다.",
     internal_error: "검색 작업을 안전하게 완료할 수 없습니다.",
   });
   const EVIDENCE_DECISION_MESSAGES = Object.freeze({

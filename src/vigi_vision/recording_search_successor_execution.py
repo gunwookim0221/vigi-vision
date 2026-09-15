@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import tempfile
 from collections.abc import Mapping
@@ -107,9 +108,27 @@ _SUCCESSOR_TERMINAL_REASONS = frozenset(
         "cancelled",
         "abandoned_after_restart",
         "internal_error",
+        "execution_deadline_exhausted",
     }
 )
 _PHASE8_NOT_REQUESTED_REASON = "successor_slice5_does_not_create_handoffs"
+_LOGGER = logging.getLogger("uvicorn.error.vigi_vision.phase7e")
+_SAFE_EXECUTION_ERROR_CODES = frozenset(
+    {
+        "successor_publication_corrupt",
+        "successor_publication_readback_failed",
+        "successor_request_conflict",
+        "publication_failed",
+        "internal_error",
+    }
+)
+_SAFE_FALLBACK_TERMINALS = frozenset(
+    {
+        ("FAILED", "internal_error"),
+        ("INTERRUPTED", "cancelled"),
+        ("INCONCLUSIVE", "execution_deadline_exhausted"),
+    }
+)
 
 
 class SuccessorExecutionError(RuntimeError):
@@ -245,43 +264,56 @@ class SuccessorTerminalRepository:
             return value
 
     def publish_running(self, prepared: SuccessorPreparedExecution) -> None:
-        payload = {
-            "record_version": SUCCESSOR_RECORD_VERSION,
-            "schema_version": SUCCESSOR_SCHEMA_VERSION,
-            "investigation_id": prepared.request.investigation_id,
-            "run_id": prepared.request.run_id,
-            "plan_id": prepared.plan.plan_id,
-            "status": _RUNNING,
-            "request_end_utc": _timestamp(prepared.request.end_utc),
-            "anchor_time_utc": _timestamp(prepared.request.anchor_time_utc),
-            "source_timezone": prepared.request.source_timezone,
-            "policy_version": prepared.plan.policy_version,
-            "coverage": [
-                {
-                    "segment_id": item.segment_id,
-                    "start_utc": _timestamp(item.start_utc),
-                    "end_utc": _timestamp(item.end_utc),
-                }
-                for item in prepared.plan.segments
-            ],
-            "gaps": [
-                {"start_utc": _timestamp(item.start_utc), "end_utc": _timestamp(item.end_utc)}
-                for item in prepared.plan.gaps
-            ],
-        }
-        self._atomic_write(prepared.request.investigation_id, prepared.request.run_id, payload)
+        with self._lock:
+            existing = self.read(prepared.request.investigation_id, prepared.request.run_id)
+            if existing is not None:
+                if existing.get("plan_id") != prepared.plan.plan_id:
+                    raise SuccessorExecutionError("successor_request_conflict")
+                if existing.get("status") in _TERMINAL:
+                    return
+            payload = {
+                "record_version": SUCCESSOR_RECORD_VERSION,
+                "schema_version": SUCCESSOR_SCHEMA_VERSION,
+                "investigation_id": prepared.request.investigation_id,
+                "run_id": prepared.request.run_id,
+                "plan_id": prepared.plan.plan_id,
+                "status": _RUNNING,
+                "request_end_utc": _timestamp(prepared.request.end_utc),
+                "anchor_time_utc": _timestamp(prepared.request.anchor_time_utc),
+                "source_timezone": prepared.request.source_timezone,
+                "policy_version": prepared.plan.policy_version,
+                "coverage": [
+                    {
+                        "segment_id": item.segment_id,
+                        "start_utc": _timestamp(item.start_utc),
+                        "end_utc": _timestamp(item.end_utc),
+                    }
+                    for item in prepared.plan.segments
+                ],
+                "gaps": [
+                    {
+                        "start_utc": _timestamp(item.start_utc),
+                        "end_utc": _timestamp(item.end_utc),
+                    }
+                    for item in prepared.plan.gaps
+                ],
+            }
+            self._atomic_write(prepared.request.investigation_id, prepared.request.run_id, payload)
 
     def publish_terminal(self, terminal: SuccessorTerminal) -> SuccessorTerminal:
-        existing = self.read(terminal.investigation_id, terminal.run_id)
-        if existing is not None and existing.get("status") in _TERMINAL:
-            if _terminal_identity(existing) != terminal.terminal_result_id:
+        with self._lock:
+            existing = self.read(terminal.investigation_id, terminal.run_id)
+            if existing is not None and existing.get("plan_id") != terminal.plan_id:
                 raise SuccessorExecutionError("successor_request_conflict")
-            return _terminal_from_record(existing)
-        self._atomic_write(terminal.investigation_id, terminal.run_id, terminal.as_record())
-        loaded = self.read(terminal.investigation_id, terminal.run_id)
-        if loaded is None or _terminal_identity(loaded) != terminal.terminal_result_id:
-            raise SuccessorExecutionError("successor_publication_readback_failed")
-        return _terminal_from_record(loaded)
+            if existing is not None and existing.get("status") in _TERMINAL:
+                if _terminal_identity(existing) != terminal.terminal_result_id:
+                    raise SuccessorExecutionError("successor_request_conflict")
+                return _terminal_from_record(existing)
+            self._atomic_write(terminal.investigation_id, terminal.run_id, terminal.as_record())
+            loaded = self.read(terminal.investigation_id, terminal.run_id)
+            if loaded is None or _terminal_identity(loaded) != terminal.terminal_result_id:
+                raise SuccessorExecutionError("successor_publication_readback_failed")
+            return _terminal_from_record(loaded)
 
     def recover_abandoned(self) -> int:
         recovered = 0
@@ -465,13 +497,19 @@ class SuccessorExecutionService:
             baseline_payload,
         )
 
-    def execute(  # noqa: PLR0911
+    def execute(  # noqa: C901, PLR0911
         self,
         prepared: SuccessorPreparedExecution,
         *,
         cancellation: Callable[[], bool] | None = None,
     ) -> SuccessorTerminal:
         self.publisher.publish_running(prepared)
+        existing = self.publisher.read(
+            prepared.request.investigation_id,
+            prepared.request.run_id,
+        )
+        if existing is not None and existing.get("status") in _TERMINAL:
+            return _terminal_from_record(existing)
         try:
             if cancellation is not None and cancellation():
                 return self._publish_interrupted(prepared)
@@ -509,26 +547,85 @@ class SuccessorExecutionService:
                 augmented,
             )
         except SuccessorExecutionError:
+            try:
+                self._publish_safety_terminal(prepared, "FAILED", "internal_error")
+            except Exception as fallback_error:  # noqa: BLE001 - preserve the original failure.
+                _safe_log(
+                    "phase7e.terminal_publication",
+                    stage="fallback_failed",
+                    status="FAILED",
+                    reason_code="internal_error",
+                    terminal_publication_outcome="failed",
+                    error_code=_safe_execution_error_code(fallback_error),
+                )
             raise
         except Exception as error:
-            failed = SuccessorTerminal(
-                prepared.request.investigation_id,
-                prepared.request.run_id,
-                prepared.plan.plan_id,
-                "FAILED",
-                "internal_error",
-                None,
-                _timestamp(prepared.request.anchor_time_utc),
-                _timestamp(prepared.request.end_utc),
-                None,
-                None,
-                False,
-                prepared.request.source_timezone,
-                None,
-            )
-            failed = replace(failed, terminal_result_id=_digest_terminal(failed.as_record()))
-            _ = self.publisher.publish_terminal(failed)
+            try:
+                self._publish_safety_terminal(prepared, "FAILED", "internal_error")
+            except Exception as fallback_error:  # noqa: BLE001 - preserve the original failure.
+                _safe_log(
+                    "phase7e.terminal_publication",
+                    stage="fallback_failed",
+                    status="FAILED",
+                    reason_code="internal_error",
+                    terminal_publication_outcome="failed",
+                    error_code=_safe_execution_error_code(fallback_error),
+                )
             raise SuccessorExecutionError("internal_error") from error
+
+    def publish_safety_terminal(
+        self,
+        prepared: SuccessorPreparedExecution,
+        *,
+        status: str,
+        reason_code: str,
+    ) -> SuccessorTerminal:
+        """Publish one no-evidence fallback without replacing a terminal run."""
+        return self._publish_safety_terminal(prepared, status, reason_code)
+
+    def _publish_safety_terminal(
+        self,
+        prepared: SuccessorPreparedExecution,
+        status: str,
+        reason_code: str,
+    ) -> SuccessorTerminal:
+        existing = self.publisher.read(
+            prepared.request.investigation_id,
+            prepared.request.run_id,
+        )
+        if existing is not None and existing.get("plan_id") != prepared.plan.plan_id:
+            raise SuccessorExecutionError("successor_request_conflict")
+        if existing is not None and existing.get("status") in _TERMINAL:
+            return _terminal_from_record(existing)
+        if (status, reason_code) not in _SAFE_FALLBACK_TERMINALS:
+            raise SuccessorExecutionError("successor_publication_corrupt")
+        terminal = self._base_terminal(prepared, status, reason_code, False)
+        terminal = replace(
+            terminal,
+            terminal_result_id=_digest_terminal(
+                {**terminal.as_record(), "terminal_result_id": None}
+            ),
+        )
+        try:
+            result = self.publisher.publish_terminal(terminal)
+        except Exception as error:
+            _safe_log(
+                "phase7e.terminal_publication",
+                stage="fallback_failed",
+                status=status,
+                reason_code=reason_code,
+                terminal_publication_outcome="failed",
+                error_code=_safe_execution_error_code(error),
+            )
+            raise
+        _safe_log(
+            "phase7e.terminal_publication",
+            stage="fallback_completed",
+            status=result.status,
+            reason_code=result.reason_code,
+            terminal_publication_outcome="published",
+        )
+        return result
 
     def _narrow_or_publish(
         self,
@@ -638,12 +735,46 @@ class SuccessorExecutionService:
         terminal: SuccessorTerminal,
         observations: tuple[SuccessorObservation, ...],
     ) -> SuccessorTerminal:
+        _safe_log(
+            "phase7e.terminal_publication",
+            stage="started",
+            status=terminal.status,
+            reason_code=terminal.reason_code,
+            terminal_publication_outcome="pending",
+        )
         if self.evidence_repository is not None:
             try:
                 self.evidence_repository.publish(prepared, observations, terminal)
             except SuccessorEvidenceError as error:
+                _safe_log(
+                    "phase7e.terminal_publication",
+                    stage="evidence_failed",
+                    status=terminal.status,
+                    reason_code=terminal.reason_code,
+                    terminal_publication_outcome="failed",
+                    error_code="publication_failed",
+                )
                 raise SuccessorExecutionError("publication_failed") from error
-        return self.publisher.publish_terminal(terminal)
+        try:
+            result = self.publisher.publish_terminal(terminal)
+        except Exception as error:
+            _safe_log(
+                "phase7e.terminal_publication",
+                stage="publisher_failed",
+                status=terminal.status,
+                reason_code=terminal.reason_code,
+                terminal_publication_outcome="failed",
+                error_code=_safe_execution_error_code(error),
+            )
+            raise
+        _safe_log(
+            "phase7e.terminal_publication",
+            stage="completed",
+            status=result.status,
+            reason_code=result.reason_code,
+            terminal_publication_outcome="published",
+        )
+        return result
 
     def _publish_interrupted(self, prepared: SuccessorPreparedExecution) -> SuccessorTerminal:
         terminal = self._base_terminal(prepared, "INTERRUPTED", "cancelled", False)
@@ -1158,6 +1289,19 @@ def _validate_gap_item(item: object) -> None:
 def _digest_terminal(value: Mapping[str, object]) -> str:
     payload = json.dumps(dict(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "successor-terminal-v1-" + hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _safe_execution_error_code(error: BaseException) -> str:
+    candidate = str(error)
+    return candidate if candidate in _SAFE_EXECUTION_ERROR_CODES else "internal_error"
+
+
+def _safe_log(event: str, **fields: object) -> None:
+    """Emit allowlisted diagnostics without making logging part of execution."""
+    try:
+        _LOGGER.info("%s %s", event, json.dumps(fields, sort_keys=True, separators=(",", ":")))
+    except Exception:  # noqa: BLE001 - diagnostics never alter the execution result.
+        return
 
 
 def _timestamp(value: datetime) -> str:

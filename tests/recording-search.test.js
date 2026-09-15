@@ -332,6 +332,7 @@ test("frontend reason vocabulary covers every successor terminal reason", () => 
     "midpoint_acquisition_unavailable", "midpoint_indeterminate",
     "midpoint_classification_unavailable", "no_progress", "cancelled",
     "abandoned_after_restart", "internal_error",
+    "execution_deadline_exhausted",
   ];
   const actual = new Set(harness.window.vigiVisionRecordingSearch.getReasonCodes());
   expected.forEach((reason) => assert.equal(actual.has(reason), true, reason));
