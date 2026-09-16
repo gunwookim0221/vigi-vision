@@ -11,6 +11,7 @@ from vigi_vision.investigation_confirmation_models import ConfirmationRoi, RoiPr
 from vigi_vision.object_presence_comparator import (
     ClassifierInput,
     ObjectPresenceClassifier,
+    _stability_dilation_radius,
     binarize_mask_logits,
 )
 from vigi_vision.object_presence_evidence import ClassificationResult, RawComparison
@@ -485,6 +486,12 @@ def test_baseline_support_v3_handles_empty_alignment_background_for_tight_roi() 
         )
     )
     assert result.outcome is ClassificationOutcome.ABSENT
+
+
+def test_v3_stability_ring_includes_bounded_mask_edge_margin() -> None:
+    """A v3 ring covers one additional source pixel of prompt-edge uncertainty."""
+    assert _stability_dilation_radius(49, 71, 1243) == 5
+    assert _stability_dilation_radius(49, 71, 1243, include_segmentation_margin=True) == 6
 
 
 def test_preserved_run_b_absence_does_not_require_alignment_success() -> None:

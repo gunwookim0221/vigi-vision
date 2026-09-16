@@ -53,6 +53,10 @@ class ClassifierInput:
 _SUPPORT_CHANGE_THRESHOLD: Final[float] = 32.0
 _FOREGROUND_CONTRAST_THRESHOLD: Final[float] = 40.0
 _STABILITY_DILATION_PIXELS: Final[int] = 4
+# EfficientSAM's point-prompt support can stop just inside a real object's
+# edge.  Keep one bounded source-pixel margin outside the scale-derived ring
+# so those immutable baseline-object pixels cannot be sampled as "background".
+_STABILITY_SEGMENTATION_MARGIN_PIXELS: Final[int] = 1
 _BACKGROUND_GRADIENT_CHANGE_THRESHOLD: Final[float] = 32.0
 _GLOBAL_CHANGE_RATIO_THRESHOLD: Final[float] = 0.30
 _GLOBAL_CHANGE_SPAN_THRESHOLD: Final[float] = 0.60
@@ -332,7 +336,10 @@ def _compare_with_baseline_support(  # noqa: PLR0915 - explicit evidence-gate as
         if not excluded
     )
     fixed_stability_radius = _stability_dilation_radius(
-        values.roi.width, values.roi.height, baseline_count
+        values.roi.width,
+        values.roi.height,
+        baseline_count,
+        include_segmentation_margin=policy.baseline_support_alignment_mode,
     )
     fixed_stability_mask = _dilated_exclusion_mask(baseline_mask, fixed_stability_radius)
     fixed_background_indices = tuple(
@@ -705,7 +712,13 @@ def _alignment_radii(
     )
 
 
-def _stability_dilation_radius(roi_width: int, roi_height: int, support_pixels: int) -> int:
+def _stability_dilation_radius(
+    roi_width: int,
+    roi_height: int,
+    support_pixels: int,
+    *,
+    include_segmentation_margin: bool = False,
+) -> int:
     """Choose a bounded reveal ring from the confirmed support scale.
 
     A fixed four-pixel ring is too small for a source-sized CCTV ROI.  The
@@ -718,7 +731,10 @@ def _stability_dilation_radius(roi_width: int, roi_height: int, support_pixels: 
     if shorter_edge <= 0:
         return 0
     scale_radius = math.ceil(math.sqrt(max(1, support_pixels)) / 8.0)
-    return min(shorter_edge // 4, max(_STABILITY_DILATION_PIXELS, scale_radius))
+    radius = max(_STABILITY_DILATION_PIXELS, scale_radius)
+    if include_segmentation_margin:
+        radius += _STABILITY_SEGMENTATION_MARGIN_PIXELS
+    return min(shorter_edge // 4, radius)
 
 
 @dataclass(frozen=True, slots=True)

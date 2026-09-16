@@ -220,8 +220,10 @@ successor evidence remains readable.
 Schema 8 additionally records stability-region pixel counts, alignment
 candidate counts/state, an explicit scene-stability result, and a closed veto
 reason. The stability region is the immutable baseline support plus a bounded
-source-pixel dilation exclusion; local revealed flooring is therefore not a
-global-scene veto. Robust location/spread normalization tolerates bounded local
+source-pixel dilation exclusion; successor v3 adds one source-pixel
+segmentation-edge margin to cover bounded point-prompt support uncertainty.
+Local revealed flooring is therefore not a global-scene veto. Robust
+location/spread normalization tolerates bounded local
 ring changes, while broad coherent changes or insufficient valid area remain
 fail-closed. The browser projects these additive facts without changing the
 legacy Schema 5–7 contract; Slice 3 consumes the resulting target states.

@@ -308,7 +308,10 @@ ratio. Foreground retention counts baseline support pixels whose probe values
 retain a bounded contrast against the normalized fixed-background ring; it does
 not treat newly exposed flooring (which matches that ring) as foreground. The
 stability region excludes the baseline support and an adaptive, bounded
-dilation ring derived from its source-pixel area. It records total, changed,
+dilation ring derived from its source-pixel area. Successor v3 adds one
+source-pixel segmentation-edge margin to that ring, covering the bounded
+point-prompt edge uncertainty observed in source-sized ROIs without changing
+any visual decision threshold. It records total, changed,
 valid, and excluded pixels and combines luma, local-gradient, and spatial-extent
 checks: local changes remain stable while coherent broad changes veto the visual
 decision. `PRESENT` requires the positive support similarity, NCC, edge,
