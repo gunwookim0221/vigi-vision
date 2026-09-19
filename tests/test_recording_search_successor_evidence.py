@@ -278,6 +278,124 @@ def test_baseline_support_comparison_reopens_with_all_metrics(tmp_path):
     assert manifest["entries"][-1]["comparison"] == comparison
 
 
+_ALIGNMENT_KEYS = (
+    "baseline_support_alignment_dx",
+    "baseline_support_alignment_dy",
+    "baseline_support_alignment_rotation_degrees",
+    "baseline_support_alignment_overlap",
+    "baseline_support_alignment_score",
+    "baseline_support_alignment_margin",
+)
+
+
+def _v3_comparison(alignment_state, alignment_values):
+    comparison = {
+        "baseline_mask_pixel_count": 20,
+        "probe_mask_pixel_count": 360,
+        "roi_pixel_count": 400,
+        "mask_intersection_pixel_count": 20,
+        "mask_union_pixel_count": 360,
+        "baseline_mask_coverage": 0.05,
+        "probe_mask_coverage": 0.9,
+        "mask_iou": 0.055556,
+        "effective_comparison_area": None,
+        "roi_luma_ncc": 0.208525,
+        "comparison_mode": "baseline_support_v3",
+        "baseline_support_pixel_count": 20,
+        "baseline_support_luma_similarity": 0.92,
+        "baseline_support_luma_ncc": 0.86,
+        "baseline_support_edge_similarity": 0.9,
+        "baseline_support_change_ratio": 0.1,
+        "baseline_support_foreground_retention": 0.95,
+        "baseline_support_background_change_ratio": 0.0,
+        "baseline_support_alignment_state": alignment_state,
+        "baseline_support_present_gate_passed": False,
+        "baseline_support_absent_gate_passed": True,
+        "baseline_support_empty_background_evidence": True,
+        "baseline_support_replacement_evidence": False,
+        "baseline_support_occlusion_evidence": False,
+        "baseline_support_decision_path": "absent",
+        "baseline_support_decision_reason": "absent_empty_background",
+        "visual_status": "comparable",
+        "unusable_reason": None,
+    }
+    comparison.update(dict(zip(_ALIGNMENT_KEYS, alignment_values, strict=True)))
+    return comparison
+
+
+def _publish_v3(tmp_path, comparison):
+    prepared, observations, terminal = _fixture(tmp_path)
+    observation = replace(observations[-1], comparison=comparison)
+    repository = SuccessorEvidenceRepository(tmp_path / ".successor")
+    return repository.publish(prepared, (*observations[:-1], observation), terminal)
+
+
+@pytest.mark.parametrize("alignment_state", ["not_required", "no_valid_candidate"])
+def test_v3_optional_alignment_state_with_all_null_facts_reopens(tmp_path, alignment_state):
+    comparison = _v3_comparison(alignment_state, [None] * len(_ALIGNMENT_KEYS))
+
+    manifest = _publish_v3(tmp_path, comparison)
+    repository = SuccessorEvidenceRepository(tmp_path / ".successor")
+
+    assert (
+        repository.read("object-disappearance-v3-ch1-20260912T050000Z", "search-run-" + "a" * 32)
+        == manifest
+    )
+
+
+@pytest.mark.parametrize("alignment_state", ["not_required", "no_valid_candidate"])
+def test_v3_optional_alignment_state_with_partial_null_facts_is_rejected(tmp_path, alignment_state):
+    comparison = _v3_comparison(alignment_state, [2, -1, 5, 0.95, 0.87, None])
+
+    with pytest.raises(SuccessorEvidenceError, match="evidence_corrupt"):
+        _publish_v3(tmp_path, comparison)
+
+
+@pytest.mark.parametrize("alignment_state", ["aligned", "ambiguous"])
+def test_v3_numeric_alignment_states_reopen_with_numeric_facts(tmp_path, alignment_state):
+    comparison = _v3_comparison(alignment_state, [2, -1, 5, 0.95, 0.87, 0.12])
+
+    manifest = _publish_v3(tmp_path, comparison)
+    repository = SuccessorEvidenceRepository(tmp_path / ".successor")
+
+    assert (
+        repository.read("object-disappearance-v3-ch1-20260912T050000Z", "search-run-" + "a" * 32)
+        == manifest
+    )
+
+
+@pytest.mark.parametrize("alignment_state", ["aligned", "ambiguous"])
+def test_v3_numeric_alignment_states_with_null_fact_is_rejected(tmp_path, alignment_state):
+    comparison = _v3_comparison(alignment_state, [2, -1, 5, 0.95, 0.87, None])
+
+    with pytest.raises(SuccessorEvidenceError, match="evidence_corrupt"):
+        _publish_v3(tmp_path, comparison)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("baseline_support_alignment_dx", 33),
+        ("baseline_support_alignment_overlap", 0.0),
+        ("baseline_support_alignment_score", float("nan")),
+        ("baseline_support_alignment_margin", float("inf")),
+    ],
+)
+def test_v3_alignment_nan_infinity_and_out_of_range_facts_are_rejected(tmp_path, key, value):
+    comparison = _v3_comparison("aligned", [2, -1, 5, 0.95, 0.87, 0.12])
+    comparison[key] = value
+
+    with pytest.raises(SuccessorEvidenceError, match="evidence_corrupt"):
+        _publish_v3(tmp_path, comparison)
+
+
+def test_v3_unknown_alignment_state_is_rejected(tmp_path):
+    comparison = _v3_comparison("unknown", [2, -1, 5, 0.95, 0.87, 0.12])
+
+    with pytest.raises(SuccessorEvidenceError, match="evidence_corrupt"):
+        _publish_v3(tmp_path, comparison)
+
+
 def test_aligned_baseline_support_comparison_reopens_with_alignment_facts(tmp_path):
     prepared, observations, terminal = _fixture(tmp_path)
     comparison = {

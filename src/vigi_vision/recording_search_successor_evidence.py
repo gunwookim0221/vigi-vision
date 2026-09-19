@@ -977,6 +977,14 @@ def _valid_comparison(value: object) -> bool:  # noqa: PLR0911
             overlap = payload.get("baseline_support_alignment_overlap")
             score = payload.get("baseline_support_alignment_score")
             margin = payload.get("baseline_support_alignment_margin")
+            alignment_values = (dx, dy, rotation, overlap, score, margin)
+            if alignment_state in {"no_valid_candidate", "not_required"}:
+                has_null = any(item is None for item in alignment_values)
+                has_value = any(item is not None for item in alignment_values)
+                if has_null and has_value:
+                    return False
+                if has_null:
+                    return True
             if (
                 type(dx) is not int
                 or type(dy) is not int
