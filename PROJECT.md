@@ -314,13 +314,16 @@ three material fast-PRESENT/current-v3-INDETERMINATE disagreements. The approved
 correction adds a conservative wider zero-transform scene guard and minimum
 background-support prerequisite; the corrected 50-observation replay retained
 seven fast PRESENT hits, all agreeing with current-v3 PRESENT, with no fast-hit
-ABSENT or INDETERMINATE disagreement. The next direction is now the design-only
+ABSENT or INDETERMINATE disagreement. The approved S3 shadow layer now computes
+reference-relative search evidence and bounded process-local diagnostics without
+changing classifier, search, narrowing, terminal, or publication behavior. The
+next direction is now the
 [disappearance-candidate-first search](docs/design/disappearance-candidate-search-design.md):
 classification state remains separate from search evidence, candidate interval
 recall takes priority over exact classification of every coarse frame, fast
 PRESENT remains unchanged, fast ABSENT is not a required milestone, and v3 is
 planned as precise verification around candidate intervals. Current Schema 8
-runtime behavior remains authoritative until separately reviewed S3-S7
+runtime behavior remains authoritative until separately reviewed S4-S7
 implementation work.
 Search admission now uses the same effective start in the browser and backend:
 the later of the investigation anchor and selected baseline time; minute-level
@@ -391,9 +394,10 @@ capability.
    Media-probe failures emit one closed, path-free structured warning through
    Uvicorn's configured console logger before temporary-media cleanup.
    Phase 8 processing and Phase 9 judgment remain future work.
-7. Use the design-only S3-S7 disappearance-candidate-first roadmap for the next
-   search increment. S3 defines a cheap search-evidence contract separately
-   from `PRESENT`/`ABSENT`/`INDETERMINATE`; S4 forms and narrows conservative
+7. Use the approved S3-S7 disappearance-candidate-first roadmap for the next
+   search increment. S3 now defines and measures a cheap search-evidence
+   contract separately from `PRESENT`/`ABSENT`/`INDETERMINATE` in shadow mode;
+   S4 forms and narrows conservative
    candidate intervals even when useful observations are indeterminate; S5
    reserves segmentation, alignment, replacement, occlusion, and other v3 work
    primarily for precise candidate verification; S6 performs fresh manually

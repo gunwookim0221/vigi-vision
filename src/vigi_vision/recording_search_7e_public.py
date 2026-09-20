@@ -1039,6 +1039,7 @@ def build_phase7e_service(
                     successor_classifier,
                     InMemoryRgbDecoder(ffmpeg),
                     fast_present_policy=successor_object_policy,
+                    search_evidence_policy=successor_object_policy,
                 ),
                 SuccessorBinaryNarrowingService(
                     SuccessorTargetAcquisitionService(
@@ -1051,6 +1052,7 @@ def build_phase7e_service(
                         successor_classifier,
                         InMemoryRgbDecoder(ffmpeg),
                         fast_present_policy=successor_object_policy,
+                        search_evidence_policy=successor_object_policy,
                     ),
                 ),
                 InMemoryRgbDecoder(ffmpeg),

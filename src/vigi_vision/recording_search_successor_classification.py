@@ -55,6 +55,11 @@ from vigi_vision.recording_search_successor_acquisition import (
     successor_midpoint_target_id,
     successor_target_id,
 )
+from vigi_vision.recording_search_successor_search_evidence import (
+    SearchEvidence,
+    SearchEvidenceBand,
+    evaluate_search_evidence,
+)
 
 if TYPE_CHECKING:
     from vigi_vision.object_presence_models import DecodedRgbImage
@@ -400,13 +405,26 @@ class ObservableFrameFallbackPolicy:
 
 @dataclass(slots=True)
 class SuccessorPresenceMetrics:
-    """Bounded process-local counters for the S2-1 fast PRESENT gate."""
+    """Bounded process-local counters for S2 fast PRESENT and S3 shadow work."""
 
     reference_preparation_attempts: int = 0
     fast_path_evaluations: int = 0
     fast_present_hits: int = 0
     delegated_cases: int = 0
     fast_path_elapsed_ms_total: int = 0
+    search_evidence_evaluations: int = 0
+    search_evidence_strong_reference: int = 0
+    search_evidence_material_drop: int = 0
+    search_evidence_usable_ambiguous: int = 0
+    search_evidence_insufficient: int = 0
+    search_evidence_failures: int = 0
+    search_evidence_present: int = 0
+    search_evidence_absent: int = 0
+    search_evidence_indeterminate: int = 0
+    search_evidence_fast_present_overlap: int = 0
+    search_evidence_material_drop_indeterminate: int = 0
+    search_evidence_scene_only_suppressed: int = 0
+    search_evidence_elapsed_ms_total: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -633,6 +651,9 @@ class SuccessorCoarseClassificationService:
     )
     fast_present_policy: ObjectPresenceDecisionPolicy | None = None
     metrics: SuccessorPresenceMetrics = field(default_factory=SuccessorPresenceMetrics, repr=False)
+    search_evidence_policy: ObjectPresenceDecisionPolicy | None = field(
+        default=None, repr=False
+    )
 
     def prepare_reference(
         self, authority: SuccessorClassificationAuthority
@@ -1018,15 +1039,21 @@ class SuccessorCoarseClassificationService:
                 self.metrics,
                 correlation_id,
             )
+            classified = SuccessorClassifierResult(
+                ClassificationOutcome.PRESENT,
+                None,
+                fast_comparison,
+                "completed",
+                fast_elapsed,
+            )
+            self._record_search_evidence(
+                classified,
+                fast_present_hit=True,
+                correlation_id=correlation_id,
+            )
             return (
                 "classified",
-                SuccessorClassifierResult(
-                    ClassificationOutcome.PRESENT,
-                    None,
-                    fast_comparison,
-                    "completed",
-                    fast_elapsed,
-                ),
+                classified,
                 fast_elapsed,
             )
         self.metrics.delegated_cases += 1
@@ -1049,7 +1076,74 @@ class SuccessorCoarseClassificationService:
             )
         if not isinstance(classified, SuccessorClassifierResult):
             raise SuccessorClassificationContractError
+        self._record_search_evidence(
+            classified,
+            fast_present_hit=False,
+            correlation_id=correlation_id,
+        )
         return ("classified", classified, classified.elapsed_ms)
+
+    def _record_search_evidence(
+        self,
+        classified: SuccessorClassifierResult,
+        *,
+        fast_present_hit: bool,
+        correlation_id: str,
+    ) -> None:
+        """Evaluate S3 evidence without allowing it to affect classification."""
+        self.metrics.search_evidence_evaluations += 1
+        match classified.outcome:
+            case ClassificationOutcome.PRESENT:
+                self.metrics.search_evidence_present += 1
+            case ClassificationOutcome.ABSENT:
+                self.metrics.search_evidence_absent += 1
+            case ClassificationOutcome.INDETERMINATE:
+                self.metrics.search_evidence_indeterminate += 1
+        policy = self.search_evidence_policy or self.fast_present_policy
+        if policy is None or classified.comparison is None:
+            self.metrics.search_evidence_failures += 1
+            _emit_search_evidence_event(
+                None,
+                self.metrics,
+                correlation_id,
+                classified.outcome,
+            )
+            return
+        started = perf_counter()
+        try:
+            evidence = evaluate_search_evidence(
+                classified.comparison,
+                policy,
+                fast_present_hit=fast_present_hit,
+            )
+        except Exception:  # noqa: BLE001 - shadow diagnostics fail open.
+            self.metrics.search_evidence_failures += 1
+            _emit_search_evidence_event(
+                None,
+                self.metrics,
+                correlation_id,
+                classified.outcome,
+            )
+            return
+        self.metrics.search_evidence_elapsed_ms_total += max(
+            0, round((perf_counter() - started) * 1000)
+        )
+        if evidence is None:
+            self.metrics.search_evidence_failures += 1
+            _emit_search_evidence_event(
+                None,
+                self.metrics,
+                correlation_id,
+                classified.outcome,
+            )
+            return
+        _increment_search_evidence_metrics(self.metrics, evidence, classified.outcome)
+        _emit_search_evidence_event(
+            evidence,
+            self.metrics,
+            correlation_id,
+            classified.outcome,
+        )
 
 
 def _ordered_candidates(
@@ -1453,6 +1547,59 @@ def _emit_fast_path_event(
             ),
         )
     except Exception:  # noqa: BLE001 - diagnostics cannot change classification.
+        return
+
+
+def _increment_search_evidence_metrics(
+    metrics: SuccessorPresenceMetrics,
+    evidence: SearchEvidence,
+    outcome: ClassificationOutcome,
+) -> None:
+    """Update bounded process-local S3 counters for one evidence result."""
+    match evidence.band:
+        case SearchEvidenceBand.STRONG_REFERENCE:
+            metrics.search_evidence_strong_reference += 1
+            if evidence.fast_present_hit:
+                metrics.search_evidence_fast_present_overlap += 1
+        case SearchEvidenceBand.MATERIAL_DROP:
+            metrics.search_evidence_material_drop += 1
+            if outcome is ClassificationOutcome.INDETERMINATE:
+                metrics.search_evidence_material_drop_indeterminate += 1
+        case SearchEvidenceBand.USABLE_AMBIGUOUS:
+            metrics.search_evidence_usable_ambiguous += 1
+        case SearchEvidenceBand.INSUFFICIENT:
+            metrics.search_evidence_insufficient += 1
+    if evidence.scene_only_suppressed:
+        metrics.search_evidence_scene_only_suppressed += 1
+
+
+def _emit_search_evidence_event(
+    evidence: SearchEvidence | None,
+    metrics: SuccessorPresenceMetrics,
+    correlation_id: str,
+    outcome: ClassificationOutcome,
+) -> None:
+    """Emit bounded S3 shadow facts without making logging authoritative."""
+    try:
+        _OBSERVABILITY_LOGGER.info(
+            "phase7e.search_evidence %s",
+            json.dumps(
+                {
+                    "correlation_id": correlation_id,
+                    "classifier_outcome": outcome.value,
+                    "band": None if evidence is None else evidence.band.value,
+                    "reason": None if evidence is None else evidence.reason_code,
+                    "scene_only_suppressed": (
+                        False if evidence is None else evidence.scene_only_suppressed
+                    ),
+                    "search_evidence_evaluations": metrics.search_evidence_evaluations,
+                    "search_evidence_failures": metrics.search_evidence_failures,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+    except Exception:  # noqa: BLE001 - diagnostics cannot affect classification.
         return
 
 

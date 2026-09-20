@@ -4,10 +4,12 @@
 
 **Status: S1 remains the classifier design baseline. Phase S2 completed the
 run-scoped PRESENT-only optimization, synthetic and preserved-data measurement,
-disagreement RCA, and approved conservative scene-guard correction. It adds no
-schema, evidence, API, UI, migration, or publication change. Every non-fast-hit
-case still delegates to the existing Schema 8/v3 classifier unchanged, and
-there is no fast ABSENT path. Future S3-S7 work now follows the separate
+disagreement RCA, and approved conservative scene-guard correction. Local S3
+shadow work now computes separate reference-relative search evidence and
+bounded process-local diagnostics; it adds no schema, public evidence, API,
+UI, migration, or publication change. Every non-fast-hit case still delegates to
+the existing Schema 8/v3 classifier unchanged, and there is no fast ABSENT
+path. Future S4-S7 work now follows the separate
 [disappearance-candidate-first search design](disappearance-candidate-search-design.md).**
 
 This document records the implementation design for simplifying new successor
@@ -604,7 +606,8 @@ an optional post-validation optimization, not a required milestone. The
 adopted future direction is documented in
 [Disappearance-Candidate-First Search Design](disappearance-candidate-search-design.md):
 
-- **S3:** define and measure cheap search evidence separately from visual state;
+- **S3:** define and measure cheap search evidence separately from visual state
+  in shadow mode (implemented locally; no public behavior change);
 - **S4:** form and narrow candidate intervals despite useful
   `INDETERMINATE` observations;
 - **S5:** apply v3 as precise verification and rationalize slow work only from

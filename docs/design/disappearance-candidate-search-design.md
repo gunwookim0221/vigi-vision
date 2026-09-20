@@ -2,9 +2,9 @@
 
 ## Status and authority
 
-**Status: design-only architecture proposal, ready for Initial Review before
-Phase S3 implementation. Nothing in this document is implemented by its
-publication.**
+**Status: the architecture was approved at Initial Review. Phase S3 now has a
+local shadow-only implementation and preserved-data measurement; candidate
+formation, narrowing, persistence, and public behavior remain unimplemented.**
 
 The implemented Phase 7 and Schema 8 recording-search contracts remain
 authoritative in
@@ -20,6 +20,15 @@ the run-scoped reference preparation, approved PRESENT-only fast path,
 preserved-data evaluation, disagreement RCA, and conservative wider scene
 guard. It changes the planned direction after S2; it does not rewrite those
 completed records.
+
+The local S3 implementation adds only a pure internal evidence evaluator,
+process-local counters, and best-effort diagnostics at the existing successor
+classification boundary. It does not add observation fields, persisted
+records, terminal behavior, API/UI output, or a candidate interval. The
+preserved-data report is produced by
+`tools/measure_search_evidence_s3.py`; its labels are historical/preserved
+classifier results and it makes no disappearance-recall claim. Independent
+manual event-window labels remain mandatory for S6.
 
 The product remains a human-review aid. It does not determine theft or
 ownership, identify a person, or continuously track a person.
@@ -408,13 +417,25 @@ recall, and this design invents no latency or invocation-rate target.
 
 ### S3 — search-evidence contract and signal
 
-- define the pure internal search-evidence sample and versioned signal policy;
-- derive it from existing cheap metrics without a new model;
-- implement deterministic strong/degraded/drop/discontinuity/insufficient
-  bands in shadow mode;
-- measure agreement with manually labeled event windows and current v3 facts;
-- keep production orchestration and terminal output unchanged; and
-- resolve exact thresholds, persistence count, and bounded candidate count.
+S3 is implemented locally as shadow-only behavior:
+
+- the pure internal search-evidence sample and versioned signal family are
+  defined in `recording_search_successor_search_evidence.py`;
+- existing reference-relative cheap metrics drive deterministic strong,
+  material-drop, usable-ambiguous, and insufficient bands;
+- the evaluator reuses the classifier's minimum baseline-support and ROI
+  prerequisites, returning insufficient evidence before any directional drop
+  decision when support is undersized;
+- scene-only discontinuity is explicitly prevented from becoming a directional
+  material drop;
+- the existing successor classifier records bounded process-local counters and
+  best-effort diagnostics without changing its observation result; and
+- `tools/measure_search_evidence_s3.py` reports preserved replay distribution
+  separately from classifier state.
+
+S3 does not choose candidate persistence counts, form intervals, move bounds,
+or claim recall. Exact thresholds, persistence count, bounded candidate count,
+and independent event-window labels remain S4/S6 work.
 
 ### S4 — candidate interval formation and evidence narrowing
 

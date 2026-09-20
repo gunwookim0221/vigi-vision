@@ -187,6 +187,10 @@ def test_unchanged_candidate_is_fast_present_without_slow_classifier_call() -> N
     assert classifier.classify_calls == 0
     assert service.metrics.fast_path_evaluations == 1
     assert service.metrics.fast_present_hits == 1
+    assert service.metrics.search_evidence_evaluations == 1
+    assert service.metrics.search_evidence_present == 1
+    assert service.metrics.search_evidence_strong_reference == 1
+    assert service.metrics.search_evidence_fast_present_overlap == 1
     assert observation.comparison is not None
     assert observation.comparison["baseline_support_decision_path"] == "present"
 
@@ -343,3 +347,22 @@ def test_fast_present_delegates_when_scene_guard_background_is_too_sparse() -> N
     )
     image = DecodedRgbImage.from_rows(tuple(tuple((100, 100, 100) for _ in range(width)) for _ in range(height)))
     assert fast_present_comparison(reference, image, roi, policy) is None
+
+
+def test_shadow_evaluation_failure_fails_open_to_existing_present_result() -> None:
+    plan = _plan()
+    classifier = _Classifier()
+    service = _service(classifier, {b"same": _image()})
+    authority = service.prepare_reference(_authority(plan))
+
+    with patch(
+        "vigi_vision.recording_search_successor_classification.evaluate_search_evidence",
+        side_effect=RuntimeError("shadow-only failure"),
+    ):
+        observation = service.classify_coarse_target(
+            plan, plan.targets[0], _acquisition(plan, plan.targets[0]), authority
+        )
+
+    assert observation.state is SuccessorObservationState.PRESENT
+    assert service.metrics.fast_present_hits == 1
+    assert service.metrics.search_evidence_failures == 1

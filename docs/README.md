@@ -80,12 +80,12 @@ documentation route is added, removed, or relocated.
   delegation, conservative ABSENT handling, and preserved-data measurement.
   Read
   [design/disappearance-candidate-search-design.md](design/disappearance-candidate-search-design.md)
-  for the design-only S3--S7 direction that separates classification state
-  from search evidence, prioritizes disappearance-candidate recall, narrows
-  evidence transitions despite useful `INDETERMINATE` observations, and
-  reserves v3 for precise verification. The implemented Phase 7B and Schema 8
-  contracts remain authoritative; neither S2 nor the new design document adds
-  a durable schema, evidence, API, UI, or publication contract.
+  for the approved S3--S7 direction and the local S3 shadow implementation
+  that separates classification state from search evidence, prioritizes
+  disappearance-candidate recall, suppresses scene-only directional drops,
+  and reserves v3 for precise verification. The implemented Phase 7B and
+  Schema 8 contracts remain authoritative; S3 adds no durable schema, public
+  evidence, API, UI, or publication contract.
   Read
   [design/reference-frame-service.md](design/reference-frame-service.md)
   when implementing or reviewing the proposed recorded reference-frame service,

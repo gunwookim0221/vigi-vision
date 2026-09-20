@@ -195,7 +195,11 @@ def _discover_observations() -> tuple[tuple[ArtifactObservation, ...], int]:
                 )
             except (KeyError, TypeError, ValueError):
                 continue
-            selected.setdefault(observation.identity, observation)
+            previous = selected.get(observation.identity)
+            if previous is None or (
+                previous.persisted_comparison is None and observation.persisted_comparison is not None
+            ):
+                selected[observation.identity] = observation
     return tuple(sorted(selected.values(), key=lambda item: item.identity)), len(manifests)
 
 
