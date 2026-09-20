@@ -7,9 +7,15 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from vigi_vision.investigation_confirmation_integrity import JpegIntegrity
 from vigi_vision.investigation_confirmation_models import ConfirmationRoi, RoiProvenance
+from vigi_vision.object_presence_comparator import (
+    FastPresenceReference,
+    fast_present_comparison,
+    prepare_fast_presence_reference,
+)
 from vigi_vision.object_presence_models import BinaryMask, DecodedRgbImage
 from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
 from vigi_vision.object_presence_values import ClassificationOutcome
@@ -284,3 +290,56 @@ def test_reference_mask_preparation_uses_existing_b4_process_boundary() -> None:
 
     assert isinstance(result, BinaryMask)
     assert result.rows == mask.rows
+
+
+def test_fast_present_delegates_when_wider_scene_guard_is_below_present_evidence() -> None:
+    policy = _policy()
+    baseline = _image()
+    reference = prepare_fast_presence_reference(baseline, _mask(), ROI, policy)
+    assert reference is not None
+    with (
+        patch(
+            "vigi_vision.object_presence_comparator._support_luma_metrics",
+            side_effect=[
+                (0.90, 0.01, 0.80, 0.01, (40.0,) * len(reference.support_indices)),
+                (0.90, 0.01, 0.69, 0.01, (40.0,) * len(reference.support_indices)),
+            ],
+        ),
+        patch(
+            "vigi_vision.object_presence_comparator._support_edge_similarity",
+            return_value=0.90,
+        ),
+    ):
+        assert fast_present_comparison(reference, baseline, ROI, policy) is None
+
+
+def test_fast_present_delegates_when_scene_guard_background_is_too_sparse() -> None:
+    policy = _policy()
+    width = 16
+    height = 16
+    roi = ConfirmationRoi(
+        x=0,
+        y=0,
+        width=width,
+        height=height,
+        coordinate_space="source_pixels",
+        provenance=RoiProvenance.MANUAL,
+    )
+    support = tuple(range(64))
+    mask = tuple(tuple(index < 64 for index in range(width)) for _ in range(height))
+    reference = FastPresenceReference(
+        baseline_luma=(100.0,) * (width * height),
+        baseline_mask=mask,
+        support_indices=support,
+        baseline_background=(100.0,) * 192,
+        background_indices=tuple(range(64, 256)),
+        scene_guard_background=(100.0,) * 4,
+        scene_guard_background_indices=(64, 65, 66, 67),
+        roi_width=width,
+        roi_height=height,
+        roi_pixel_count=width * height,
+        baseline_support_pixel_count=len(support),
+        baseline_support_coverage=0.25,
+    )
+    image = DecodedRgbImage.from_rows(tuple(tuple((100, 100, 100) for _ in range(width)) for _ in range(height)))
+    assert fast_present_comparison(reference, image, roi, policy) is None

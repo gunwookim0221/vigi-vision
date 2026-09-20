@@ -59,6 +59,8 @@ class FastPresenceReference:
     support_indices: tuple[int, ...]
     baseline_background: tuple[float, ...]
     background_indices: tuple[int, ...]
+    scene_guard_background: tuple[float, ...]
+    scene_guard_background_indices: tuple[int, ...]
     roi_width: int
     roi_height: int
     roi_pixel_count: int
@@ -113,12 +115,35 @@ def prepare_fast_presence_reference(
         if not excluded
     )
     baseline_background = tuple(baseline_luma[index] for index in background_indices)
+    # S2-1 does not run a transform search. It does, however, require a
+    # zero-transform scene guard over the wider ring used by v3 so that a
+    # sparse or weakly supported ROI delegates instead of short-circuiting.
+    alignment_radius_x, alignment_radius_y = _alignment_radii(
+        roi.width, roi.height, policy
+    )
+    scene_guard_radius = min(
+        _STABILITY_DILATION_PIXELS + max(alignment_radius_x, alignment_radius_y),
+        min(roi.width, roi.height) // 4,
+    )
+    scene_guard_exclusion = _dilated_exclusion_mask(clipped_baseline, scene_guard_radius)
+    scene_guard_background_indices = tuple(
+        index
+        for index, excluded in enumerate(
+            value for row in scene_guard_exclusion for value in row
+        )
+        if not excluded
+    )
+    scene_guard_background = tuple(
+        baseline_luma[index] for index in scene_guard_background_indices
+    )
     return FastPresenceReference(
         baseline_luma=baseline_luma,
         baseline_mask=clipped_baseline,
         support_indices=support_indices,
         baseline_background=baseline_background,
         background_indices=background_indices,
+        scene_guard_background=scene_guard_background,
+        scene_guard_background_indices=scene_guard_background_indices,
         roi_width=roi.width,
         roi_height=roi.height,
         roi_pixel_count=roi_pixels,
@@ -146,12 +171,21 @@ def fast_present_comparison(
         or not reference.support_indices
         or not reference.baseline_background
         or not reference.background_indices
+        or not reference.scene_guard_background
+        or not reference.scene_guard_background_indices
+        or len(reference.scene_guard_background_indices) < policy.minimum_comparison_area
     ):
         return None
     probe_luma = roi_luma(probe_image, roi)
     probe_background = tuple(probe_luma[index] for index in reference.background_indices)
+    scene_guard_probe_background = tuple(
+        probe_luma[index] for index in reference.scene_guard_background_indices
+    )
     normalization = _build_luma_normalization(reference.baseline_background, probe_background)
-    if normalization is None:
+    scene_guard_normalization = _build_luma_normalization(
+        reference.scene_guard_background, scene_guard_probe_background
+    )
+    if normalization is None or scene_guard_normalization is None:
         return None
     normalized_probe = _apply_luma_normalization(probe_luma, normalization)
     baseline_support = tuple(reference.baseline_luma[index] for index in reference.support_indices)
@@ -164,6 +198,20 @@ def fast_present_comparison(
         (reference.background_indices, reference.roi_width),
         normalization,
     )
+    (
+        scene_guard_similarity,
+        scene_guard_change,
+        scene_guard_foreground,
+        scene_guard_background_change,
+        scene_guard_probe,
+    ) = _support_luma_metrics(
+        baseline_support,
+        probe_support,
+        reference.scene_guard_background,
+        scene_guard_probe_background,
+        (reference.scene_guard_background_indices, reference.roi_width),
+        scene_guard_normalization,
+    )
     stability = _stable_background_profile(
         reference.baseline_background,
         normalization.normalized_background,
@@ -171,6 +219,21 @@ def fast_present_comparison(
         reference.roi_width,
         reference.roi_height,
         reference.roi_pixel_count,
+    )
+    scene_guard_stability = _stable_background_profile(
+        reference.scene_guard_background,
+        scene_guard_normalization.normalized_background,
+        reference.scene_guard_background_indices,
+        reference.roi_width,
+        reference.roi_height,
+        reference.roi_pixel_count,
+    )
+    scene_guard_edge = _support_edge_similarity(
+        reference.baseline_luma,
+        reference.baseline_mask,
+        reference.roi_width,
+        scene_guard_probe,
+        reference.support_indices,
     )
     support_ncc_raw = mean_centered_ncc(
         tuple(reference.baseline_luma[index] for index in reference.support_indices),
@@ -192,6 +255,12 @@ def fast_present_comparison(
         or background_change is None
         or edge is None
         or not stability.scene_stable
+        or scene_guard_similarity is None
+        or scene_guard_change is None
+        or scene_guard_foreground is None
+        or scene_guard_background_change is None
+        or scene_guard_edge is None
+        or not scene_guard_stability.scene_stable
     ):
         return None
     if not (
@@ -200,6 +269,11 @@ def fast_present_comparison(
         and edge >= policy.baseline_support_present_edge_minimum
         and change <= policy.baseline_support_present_change_maximum
         and foreground >= policy.baseline_support_present_foreground_minimum
+        and scene_guard_similarity >= policy.baseline_support_present_similarity_minimum
+        and quantize_metric(support_ncc_raw) >= policy.baseline_support_present_ncc_minimum
+        and scene_guard_edge >= policy.baseline_support_present_edge_minimum
+        and scene_guard_change <= policy.baseline_support_present_change_maximum
+        and scene_guard_foreground >= policy.baseline_support_present_foreground_minimum
     ):
         return None
     return RawComparison(
@@ -221,21 +295,23 @@ def fast_present_comparison(
             else "baseline_support_v2"
         ),
         baseline_support_pixel_count=reference.baseline_support_pixel_count,
-        baseline_support_luma_similarity=similarity,
+        baseline_support_luma_similarity=scene_guard_similarity,
         baseline_support_luma_ncc=quantize_metric(support_ncc_raw),
-        baseline_support_edge_similarity=edge,
-        baseline_support_change_ratio=change,
-        baseline_support_foreground_retention=foreground,
-        baseline_support_background_change_ratio=background_change,
+        baseline_support_edge_similarity=scene_guard_edge,
+        baseline_support_change_ratio=scene_guard_change,
+        baseline_support_foreground_retention=scene_guard_foreground,
+        baseline_support_background_change_ratio=max(
+            background_change, scene_guard_background_change
+        ),
         baseline_support_alignment_state=(
             "not_required" if policy.baseline_support_alignment_mode else None
         ),
-        baseline_support_stability_pixel_count=stability.total_pixel_count,
-        baseline_support_stability_changed_pixel_count=stability.changed_pixel_count,
-        baseline_support_stability_valid_pixel_count=stability.valid_pixel_count,
-        baseline_support_stability_excluded_pixel_count=stability.excluded_pixel_count,
-        baseline_support_scene_stable=stability.scene_stable,
-        baseline_support_scene_stability_veto_reason=stability.veto_reason,
+        baseline_support_stability_pixel_count=scene_guard_stability.total_pixel_count,
+        baseline_support_stability_changed_pixel_count=scene_guard_stability.changed_pixel_count,
+        baseline_support_stability_valid_pixel_count=scene_guard_stability.valid_pixel_count,
+        baseline_support_stability_excluded_pixel_count=scene_guard_stability.excluded_pixel_count,
+        baseline_support_scene_stable=scene_guard_stability.scene_stable,
+        baseline_support_scene_stability_veto_reason=scene_guard_stability.veto_reason,
         baseline_support_present_gate_passed=True,
         baseline_support_absent_gate_passed=False,
         baseline_support_empty_background_evidence=False,

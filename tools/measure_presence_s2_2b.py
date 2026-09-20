@@ -101,7 +101,7 @@ def _policy() -> ObjectPresenceDecisionPolicy:
     """Return the same approved successor baseline-support policy as production."""
     return ObjectPresenceDecisionPolicy(
         classifier_policy_version="efficient-sam-ti-baseline-support-v3",
-        classifier_preprocessing_version="phase7b-baseline-support-v3",
+        classifier_preprocessing_version="phase7e-baseline-support-v3",
         baseline_support_mode=True,
         baseline_support_alignment_mode=True,
         minimum_mask_overlap_for_comparison=0.1,
@@ -397,7 +397,7 @@ def _summary(records: list[dict[str, Any]], manifest_count: int) -> dict[str, An
     }
 
 
-def _evaluate(
+def _evaluate(  # noqa: PLR0915
     observations: tuple[ArtifactObservation, ...],
     manifest_count: int,
     limit: int,
@@ -427,6 +427,7 @@ def _evaluate(
             ),
             "persisted_v3_outcome": observation.persisted_v3_outcome,
             "persisted_v3_reason": observation.persisted_reason,
+            "persisted_v3_comparison": observation.persisted_comparison,
             "persisted_v3_classifier_ms": observation.persisted_classifier_ms,
             "fast_gate_eligible": False,
             "fast_present": False,
@@ -434,10 +435,12 @@ def _evaluate(
             "prerequisite_reason": None,
             "decode_ms": None,
             "fast_ms": None,
+            "fast_comparison": None,
             "baseline_model_ms": None,
             "candidate_model_ms": None,
             "candidate_model_ran_for_v3_replay": False,
             "v3_comparison_outcome": None,
+            "v3_replay_comparison": None,
             "v3_comparison_source": "not_replayed",
             "v3_segmentation_calls": None,
             "v3_alignment_ran": False,
@@ -505,6 +508,7 @@ def _evaluate(
             if fast_result is None:
                 records.append(base_record)
                 continue
+            base_record["fast_comparison"] = fast_result.model_dump(mode="json")
             candidate_mask, candidate_model_ms = _predict_roi_mask(
                 predictor,
                 observation.candidate_path,
@@ -522,6 +526,7 @@ def _evaluate(
                 context.roi,
             )
             base_record["v3_comparison_outcome"] = replay["outcome"]
+            base_record["v3_replay_comparison"] = replay["comparison"]
             base_record["v3_comparison_source"] = "replayed_existing_v3_comparator"
             base_record["v3_segmentation_calls"] = replay["segmentation_calls"]
             base_record["v3_alignment_ran"] = True
@@ -539,10 +544,16 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     parser.add_argument("--records", action="store_true")
+    parser.add_argument("--identity", action="append", default=[])
     args = parser.parse_args()
     if args.limit <= 0:
         raise SystemExit
     observations, manifest_count = _discover_observations()
+    if args.identity:
+        requested = set(args.identity)
+        observations = tuple(item for item in observations if item.identity in requested)
+        if len(observations) != len(requested):
+            raise SystemExit
     summary, records = _evaluate(observations, manifest_count, args.limit)
     payload = {"summary": summary, "records": records}
     output = payload if args.records else summary
