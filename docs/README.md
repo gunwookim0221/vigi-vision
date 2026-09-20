@@ -74,12 +74,18 @@ documentation route is added, removed, or relocated.
   schema-3 observation, publication, idempotency, and strict-reopen contract.
   Read
   [design/presence-first-classifier-s1.md](design/presence-first-classifier-s1.md)
-  for the Phase S1 successor-classifier design and the locally implemented
-  Phase S2-1 PRESENT-only optimization: one run-scoped reference context,
-  fixed-support fast hits, unchanged slow-path delegation, conservative
-  ABSENT handling, bounded diagnostics, and the S2--S4 implementation plan.
-  The implemented Phase 7B and Schema 8 contracts remain authoritative; S2-1
-  adds no durable schema, evidence, API, UI, or publication contract.
+  for the Phase S1 successor-classifier design and completed Phase S2
+  PRESENT-only optimization: one run-scoped reference context, corrected
+  fixed-support fast hits with a wider scene guard, unchanged slow-path
+  delegation, conservative ABSENT handling, and preserved-data measurement.
+  Read
+  [design/disappearance-candidate-search-design.md](design/disappearance-candidate-search-design.md)
+  for the design-only S3--S7 direction that separates classification state
+  from search evidence, prioritizes disappearance-candidate recall, narrows
+  evidence transitions despite useful `INDETERMINATE` observations, and
+  reserves v3 for precise verification. The implemented Phase 7B and Schema 8
+  contracts remain authoritative; neither S2 nor the new design document adds
+  a durable schema, evidence, API, UI, or publication contract.
   Read
   [design/reference-frame-service.md](design/reference-frame-service.md)
   when implementing or reviewing the proposed recorded reference-frame service,

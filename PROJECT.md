@@ -309,11 +309,25 @@ cheap fixed-support PRESENT fast gate for successor observations. Fast hits
 short-circuit before candidate segmentation/alignment; every other case,
 including ABSENT and ambiguous candidates, delegates to the existing Schema 8
 baseline-support classifier unchanged. No durable schema, evidence, API, UI, or
-publication contract changes.
+publication contract changes. Synthetic and preserved-data measurement exposed
+three material fast-PRESENT/current-v3-INDETERMINATE disagreements. The approved
+correction adds a conservative wider zero-transform scene guard and minimum
+background-support prerequisite; the corrected 50-observation replay retained
+seven fast PRESENT hits, all agreeing with current-v3 PRESENT, with no fast-hit
+ABSENT or INDETERMINATE disagreement. The next direction is now the design-only
+[disappearance-candidate-first search](docs/design/disappearance-candidate-search-design.md):
+classification state remains separate from search evidence, candidate interval
+recall takes priority over exact classification of every coarse frame, fast
+PRESENT remains unchanged, fast ABSENT is not a required milestone, and v3 is
+planned as precise verification around candidate intervals. Current Schema 8
+runtime behavior remains authoritative until separately reviewed S3-S7
+implementation work.
 Search admission now uses the same effective start in the browser and backend:
 the later of the investigation anchor and selected baseline time; minute-level
 native `datetime-local` search-end values are accepted as whole seconds.
-Only the final human real-NVR acceptance remains future work.
+The existing successor/browser chain still requires its final human real-NVR
+acceptance; the separately reviewed S3-S7 candidate-first sequence is also
+future work.
 Correction B adds a bounded Windows-spawn process boundary around production
 Phase 7E B4 classification; timeout/cancellation terminate and reap the child,
 and late output cannot become evidence. Valid results allow a bounded two-second
@@ -377,6 +391,17 @@ capability.
    Media-probe failures emit one closed, path-free structured warning through
    Uvicorn's configured console logger before temporary-media cleanup.
    Phase 8 processing and Phase 9 judgment remain future work.
+7. Use the design-only S3-S7 disappearance-candidate-first roadmap for the next
+   search increment. S3 defines a cheap search-evidence contract separately
+   from `PRESENT`/`ABSENT`/`INDETERMINATE`; S4 forms and narrows conservative
+   candidate intervals even when useful observations are indeterminate; S5
+   reserves segmentation, alignment, replacement, occlusion, and other v3 work
+   primarily for precise candidate verification; S6 performs fresh manually
+   labeled real-NVR validation centered on event containment and complete
+   misses; and S7 performs reviewed evidence/review-media integration and
+   closure. Do not loosen the approved fast-PRESENT gate or make fast ABSENT a
+   prerequisite. Existing runtime, persistence, API, terminal, and UI contracts
+   remain unchanged until their phase-specific reviews approve an implementation.
 
 ## High-level roadmap
 
@@ -387,7 +412,9 @@ capability.
    SDK in the smallest working path.
 4. **Hardening:** improve tests, errors, documentation, and operability based on
    observed MVP needs.
-5. **Expansion:** implement and validate the designed Phase 7 user-selected
-   object-change search before Phase 8 evidence creation, Phase 9 user judgment,
-   broader event types, object relocation, generic Event Discovery, or optional
-   VLM interpretation.
+5. **Expansion:** advance the reviewed S3-S7 disappearance-candidate-first
+   sequence: cheap search evidence, candidate interval formation and narrowing,
+   precise v3 verification, fresh labeled NVR validation, then versioned
+   evidence/review integration. Preserve Phase 8 human-review and Phase 9 user-
+   judgment authority before broader event types, object relocation, generic
+   Event Discovery, or optional VLM interpretation.

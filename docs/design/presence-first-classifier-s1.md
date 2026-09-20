@@ -2,12 +2,13 @@
 
 ## Status and authority
 
-**Status: S1 is the design baseline. Phase S2-1 is implemented locally as an
-internal, run-scoped optimization for the Schema 8 successor recording-search
-classifier. It adds no schema, evidence, API, UI, migration, or publication
-change. The implementation is deliberately PRESENT-only: every non-fast-hit
-case delegates to the existing Schema 8/v3 classifier unchanged, and there is
-no fast ABSENT path.**
+**Status: S1 remains the classifier design baseline. Phase S2 completed the
+run-scoped PRESENT-only optimization, synthetic and preserved-data measurement,
+disagreement RCA, and approved conservative scene-guard correction. It adds no
+schema, evidence, API, UI, migration, or publication change. Every non-fast-hit
+case still delegates to the existing Schema 8/v3 classifier unchanged, and
+there is no fast ABSENT path. Future S3-S7 work now follows the separate
+[disappearance-candidate-first search design](disappearance-candidate-search-design.md).**
 
 This document records the implementation design for simplifying new successor
 runs. It does not reinterpret legacy Schema 5--7 observations or existing
@@ -274,6 +275,10 @@ old observations were produced by the cascade. A frame requiring translation
 or rotation to satisfy the positive band is not fast PRESENT; it escalates.
 
 ### Confident ABSENT
+
+This subsection preserves the original S1 safety analysis. Fast ABSENT was not
+implemented in S2 and is no longer an active S3-S7 milestone; the adopted
+candidate-first direction is authoritative for future planning.
 
 Return fast ABSENT only when all existing empty-background safety evidence is
 available at fixed coordinates:
@@ -576,118 +581,85 @@ new identity.
 | Persistence or strict-readback failure | Existing publication failure behavior | No reinterpretation | No |
 | Midpoint is INDETERMINATE | N/A | Stop narrowing safely; terminal INCONCLUSIVE as today | No |
 
-## 14. Subsequent phase boundaries
+## 14. Completed S2 boundary and adopted future direction
 
-### S2 — minimum cheap presence gate (S2-1 implemented subset)
-
-S2-1 implements only the following subset:
+S2 established and approved:
 
 - immutable run-scoped reference preparation bound to existing authority;
-- exact ROI cheap fixed-support metrics and scene guards;
-- the fast PRESENT predicate;
-- no fast ABSENT predicate; every potential absence candidate escalates;
-- delegation of every uncertain frame to the existing v3 slow path;
+- exact-ROI fixed-support metrics plus the conservative wider scene guard;
+- a PRESENT-only fast predicate with no fast ABSENT branch;
+- delegation of every uncertain frame to the unchanged v3 slow path;
 - truthful mapping into the current observation/evidence boundary;
-- focused unit and contract tests; and
-- bounded stage counters/timing.
+- synthetic and preserved-data measurement; and
+- correction of all three material fast-PRESENT/current-v3 disagreements.
 
-Future S2 work may evaluate a fast ABSENT predicate only after focused labeled
-validation; it is explicitly outside S2-1.
+The corrected preserved-data run produced seven safe fast PRESENT hits from 50
+eligible observations. All seven replayed as current-v3 `PRESENT`; none replayed
+as `ABSENT` or `INDETERMINATE`. Those observations are measurement evidence, not
+an accuracy or prevalence claim.
 
-Do not rewrite acquisition, fallback, coarse search, narrowing, evidence
-publication, terminalization, UI, or legacy classifiers. Do not add a new model.
+The earlier idea of proceeding from fast PRESENT to fast ABSENT and general
+slow-path cleanup is no longer the active roadmap. Fast ABSENT is deferred as
+an optional post-validation optimization, not a required milestone. The
+adopted future direction is documented in
+[Disappearance-Candidate-First Search Design](disappearance-candidate-search-design.md):
 
-### S3 — measured slow-path simplification
+- **S3:** define and measure cheap search evidence separately from visual state;
+- **S4:** form and narrow candidate intervals despite useful
+  `INDETERMINATE` observations;
+- **S5:** apply v3 as precise verification and rationalize slow work only from
+  measured evidence;
+- **S6:** run fresh manually labeled NVR validation centered on event
+  containment and complete misses; and
+- **S7:** perform reviewed integration, durable evidence/review-media changes
+  where approved, and closure.
 
-Use S2 ambiguity clusters to decide whether candidate segmentation, current
-alignment, replacement/occlusion heuristics, or another signal changes a real
-decision. Reuse current alignment and support comparison where useful. Remove
-candidate segmentation, mask IoU, whole-ROI NCC, or redundant vetoes from new
-policy execution only when comparative evidence shows no safety regression.
-Add a heavyweight signal only for a demonstrated failure mode.
+Current acquisition, fallback, coarse search, state-only narrowing, evidence,
+terminal, API, UI, and legacy reopen behavior remain authoritative until a
+later reviewed implementation changes them.
 
-### S4 — replay, integration, and cutover
+## 15. Continuing validation obligations
 
-Run labeled comparative replay across normal presence, known removal, lighting,
-compression, small motion, camera motion, occlusion, replacement, recording
-gaps, and decode/model failure. Validate performance, false-ABSENT safety,
-coarse bracket selection, narrowing, evidence reopen, terminal publication,
-and browser/human review. Cut over new runs only after explicit review; retain
-old-policy reopen forever.
+The completed S2 tests continue to protect fast-PRESENT safety, delegation,
+run-scoped reuse, process boundaries, and absence of a fast-ABSENT path. Future
+S3-S7 validation adds a separate search objective:
 
-## 15. Test and evaluation plan
+- deterministic search-signal behavior over existing metrics;
+- candidate-event containment and interval width on independently labeled
+  runs;
+- complete missed-event count and false exclusion during narrowing;
+- continuation through `INDETERMINATE` classifications when search evidence is
+  usable;
+- conservative widening for gaps, unusable evidence, and nonmonotonic change;
+- selective v3, segmentation, and alignment invocation accounting;
+- strict preservation of all definitive state and operational-failure rules;
+- versioned persistence and strict reopen before candidate-only evidence can
+  affect terminal output or review-media eligibility; and
+- byte-for-value compatibility for legacy schemas and existing Schema 8 runs.
 
-### Pure fast-gate tests
+Lower runtime never justifies a missed labeled event or a fabricated visual
+state.
 
-- identical and compression-noisy support -> fast PRESENT;
-- allowed global exposure shift -> fast PRESENT when normalization remains
-  valid;
-- small displacement/rotation -> ESCALATE, not ABSENT;
-- complete removal with stable revealed background -> fast ABSENT candidate;
-- partial removal/occlusion -> ESCALATE;
-- replacement object -> ESCALATE;
-- broad camera translation/scene change -> ESCALATE;
-- insufficient background/support, zero variance, and non-finite metrics ->
-  safe non-ABSENT handling; and
-- exact threshold boundaries, determinism, and input non-mutation.
+## 16. Remaining measurement questions
 
-### Slow-path delegation tests
+The S2 reports answer the original fast-PRESENT safety question for the
+evaluated corpus but do not provide human-labeled event-window ground truth.
+The active measurement questions are now:
 
-- each fast ambiguity invokes the slow path exactly once;
-- fast decisions invoke neither candidate segmentation nor alignment;
-- reference segmentation is performed once per bound context;
-- slow PRESENT still handles the demonstrated one/two-pixel translations and
-  bounded rotation;
-- slow occlusion/replacement/camera motion remain INDETERMINATE;
-- segmentation/alignment failure never becomes ABSENT; and
-- timeout/cancellation reaps work and cannot publish a late observation.
+1. Which conjunction of foreground, similarity, edge, support-change, and
+   scene evidence gives useful candidate recall without treating every benign
+   variation as a transition?
+2. How many adjacent degraded/change samples are needed to qualify a candidate,
+   and how should a single tail sample be handled?
+3. How often can evidence-based narrowing reduce a candidate window when the
+   visual classifier remains `INDETERMINATE`?
+4. Which v3 operations materially change verification outcomes inside candidate
+   intervals?
+5. What versioned evidence is minimally necessary to strictly reopen a
+   candidate-only interval and make a review clip available without weakening
+   `FOUND`?
+6. What fraction of total decode, cheap-signal, model, alignment, and cleanup
+   cost remains after v3 is restricted to candidate verification?
 
-### Search integration tests
-
-- anchor, coarse, neighbor fallback, and midpoint observations use the same
-  cascade contract;
-- actual frame-time ordering and adjacent bracket rules are unchanged;
-- fast and slow states persist/reopen truthfully;
-- INDETERMINATE and operational midpoint behavior is unchanged;
-- complete-present coverage still produces NOT_FOUND;
-- supported PRESENT -> ABSENT plus narrowing still produces FOUND;
-- evidence and terminal publication stay atomic; and
-- legacy Schema 5--7 and existing Schema 8 fixtures reopen byte-for-value
-  without migration.
-
-### Comparative evaluation
-
-Use the existing deterministic correction fixtures plus labeled real-NVR
-replay. Run the current v3 policy and the cascade over identical decoded frames.
-Review every disagreement, with all new ABSENT decisions receiving mandatory
-human inspection. Report the metrics listed in the resource section separately
-for coarse and narrowing frames. A lower runtime does not justify any false
-ABSENT regression.
-
-## 16. Open questions requiring measurement
-
-1. What fraction of real sampled frames meet strict fixed-coordinate PRESENT
-   without alignment?
-2. Can the current empty-background predicate safely terminate ABSENT in the
-   fast path, or should S2 initially make ABSENT slow-only?
-3. How often is the candidate EfficientSAM mask useful to a slow-path decision
-   rather than merely diagnostic?
-4. How much wall time belongs to model cold start, baseline inference,
-   candidate inference, alignment, JPEG decode, and process cleanup on the
-   deployment host?
-5. Is a run-scoped in-memory reference context practical with the current
-   Windows-spawn isolation, or is a narrow reference-preparation protocol
-   needed?
-6. Which existing thresholds remain calibrated when applied as a first-stage
-   gate rather than after alignment?
-7. Does the existing edge-consistency term improve empty-background precision
-   across carpet, tile, shelves, and textured surfaces?
-8. Which INDETERMINATE cases dominate after S2: motion, replacement, occlusion,
-   exposure, segmentation, or insufficient stability area?
-9. Are process-local stage metrics sufficient for S2/S4 evaluation, or is a
-   versioned additive evidence field justified?
-10. Does fast-path behavior preserve coarse bracket and narrowing boundaries on
-    labeled events even when per-frame outcomes differ from v3?
-
-These are measurement questions, not permission to broaden S2. Their answers
-drive S3 and the S4 cutover decision.
+These questions drive S3-S6 measurement. They do not authorize schema, API,
+terminal, or UI changes without separate review.
