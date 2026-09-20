@@ -19,7 +19,7 @@ import json
 import logging
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from time import perf_counter
@@ -30,7 +30,13 @@ from vigi_vision.investigation_confirmation_models import (
     ConfirmedInvestigationInput,
     is_investigation_id,
 )
+from vigi_vision.object_presence_comparator import (
+    FastPresenceReference,
+    fast_present_comparison,
+    prepare_fast_presence_reference,
+)
 from vigi_vision.object_presence_evidence import ClassificationResult, RawComparison
+from vigi_vision.object_presence_models import BinaryMask
 from vigi_vision.object_presence_values import ClassificationOutcome, VisualStatus
 from vigi_vision.recording_search_7e_b4_process import (
     B4ProcessError,
@@ -154,6 +160,10 @@ class SuccessorClassificationAuthority:
     source_height: int
     roi: ConfirmationRoi
     baseline_image: DecodedRgbImage = field(repr=False)
+    reference_mask: BinaryMask | None = field(default=None, repr=False, compare=False)
+    fast_presence_reference: FastPresenceReference | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if (
@@ -172,6 +182,11 @@ class SuccessorClassificationAuthority:
             or self.roi.coordinate_space != "source_pixels"
             or self.roi.x + self.roi.width > self.source_width
             or self.roi.y + self.roi.height > self.source_height
+            or self.reference_mask is not None
+            and (
+                self.reference_mask.width != self.source_width
+                or self.reference_mask.height != self.source_height
+            )
         ):
             raise SuccessorClassificationContractError
 
@@ -329,6 +344,39 @@ class EfficientSamSuccessorClassifier:
             elapsed_ms,
         )
 
+    def prepare_reference(
+        self,
+        baseline_image: DecodedRgbImage,
+        source_width: int,
+        source_height: int,
+        roi: ConfirmationRoi,
+        correlation_id: str,
+    ) -> BinaryMask | None:
+        """Prepare one baseline mask through the existing B4 process boundary."""
+        try:
+            result = run_b4_in_process(
+                baseline_image=baseline_image,
+                probe_image=baseline_image,
+                source_width=source_width,
+                source_height=source_height,
+                roi=roi,
+                policy=self.policy,
+                worker_spec=self.worker_spec,
+                correlation_id=correlation_id,
+                timeout_seconds=self.timeout_seconds,
+                startup_timeout_seconds=self.startup_timeout_seconds,
+                reference_only=True,
+            )
+        except (B4ProcessError, ClassificationPreparationError):
+            return None
+        if (
+            not isinstance(result, BinaryMask)
+            or result.width != source_width
+            or result.height != source_height
+        ):
+            return None
+        return result
+
 
 @dataclass(frozen=True, slots=True)
 class ObservableFrameFallbackPolicy:
@@ -348,6 +396,17 @@ class ObservableFrameFallbackPolicy:
             or not 1 <= self.max_candidates <= 2 * (self.max_seconds // self.step_seconds) + 1
         ):
             raise SuccessorClassificationContractError
+
+
+@dataclass(slots=True)
+class SuccessorPresenceMetrics:
+    """Bounded process-local counters for the S2-1 fast PRESENT gate."""
+
+    reference_preparation_attempts: int = 0
+    fast_path_evaluations: int = 0
+    fast_present_hits: int = 0
+    delegated_cases: int = 0
+    fast_path_elapsed_ms_total: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -572,6 +631,44 @@ class SuccessorCoarseClassificationService:
     fallback_policy: ObservableFrameFallbackPolicy = field(
         default_factory=ObservableFrameFallbackPolicy
     )
+    fast_present_policy: ObjectPresenceDecisionPolicy | None = None
+    metrics: SuccessorPresenceMetrics = field(default_factory=SuccessorPresenceMetrics, repr=False)
+
+    def prepare_reference(
+        self, authority: SuccessorClassificationAuthority
+    ) -> SuccessorClassificationAuthority:
+        """Prepare one optional run-bound reference context for fast PRESENT."""
+        if self.fast_present_policy is None or authority.fast_presence_reference is not None:
+            return authority
+        self.metrics.reference_preparation_attempts += 1
+        preparer = getattr(self.classifier, "prepare_reference", None)
+        if not callable(preparer):
+            return authority
+        try:
+            mask = preparer(
+                authority.baseline_image,
+                authority.source_width,
+                authority.source_height,
+                authority.roi,
+                f"reference-{authority.authority_identity}",
+            )
+        except Exception:  # noqa: BLE001 - reference optimization must fail open to slow path.
+            return authority
+        if not isinstance(mask, BinaryMask):
+            return authority
+        reference = prepare_fast_presence_reference(
+            authority.baseline_image,
+            mask,
+            authority.roi,
+            self.fast_present_policy,
+        )
+        if reference is None:
+            return authority
+        return replace(
+            authority,
+            reference_mask=mask,
+            fast_presence_reference=reference,
+        )
 
     def classify_plan(
         self,
@@ -894,6 +991,46 @@ class SuccessorCoarseClassificationService:
             or decoded.image.height != authority.source_height
         ):
             return ("decode_failed", "frame_resolution_mismatch", None)
+        fast_policy = self.fast_present_policy
+        fast_reference = authority.fast_presence_reference
+        fast_started = perf_counter()
+        fast_comparison: RawComparison | None = None
+        if fast_policy is not None and fast_reference is not None:
+            self.metrics.fast_path_evaluations += 1
+            try:
+                fast_comparison = fast_present_comparison(
+                    fast_reference,
+                    decoded.image,
+                    authority.roi,
+                    fast_policy,
+                )
+            except Exception:  # noqa: BLE001 - any optimization error delegates unchanged.
+                fast_comparison = None
+            fast_elapsed = max(0, round((perf_counter() - fast_started) * 1000))
+        else:
+            fast_elapsed = 0
+        self.metrics.fast_path_elapsed_ms_total += fast_elapsed
+        if fast_comparison is not None:
+            self.metrics.fast_present_hits += 1
+            _emit_fast_path_event(
+                "fast_present",
+                fast_elapsed,
+                self.metrics,
+                correlation_id,
+            )
+            return (
+                "classified",
+                SuccessorClassifierResult(
+                    ClassificationOutcome.PRESENT,
+                    None,
+                    fast_comparison,
+                    "completed",
+                    fast_elapsed,
+                ),
+                fast_elapsed,
+            )
+        self.metrics.delegated_cases += 1
+        _emit_fast_path_event("delegated", fast_elapsed, self.metrics, correlation_id)
         classifier_started = perf_counter()
         try:
             classified = self.classifier.classify(
@@ -1289,6 +1426,33 @@ def _emit_observable_trace(
             json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
         )
     except Exception:  # noqa: BLE001 - diagnostic sinks cannot affect classification.
+        return
+
+
+def _emit_fast_path_event(
+    stage: str,
+    elapsed_ms: int,
+    metrics: SuccessorPresenceMetrics,
+    correlation_id: str,
+) -> None:
+    """Emit bounded S2-1 stage facts without affecting classification."""
+    try:
+        _OBSERVABILITY_LOGGER.info(
+            "phase7e.presence_first %s",
+            json.dumps(
+                {
+                    "stage": stage,
+                    "elapsed_ms": elapsed_ms,
+                    "correlation_id": correlation_id,
+                    "fast_path_evaluations": metrics.fast_path_evaluations,
+                    "fast_present_hits": metrics.fast_present_hits,
+                    "delegated_cases": metrics.delegated_cases,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+    except Exception:  # noqa: BLE001 - diagnostics cannot change classification.
         return
 
 

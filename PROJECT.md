@@ -304,6 +304,12 @@ Successor acquisition now preserves raw segment bounds separately from semantic
 coverage, uses bounded post-target replay context to finalize short RTSP media,
 and admits only a decoded frame at or before the requested target. Sentinel
 frames never extend the search result's observed range.
+Phase S2-1 adds a run-scoped, in-memory baseline reference preparation and a
+cheap fixed-support PRESENT fast gate for successor observations. Fast hits
+short-circuit before candidate segmentation/alignment; every other case,
+including ABSENT and ambiguous candidates, delegates to the existing Schema 8
+baseline-support classifier unchanged. No durable schema, evidence, API, UI, or
+publication contract changes.
 Search admission now uses the same effective start in the browser and backend:
 the later of the investigation anchor and selected baseline time; minute-level
 native `datetime-local` search-end values are accepted as whole seconds.

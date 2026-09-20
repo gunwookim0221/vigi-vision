@@ -30,11 +30,13 @@ from pathlib import Path
 from time import monotonic, sleep
 from typing import TYPE_CHECKING, Final, Literal
 
+from vigi_vision.assisted_roi_geometry import ImageSize, Point
 from vigi_vision.assisted_roi_predictor import LazyEfficientSamPredictor
 from vigi_vision.assisted_roi_service import RoiSuggestionUnavailableError
 from vigi_vision.investigation_confirmation_models import ConfirmationRoi
 from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
 from vigi_vision.object_presence_values import BinaryMask, DecodedRgbImage
+from vigi_vision.recording_search_b3_masks import _prediction_to_mask
 from vigi_vision.recording_search_b3_models import (
     ClassificationPreparationError,
     ClassificationPreparationReason,
@@ -71,6 +73,7 @@ _REQUEST_KEYS: Final = frozenset(
         "predictor",
     }
 )
+_REFERENCE_REQUEST_KEYS: Final = _REQUEST_KEYS | frozenset({"reference_only"})
 _PREDICTOR_KEYS: Final = {
     "efficient_sam": frozenset({"kind", "checkpoint_path", "expected_sha256", "device_mode"}),
     "static_masks": frozenset({"kind", "baseline_rows", "probe_rows", "delay_seconds"}),
@@ -86,6 +89,7 @@ _FAILURE_CODES: Final = frozenset(
         "worker_execution_failed",
     }
 )
+_REFERENCE_KEYS: Final = frozenset({"version", "correlation_id", "kind", "mask"})
 _TIMING_KEYS: Final = frozenset(
     {
         "child_started_ms",
@@ -210,7 +214,8 @@ def run_b4_in_process(
     cancellation: object | None = None,
     pid_observer: Callable[[int], None] | None = None,
     timing_sink: TimingSink | None = None,
-) -> ClassificationResult:
+    reference_only: bool = False,
+) -> ClassificationResult | BinaryMask:
     """Compute B4 in one spawned child and accept only a fully reaped result."""
     if not _valid_timeout(timeout_seconds):
         raise B4ProcessError("worker_start_failed")
@@ -229,6 +234,7 @@ def run_b4_in_process(
             policy,
             worker_spec,
             correlation_id,
+            reference_only=reference_only,
         )
         encoded = _encode_json(request)
     except B4ProcessError:
@@ -245,7 +251,7 @@ def run_b4_in_process(
     process: multiprocessing.Process | None = None
     started = False
     primary_error: B4ProcessError | None = None
-    result: ClassificationResult | None = None
+    result: ClassificationResult | BinaryMask | None = None
     ready = False
     process_started_at: float | None = None
     inference_started_at: float | None = None
@@ -302,6 +308,16 @@ def run_b4_in_process(
                 if monotonic() >= deadline:
                     raise B4ProcessTimeout(stage="startup" if not ready else "inference")
                 message_kind = _message_kind(raw)
+                if message_kind == "reference":
+                    if not reference_only:
+                        raise B4ProcessError("malformed_worker_protocol")
+                    result = _decode_reference_mask(
+                        raw, correlation_id, source_width, source_height
+                    )
+                    result_received_at = monotonic()
+                    if inference_deadline is None or result_received_at >= inference_deadline:
+                        raise B4ProcessTimeout(stage="inference")
+                    return result
                 if message_kind in {"ready", "timing", "inference"}:
                     if message_kind == "inference":
                         child_timings.update(_decode_timing(raw, correlation_id, "inference"))
@@ -334,6 +350,19 @@ def run_b4_in_process(
                     if parent.poll(0):
                         raw = parent.recv_bytes(MAX_RESULT_BYTES + 1)
                         message_kind = _message_kind(raw)
+                        if message_kind == "reference":
+                            if not reference_only:
+                                raise B4ProcessError("malformed_worker_protocol")
+                            result = _decode_reference_mask(
+                                raw, correlation_id, source_width, source_height
+                            )
+                            result_received_at = monotonic()
+                            if (
+                                inference_deadline is None
+                                or result_received_at >= inference_deadline
+                            ):
+                                raise B4ProcessTimeout(stage="inference")
+                            return result
                         if message_kind in {"ready", "timing", "inference"}:
                             if message_kind == "inference":
                                 child_timings.update(
@@ -502,6 +531,8 @@ def _build_request(
     policy: ObjectPresenceDecisionPolicy,
     worker_spec: object,
     correlation_id: str,
+    *,
+    reference_only: bool = False,
 ) -> dict[str, object]:
     """Build one exact primitive-only request after parent-side validation."""
     if not isinstance(worker_spec, (EfficientSamWorkerSpec, StaticMaskWorkerSpec)):
@@ -517,7 +548,7 @@ def _build_request(
     ):
         raise B4ProcessError("worker_start_failed")
     predictor = worker_spec.payload()
-    return {
+    request: dict[str, object] = {
         "version": PROTOCOL_VERSION,
         "correlation_id": correlation_id,
         "source_width": width,
@@ -528,6 +559,9 @@ def _build_request(
         "policy": policy.model_dump(mode="json"),
         "predictor": predictor,
     }
+    if reference_only:
+        request["reference_only"] = True
+    return request
 
 
 def _send_payload(connection: Connection, payload: dict[str, object]) -> None:
@@ -580,6 +614,20 @@ def _worker_entry(connection: Connection, encoded: bytes) -> None:
                 "timings_ms": timings,
             },
         )
+        if request.get("reference_only") is True:
+            result = _reference_mask(request, predictor)
+            payload = {
+                "version": PROTOCOL_VERSION,
+                "correlation_id": request["correlation_id"],
+                "kind": "reference",
+                "mask": _encode_reference_mask(result),
+            }
+            _send_payload(connection, payload)
+            try:
+                connection.close()
+            except OSError:
+                pass
+            return
         result = _compute(request, predictor=predictor, stage_sink=stage_sink)
         _send_payload(
             connection,
@@ -669,6 +717,32 @@ def _compute(
     return result
 
 
+def _reference_mask(request: dict[str, object], predictor: object) -> BinaryMask:
+    """Prepare one validated baseline mask for a run-scoped reference context."""
+    width = request["source_width"]
+    height = request["source_height"]
+    assert type(width) is int and type(height) is int
+    baseline = _image_from_b64(request["baseline_rgb24"], width, height)
+    roi = ConfirmationRoi.model_validate(request["roi"])
+    policy = _policy_from_request(request)
+    point = Point(roi.x + (roi.width - 1) // 2, roi.y + (roi.height - 1) // 2)
+    size = ImageSize(width, height)
+    prediction = predictor.predict_from_rgb(baseline, point, size)
+    return _prediction_to_mask(prediction, size, point, policy)
+
+
+def _policy_from_request(request: dict[str, object]) -> ObjectPresenceDecisionPolicy:
+    policy_payload = request["policy"]
+    if not isinstance(policy_payload, dict):
+        raise ValueError
+    coefficients = policy_payload.get("luma_integer_coefficients")
+    if not isinstance(coefficients, list):
+        raise ValueError
+    return ObjectPresenceDecisionPolicy.model_validate(
+        {**policy_payload, "luma_integer_coefficients": tuple(coefficients)}
+    )
+
+
 class _StaticPredictor:
     def __init__(self, baseline: BinaryMask, probe: BinaryMask, delay_seconds: float) -> None:
         self._values = (baseline, probe)
@@ -735,7 +809,10 @@ def _decode_request(encoded: bytes) -> dict[str, object]:
     if type(encoded) is not bytes or not encoded or len(encoded) > MAX_PROTOCOL_BYTES:
         raise ValueError
     value = _decode_json(encoded)
-    if not isinstance(value, dict) or set(value) != _REQUEST_KEYS:
+    if not isinstance(value, dict):
+        raise ValueError
+    keys = frozenset(value.keys())
+    if keys not in {_REQUEST_KEYS, _REFERENCE_REQUEST_KEYS}:
         raise ValueError
     if value.get("version") != PROTOCOL_VERSION:
         raise ValueError
@@ -756,7 +833,64 @@ def _decode_request(encoded: bytes) -> dict[str, object]:
         raise ValueError
     if not isinstance(value.get("predictor"), dict):
         raise ValueError
+    if "reference_only" in value and type(value["reference_only"]) is not bool:
+        raise ValueError
     return value
+
+
+def _encode_reference_mask(mask: BinaryMask) -> str:
+    bits = bytearray((mask.width * mask.height + 7) // 8)
+    for index, value in enumerate(value for row in mask.rows for value in row):
+        if value:
+            bits[index // 8] |= 1 << (index % 8)
+    return base64.b64encode(bits).decode("ascii")
+
+
+def _decode_reference_mask(
+    raw: bytes, expected_correlation: str, width: int, height: int
+) -> BinaryMask:
+    try:
+        value = _decode_json(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as error:
+        raise B4ProcessError("malformed_worker_protocol") from error
+    if (
+        not isinstance(value, dict)
+        or set(value) != _REFERENCE_KEYS
+        or value.get("version") != PROTOCOL_VERSION
+        or value.get("correlation_id") != expected_correlation
+        or value.get("kind") != "reference"
+    ):
+        raise B4ProcessError("malformed_worker_protocol")
+    encoded_mask = value.get("mask")
+    if not isinstance(encoded_mask, str):
+        raise B4ProcessError("invalid_classifier_output")
+    try:
+        packed = base64.b64decode(encoded_mask.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, ValueError) as error:
+        raise B4ProcessError("invalid_classifier_output") from error
+    cell_count = width * height
+    expected_bytes = (cell_count + 7) // 8
+    if (
+        width <= 0
+        or height <= 0
+        or len(packed) != expected_bytes
+        or (
+            cell_count % 8
+            and packed[-1] & ~((1 << (cell_count % 8)) - 1)
+        )
+    ):
+        raise B4ProcessError("invalid_classifier_output")
+    rows = tuple(
+        tuple(
+            bool(packed[(y * width + x) // 8] & (1 << ((y * width + x) % 8)))
+            for x in range(width)
+        )
+        for y in range(height)
+    )
+    try:
+        return BinaryMask.from_rows(rows)
+    except (TypeError, ValueError) as error:
+        raise B4ProcessError("invalid_classifier_output") from error
 
 
 def _decode_result(raw: bytes, expected_correlation: str) -> ClassificationResult:

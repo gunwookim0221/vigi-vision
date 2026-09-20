@@ -29,7 +29,7 @@ from vigi_vision.investigation_confirmation_integrity import (
 from vigi_vision.investigation_confirmation_models import (
     ConfirmedInvestigationInput,
 )
-from vigi_vision.object_presence_values import DecodedRgbImage
+from vigi_vision.object_presence_values import BinaryMask, DecodedRgbImage
 from vigi_vision.recording_search_7e_1c import (
     B4Bridge,
     CommonSessionCancelledError,
@@ -328,7 +328,7 @@ def _bounded_classification(  # noqa: PLR0913
     cancellation: object | None = None,
 ) -> ClassificationResult:
     """Run the shared computation under the Phase 7 bounded classifier budget."""
-    return run_b4_in_process(
+    result = run_b4_in_process(
         baseline_image=baseline,
         probe_image=probe,
         source_width=width,
@@ -341,6 +341,10 @@ def _bounded_classification(  # noqa: PLR0913
         startup_timeout_seconds=startup_timeout,
         cancellation=cancellation,
     )
+    if isinstance(result, BinaryMask):
+        reason = "invalid_classifier_output"
+        raise B4ProcessError(reason)
+    return result
 
 
 def _worker_spec(predictor: object) -> EfficientSamWorkerSpec | StaticMaskWorkerSpec:

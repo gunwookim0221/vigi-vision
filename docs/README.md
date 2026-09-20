@@ -73,6 +73,14 @@ documentation route is added, removed, or relocated.
   for the normative Phase 7B single-probe input, geometry, classifier, outcome,
   schema-3 observation, publication, idempotency, and strict-reopen contract.
   Read
+  [design/presence-first-classifier-s1.md](design/presence-first-classifier-s1.md)
+  for the Phase S1 successor-classifier design and the locally implemented
+  Phase S2-1 PRESENT-only optimization: one run-scoped reference context,
+  fixed-support fast hits, unchanged slow-path delegation, conservative
+  ABSENT handling, bounded diagnostics, and the S2--S4 implementation plan.
+  The implemented Phase 7B and Schema 8 contracts remain authoritative; S2-1
+  adds no durable schema, evidence, API, UI, or publication contract.
+  Read
   [design/reference-frame-service.md](design/reference-frame-service.md)
   when implementing or reviewing the proposed recorded reference-frame service,
   its timing evidence or durable artifacts. Read

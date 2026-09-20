@@ -27,6 +27,7 @@ from time import perf_counter
 from typing import TYPE_CHECKING, Protocol, cast
 
 from vigi_vision.investigation_confirmation_models import ConfirmedInvestigationInput
+from vigi_vision.object_presence_models import BinaryMask
 from vigi_vision.object_presence_values import ClassificationOutcome, DecodedRgbImage
 from vigi_vision.recording_search_7e_b4_process import (
     B4ProcessError,
@@ -433,6 +434,39 @@ class SuccessorB4Classifier:
             elapsed_ms,
         )
 
+    def prepare_reference(
+        self,
+        baseline_image: DecodedRgbImage,
+        source_width: int,
+        source_height: int,
+        roi: object,
+        correlation_id: str,
+    ) -> BinaryMask | None:
+        """Prepare one baseline mask while retaining the existing B4 boundary."""
+        try:
+            result = run_b4_in_process(
+                baseline_image=baseline_image,
+                probe_image=baseline_image,
+                source_width=source_width,
+                source_height=source_height,
+                roi=roi,
+                policy=self.policy,
+                worker_spec=self.worker_spec,
+                correlation_id=correlation_id,
+                timeout_seconds=self.timeout_seconds,
+                startup_timeout_seconds=self.startup_timeout_seconds,
+                reference_only=True,
+            )
+        except (B4ProcessError, ClassificationPreparationError):
+            return None
+        if (
+            not isinstance(result, BinaryMask)
+            or result.width != source_width
+            or result.height != source_height
+        ):
+            return None
+        return result
+
 
 @dataclass(slots=True)
 class SuccessorExecutionService:
@@ -479,6 +513,9 @@ class SuccessorExecutionService:
             successor_plan_id=plan.plan_id,
             baseline_image=baseline_image,
         )
+        prepare_reference = getattr(self.classification, "prepare_reference", None)
+        if callable(prepare_reference):
+            authority = prepare_reference(authority)
         return SuccessorPreparedExecution(
             SuccessorRequest(
                 confirmed.investigation_id,

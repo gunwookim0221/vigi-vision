@@ -50,6 +50,202 @@ class ClassifierInput:
     roi: ConfirmationRoi
 
 
+@dataclass(frozen=True, slots=True)
+class FastPresenceReference:
+    """Run-scoped fixed-support values used by the cheap PRESENT gate."""
+
+    baseline_luma: tuple[float, ...]
+    baseline_mask: tuple[tuple[bool, ...], ...]
+    support_indices: tuple[int, ...]
+    baseline_background: tuple[float, ...]
+    background_indices: tuple[int, ...]
+    roi_width: int
+    roi_height: int
+    roi_pixel_count: int
+    baseline_support_pixel_count: int
+    baseline_support_coverage: float
+
+
+def prepare_fast_presence_reference(
+    baseline_image: DecodedRgbImage,
+    baseline_mask: BinaryMask,
+    roi: ConfirmationRoi,
+    policy: ObjectPresenceDecisionPolicy,
+) -> FastPresenceReference | None:
+    """Prepare immutable fixed-support values without candidate model work."""
+    if (
+        baseline_image.width != baseline_mask.width
+        or baseline_image.height != baseline_mask.height
+        or roi.coordinate_space != "source_pixels"
+        or roi.x < 0
+        or roi.y < 0
+        or roi.width <= 0
+        or roi.height <= 0
+        or roi.x + roi.width > baseline_image.width
+        or roi.y + roi.height > baseline_image.height
+    ):
+        return None
+    clipped_baseline, _ = clipped_masks(baseline_mask.rows, baseline_mask.rows, roi)
+    roi_pixels = roi.width * roi.height
+    support_count = mask_count(clipped_baseline)
+    if (
+        not contains_prompt(clipped_baseline, roi)
+        or support_count < policy.minimum_clipped_mask_pixels
+        or ratio(support_count, roi_pixels) >= policy.maximum_roi_mask_coverage_ratio
+    ):
+        return None
+    support_indices = tuple(
+        index
+        for index, value in enumerate(value for row in clipped_baseline for value in row)
+        if value
+    )
+    baseline_luma = roi_luma(baseline_image, roi)
+    radius = _stability_dilation_radius(
+        roi.width,
+        roi.height,
+        support_count,
+        include_segmentation_margin=policy.baseline_support_alignment_mode,
+    )
+    exclusion = _dilated_exclusion_mask(clipped_baseline, radius)
+    background_indices = tuple(
+        index
+        for index, excluded in enumerate(value for row in exclusion for value in row)
+        if not excluded
+    )
+    baseline_background = tuple(baseline_luma[index] for index in background_indices)
+    return FastPresenceReference(
+        baseline_luma=baseline_luma,
+        baseline_mask=clipped_baseline,
+        support_indices=support_indices,
+        baseline_background=baseline_background,
+        background_indices=background_indices,
+        roi_width=roi.width,
+        roi_height=roi.height,
+        roi_pixel_count=roi_pixels,
+        baseline_support_pixel_count=support_count,
+        baseline_support_coverage=ratio(support_count, roi_pixels),
+    )
+
+
+def fast_present_comparison(
+    reference: FastPresenceReference,
+    probe_image: DecodedRgbImage,
+    roi: ConfirmationRoi,
+    policy: ObjectPresenceDecisionPolicy,
+) -> RawComparison | None:
+    """Return comparable PRESENT evidence only for a decisive fixed-support match."""
+    if (
+        probe_image.width <= 0
+        or probe_image.height <= 0
+        or roi.width != reference.roi_width
+        or roi.height != reference.roi_height
+        or roi.x < 0
+        or roi.y < 0
+        or roi.x + roi.width > probe_image.width
+        or roi.y + roi.height > probe_image.height
+        or not reference.support_indices
+        or not reference.baseline_background
+        or not reference.background_indices
+    ):
+        return None
+    probe_luma = roi_luma(probe_image, roi)
+    probe_background = tuple(probe_luma[index] for index in reference.background_indices)
+    normalization = _build_luma_normalization(reference.baseline_background, probe_background)
+    if normalization is None:
+        return None
+    normalized_probe = _apply_luma_normalization(probe_luma, normalization)
+    baseline_support = tuple(reference.baseline_luma[index] for index in reference.support_indices)
+    probe_support = tuple(probe_luma[index] for index in reference.support_indices)
+    similarity, change, foreground, background_change, normalized_probe = _support_luma_metrics(
+        baseline_support,
+        probe_support,
+        reference.baseline_background,
+        probe_background,
+        (reference.background_indices, reference.roi_width),
+        normalization,
+    )
+    stability = _stable_background_profile(
+        reference.baseline_background,
+        normalization.normalized_background,
+        reference.background_indices,
+        reference.roi_width,
+        reference.roi_height,
+        reference.roi_pixel_count,
+    )
+    support_ncc_raw = mean_centered_ncc(
+        tuple(reference.baseline_luma[index] for index in reference.support_indices),
+        tuple(probe_luma[index] for index in reference.support_indices),
+    )
+    roi_ncc_raw = mean_centered_ncc(reference.baseline_luma, probe_luma)
+    edge = _support_edge_similarity(
+        reference.baseline_luma,
+        reference.baseline_mask,
+        reference.roi_width,
+        normalized_probe,
+        reference.support_indices,
+    )
+    if (
+        similarity is None
+        or support_ncc_raw is None
+        or change is None
+        or foreground is None
+        or background_change is None
+        or edge is None
+        or not stability.scene_stable
+    ):
+        return None
+    if not (
+        similarity >= policy.baseline_support_present_similarity_minimum
+        and quantize_metric(support_ncc_raw) >= policy.baseline_support_present_ncc_minimum
+        and edge >= policy.baseline_support_present_edge_minimum
+        and change <= policy.baseline_support_present_change_maximum
+        and foreground >= policy.baseline_support_present_foreground_minimum
+    ):
+        return None
+    return RawComparison(
+        baseline_mask_pixel_count=reference.baseline_support_pixel_count,
+        probe_mask_pixel_count=None,
+        roi_pixel_count=reference.roi_pixel_count,
+        mask_intersection_pixel_count=None,
+        mask_union_pixel_count=None,
+        baseline_mask_coverage=reference.baseline_support_coverage,
+        probe_mask_coverage=None,
+        mask_iou=None,
+        effective_comparison_area=None,
+        roi_luma_ncc=None if roi_ncc_raw is None else quantize_metric(roi_ncc_raw),
+        visual_status=VisualStatus.COMPARABLE,
+        unusable_reason=None,
+        comparison_mode=(
+            "baseline_support_v3"
+            if policy.baseline_support_alignment_mode
+            else "baseline_support_v2"
+        ),
+        baseline_support_pixel_count=reference.baseline_support_pixel_count,
+        baseline_support_luma_similarity=similarity,
+        baseline_support_luma_ncc=quantize_metric(support_ncc_raw),
+        baseline_support_edge_similarity=edge,
+        baseline_support_change_ratio=change,
+        baseline_support_foreground_retention=foreground,
+        baseline_support_background_change_ratio=background_change,
+        baseline_support_alignment_state=(
+            "not_required" if policy.baseline_support_alignment_mode else None
+        ),
+        baseline_support_stability_pixel_count=stability.total_pixel_count,
+        baseline_support_stability_changed_pixel_count=stability.changed_pixel_count,
+        baseline_support_stability_valid_pixel_count=stability.valid_pixel_count,
+        baseline_support_stability_excluded_pixel_count=stability.excluded_pixel_count,
+        baseline_support_scene_stable=stability.scene_stable,
+        baseline_support_scene_stability_veto_reason=stability.veto_reason,
+        baseline_support_present_gate_passed=True,
+        baseline_support_absent_gate_passed=False,
+        baseline_support_empty_background_evidence=False,
+        baseline_support_replacement_evidence=False,
+        baseline_support_occlusion_evidence=False,
+        baseline_support_decision_path="present",
+        baseline_support_decision_reason="present_identity_retained",
+    )
+
+
 _SUPPORT_CHANGE_THRESHOLD: Final[float] = 32.0
 _FOREGROUND_CONTRAST_THRESHOLD: Final[float] = 40.0
 _STABILITY_DILATION_PIXELS: Final[int] = 4
