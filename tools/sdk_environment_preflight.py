@@ -1,9 +1,8 @@
-"""Validate the SDK editable development environment without loading secrets."""
+"""Validate the released SDK environment without loading secrets."""
 
 from __future__ import annotations
 
 import inspect
-import json
 import os
 import re
 import sys
@@ -12,15 +11,12 @@ from importlib import import_module
 from importlib.metadata import Distribution, PackageNotFoundError, distribution
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
-from urllib.parse import unquote, urlparse
-from urllib.request import url2pathname
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 SDK_DISTRIBUTION = "tp-link-vigi-sdk"
 SDK_MODULE = "vigi"
-SDK_SOURCE_SECTION = "tool.uv.sources"
 
 
 @dataclass
@@ -31,9 +27,10 @@ class PreflightReport:
     python_version: str
     distribution_name: str = "<unavailable>"
     distribution_version: str = "<unavailable>"
+    required_version: str = "<unavailable>"
     metadata_location: str = "<unavailable>"
     imported_module_path: str = "<unavailable>"
-    editable_source: str = "<unavailable>"
+    installation_source: str = "<unavailable>"
     method_present: bool = False
     method_signature: str = "<unavailable>"
     failures: list[str] = field(default_factory=list)
@@ -61,26 +58,22 @@ def _canonical_distribution_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).casefold()
 
 
-def _expected_sdk_source(repository_root: Path) -> Path:
-    """Read the repository's local editable SDK source from pyproject.toml."""
+def _expected_sdk_version(repository_root: Path) -> str:
+    """Read the repository's exact released SDK requirement."""
     pyproject = repository_root / "pyproject.toml"
     text = pyproject.read_text(encoding="utf-8")
-    section_match = re.search(
-        rf"(?ms)^\[{re.escape(SDK_SOURCE_SECTION)}\]\s*(.*?)(?=^\[|\Z)",
-        text,
-    )
-    if section_match is None:
+    project_match = re.search(r"(?ms)^\[project\]\s*(.*?)(?=^\[|\Z)", text)
+    if project_match is None:
         raise ValueError from None
     dependency_match = re.search(
-        r"(?m)^\s*tp-link-vigi-sdk\s*=\s*\{([^}]*)\}",
-        section_match.group(1),
+        r'(?m)^\s*["\']tp-link-vigi-sdk==([^"\']+)["\']\s*,?\s*$', project_match.group(1)
     )
     if dependency_match is None:
         raise ValueError from None
-    path_match = re.search(r"\bpath\s*=\s*([\"'])(.*?)\1", dependency_match.group(1))
-    if path_match is None or not path_match.group(2).strip():
+    version = dependency_match.group(1).strip()
+    if not version:
         raise ValueError from None
-    return _canonical_path(repository_root / path_match.group(2).strip())
+    return version
 
 
 def _metadata_location(distribution: Distribution) -> Path:
@@ -94,38 +87,8 @@ def _metadata_location(distribution: Distribution) -> Path:
     return location
 
 
-def _direct_url_source(metadata_location: Path) -> Path:
-    """Read and validate the editable PEP 610 direct URL source."""
-    direct_url_path = metadata_location / "direct_url.json"
-    if not direct_url_path.is_file():
-        raise ValueError from None
-    try:
-        raw_payload: object = cast(
-            "object", json.loads(direct_url_path.read_text(encoding="utf-8"))
-        )
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise ValueError from error
-    if not isinstance(raw_payload, dict):
-        raise TypeError from None
-    payload = cast("dict[str, object]", raw_payload)
-    url = payload.get("url")
-    directory_info = payload.get("dir_info")
-    if not isinstance(url, str) or not isinstance(directory_info, dict):
-        raise TypeError from None
-    directory_info = cast("dict[str, object]", directory_info)
-    if directory_info.get("editable") is not True:
-        raise ValueError from None
-    parsed = urlparse(url)
-    if parsed.scheme.casefold() != "file" or parsed.netloc not in ("", "localhost"):
-        raise ValueError from None
-    path_text = url2pathname(unquote(parsed.path))
-    if not path_text:
-        raise ValueError from None
-    return _canonical_path(Path(path_text))
-
-
 def _inspect_distribution(report: PreflightReport) -> None:
-    """Collect distribution metadata and its editable source."""
+    """Collect distribution metadata and verify the registry installation."""
     try:
         sdk_distribution = distribution(SDK_DISTRIBUTION)
         metadata_name = str(sdk_distribution.metadata["Name"]).strip()
@@ -140,14 +103,20 @@ def _inspect_distribution(report: PreflightReport) -> None:
             report.failures.append("SDK_DISTRIBUTION_VERSION_UNRECONCILED")
         else:
             report.distribution_version = version
+            if report.required_version != "<unavailable>" and version != report.required_version:
+                report.failures.append("SDK_DISTRIBUTION_VERSION_MISMATCH")
         metadata_location = _metadata_location(sdk_distribution)
         report.metadata_location = str(metadata_location)
-        report.editable_source = str(_direct_url_source(metadata_location))
+        if (metadata_location / "direct_url.json").exists():
+            report.installation_source = "direct-url"
+            report.failures.append("SDK_NON_REGISTRY_INSTALL")
+        else:
+            report.installation_source = "registry"
     except (KeyError, PackageNotFoundError, OSError, TypeError, ValueError):
         report.failures.append("SDK_DISTRIBUTION_METADATA_UNRECONCILED")
 
 
-def _inspect_sdk_module(report: PreflightReport, expected_source: Path | None) -> None:
+def _inspect_sdk_module(report: PreflightReport) -> None:
     """Collect SDK module and public capability facts."""
     try:
         sdk_module = import_module(SDK_MODULE)
@@ -174,8 +143,9 @@ def _inspect_sdk_module(report: PreflightReport, expected_source: Path | None) -
                 report.method_signature = str(inspect.signature(callable_method))
             except (TypeError, ValueError):
                 report.method_signature = "<unavailable>"
-        if expected_source is not None:
-            expected_package = expected_source / "src" / SDK_MODULE
+        if report.metadata_location != "<unavailable>":
+            site_packages = Path(report.metadata_location).parent
+            expected_package = site_packages / SDK_MODULE
             if not _same_path(module_path.parent, expected_package):
                 report.failures.append("SDK_IMPORTED_SOURCE_CONFLICT")
     except (AttributeError, ImportError, OSError, TypeError, ValueError):
@@ -191,20 +161,12 @@ def collect_preflight(repository_root: Path | None = None) -> PreflightReport:
     )
 
     try:
-        expected_source = _expected_sdk_source(root)
+        report.required_version = _expected_sdk_version(root)
     except (OSError, UnicodeError, ValueError):
-        report.failures.append("EXPECTED_LOCAL_SDK_SOURCE_UNRESOLVED")
-        expected_source = None
+        report.failures.append("SDK_REQUIRED_VERSION_UNRESOLVED")
 
     _inspect_distribution(report)
-    _inspect_sdk_module(report, expected_source)
-
-    if (
-        expected_source is not None
-        and report.editable_source != "<unavailable>"
-        and not _same_path(Path(report.editable_source), expected_source)
-    ):
-        report.failures.append("SDK_EDITABLE_SOURCE_CONFLICT")
+    _inspect_sdk_module(report)
 
     return report
 
@@ -217,9 +179,10 @@ def render_report(report: PreflightReport) -> str:
         f"python.version: {report.python_version}",
         f"sdk.distribution: {report.distribution_name}",
         f"sdk.version: {report.distribution_version}",
+        f"sdk.required_version: {report.required_version}",
         f"sdk.module_path: {report.imported_module_path}",
         f"sdk.metadata_location: {report.metadata_location}",
-        f"sdk.editable_source: {report.editable_source}",
+        f"sdk.installation_source: {report.installation_source}",
         f"sdk.build_ipc_live_url: {'present' if report.method_present else 'absent'}",
         f"sdk.build_ipc_live_url_signature: {report.method_signature}",
     ]

@@ -1039,17 +1039,12 @@ wheels = [
 
 [[package]]
 name = "tp-link-vigi-sdk"
-version = "0.2.0"
-source = { editable = "../tp-link-vigi-sdk" }
-
-[package.metadata]
-requires-dist = [
-    { name = "coverage", marker = "extra == 'dev'", specifier = ">=7" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/32/94/64d72bf171d1d03ed2e6c5f15c3489503efdfcbc837077b18d992d677906/tp_link_vigi_sdk-0.3.0.tar.gz", hash = "sha256:89f681ca811de3357d32c22b27e6513b4a48b6b3f5dfa044b21a726b40944923", size = 46785, upload-time = "2026-09-20T09:53:43.943Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e5/5c/a0b7f8f854e2dad47e0c5f2fbeda56b6176cf5f55caf2ce77122a6a9cd27/tp_link_vigi_sdk-0.3.0-py3-none-any.whl", hash = "sha256:1728501f660d195c65c1ea5504cc4c0ec4afe810154d685f943120abaf3b6d44", size = 39872, upload-time = "2026-09-20T09:53:42.679Z" },
 ]
-provides-extras = ["dev"]
 
 [[package]]
 name = "tqdm"
@@ -1208,7 +1203,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "rich", specifier = ">=13.0" },
-    { name = "tp-link-vigi-sdk", editable = "../tp-link-vigi-sdk" },
+    { name = "tp-link-vigi-sdk", specifier = "==0.3.0" },
     { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.51.0" },
 ]

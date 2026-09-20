@@ -168,19 +168,20 @@ SDK preflight before broad tests:
 & "..\.venv\Scripts\python.exe" tools\sdk_environment_preflight.py
 ```
 
-The preflight reports the interpreter, SDK distribution and source resolution,
-and the required public IPC URL-builder capability. It exits nonzero when a
-global interpreter, stale editable SDK, or incompatible SDK source is selected.
+The preflight reports the interpreter, exact SDK version, registry installation
+source, and the required public IPC URL-builder capability. It exits nonzero
+when the declared and installed versions disagree, a direct/editable SDK source
+is selected, or the imported SDK does not come from the installed distribution.
 Run tests through that same interpreter rather than a global `pytest` command:
 
 ```powershell
 & "..\.venv\Scripts\python.exe" -m pytest
 ```
 
-The adjacent `tp-link-vigi-sdk` checkout is an editable development dependency
-for this local two-repository setup. SDK implementation or release changes must
-be made and validated separately in the SDK repository; this application does
-not modify the SDK.
+VIGI Vision consumes the exact released `tp-link-vigi-sdk==0.3.0` package from
+PyPI. An adjacent SDK checkout may be inspected, but it is not an application
+dependency. SDK implementation or release changes must be made and validated
+separately in the SDK repository; this application does not modify the SDK.
 
 ### Detailed CLI Notes
 

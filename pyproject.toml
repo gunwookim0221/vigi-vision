@@ -15,7 +15,7 @@ dependencies = [
     "pydantic-settings>=2.0",
     "python-dotenv>=1.0",
     "rich>=13.0",
-    "tp-link-vigi-sdk>=0.1.0",
+    "tp-link-vigi-sdk==0.3.0",
     "typer>=0.12",
     "uvicorn[standard]>=0.51.0",
 ]
@@ -36,9 +36,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 vigi_vision = ["reference_frame_web/*.css", "reference_frame_web/*.html", "reference_frame_web/*.js"]
-
-[tool.uv.sources]
-tp-link-vigi-sdk = { path = "../tp-link-vigi-sdk", editable = true }
 
 [tool.basedpyright]
 typeCheckingMode = "all"
