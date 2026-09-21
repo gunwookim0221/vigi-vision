@@ -322,15 +322,16 @@ next direction is now the
 classification state remains separate from search evidence, candidate interval
 recall takes priority over exact classification of every coarse frame, fast
 PRESENT remains unchanged, fast ABSENT is not a required milestone, and v3 is
-planned as precise verification around candidate intervals. Current Schema 8
-runtime behavior remains authoritative until separately reviewed S4-S7
-implementation work.
+planned as precise verification around candidate intervals. The approved S4
+implementation now forms and narrows unpublished process-local candidates while
+the current Schema 8 persistence and public contracts remain authoritative;
+S5-S7 require their own reviewed implementation work.
 Search admission now uses the same effective start in the browser and backend:
 the later of the investigation anchor and selected baseline time; minute-level
 native `datetime-local` search-end values are accepted as whole seconds.
 The existing successor/browser chain still requires its final human real-NVR
-acceptance; the separately reviewed S3-S7 candidate-first sequence is also
-future work.
+acceptance. S3 shadow evidence and S4 internal candidate narrowing are
+implemented and approved; S5-S7 remain future work.
 Correction B adds a bounded Windows-spawn process boundary around production
 Phase 7E B4 classification; timeout/cancellation terminate and reap the child,
 and late output cannot become evidence. Valid results allow a bounded two-second
@@ -397,15 +398,16 @@ capability.
 7. Use the approved S3-S7 disappearance-candidate-first roadmap for the next
    search increment. S3 now defines and measures a cheap search-evidence
    contract separately from `PRESENT`/`ABSENT`/`INDETERMINATE` in shadow mode;
-   S4 forms and narrows conservative
-   candidate intervals even when useful observations are indeterminate; S5
-   reserves segmentation, alignment, replacement, occlusion, and other v3 work
+   S4 now forms and internally narrows conservative candidate intervals even
+   when useful observations are indeterminate, with explicit provisional-tail,
+   recovery, gap, nonmonotonic, and overflow handling. S5 reserves
+   segmentation, alignment, replacement, occlusion, and other v3 work
    primarily for precise candidate verification; S6 performs fresh manually
    labeled real-NVR validation centered on event containment and complete
    misses; and S7 performs reviewed evidence/review-media integration and
    closure. Do not loosen the approved fast-PRESENT gate or make fast ABSENT a
-   prerequisite. Existing runtime, persistence, API, terminal, and UI contracts
-   remain unchanged until their phase-specific reviews approve an implementation.
+   prerequisite. Existing persistence, API, terminal, and UI contracts remain
+   unchanged until their phase-specific reviews approve an implementation.
 
 ## High-level roadmap
 

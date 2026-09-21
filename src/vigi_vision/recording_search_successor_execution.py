@@ -9,7 +9,7 @@ foreign record family.
 # The orchestration is an explicit contract boundary; keep its state machine
 # readable while suppressing only diagnostics for protocol-shaped adapters.
 # pyright: reportAny=false, reportArgumentType=false, reportAttributeAccessIssue=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnannotatedClassAttribute=false, reportPrivateUsage=false, reportUnusedImport=false, reportUnusedCallResult=false, reportUnusedParameter=false, reportUnknownVariableType=false, reportDeprecated=false
-# ruff: noqa: D102, D107, E501, EM101, FBT001, FBT003, PLR0913, PLC0415, PTH105, PTH108, RUF007, SIM105, TC001, TC003
+# ruff: noqa: D102, D107, E501, EM101, FBT001, FBT003, PLR0912, PLR0913, PLC0415, PTH105, PTH108, RUF007, SIM105, TC001, TC003
 
 from __future__ import annotations
 
@@ -48,6 +48,16 @@ from vigi_vision.recording_search_successor import (
 from vigi_vision.recording_search_successor_acquisition import (
     SuccessorTargetAcquisitionService,
     SuccessorTargetStatus,
+)
+from vigi_vision.recording_search_successor_candidate_search import (
+    EvidenceNarrowingCancelledError,
+    EvidenceNarrowingCompletion,
+    EvidenceNarrowingPolicy,
+    EvidenceNarrowingResult,
+    SuccessorCandidateFormationResult,
+    SuccessorSearchSample,
+    form_disappearance_candidates,
+    narrow_candidate_interval,
 )
 from vigi_vision.recording_search_successor_classification import (
     SuccessorClassificationAuthority,
@@ -572,8 +582,33 @@ class SuccessorExecutionService:
                 augmented = _with_anchor_observation(prepared, coarse, anchor_observation)
                 if augmented.candidate_bracket is not None:
                     return self._narrow_or_publish(prepared, augmented)
+            candidate_search = _candidate_search(prepared, augmented)
             if prepared.plan.gaps:
+                if candidate_search.candidates:
+                    narrowing_result = self._run_s4_narrowing(
+                        prepared,
+                        augmented,
+                        candidate_search,
+                        cancellation=cancellation,
+                    )
+                    if _s4_cancellation_observed(narrowing_result, cancellation):
+                        return self._publish_interrupted(prepared)
                 return self._publish_inconclusive(prepared, "incomplete_coverage", augmented)
+            if candidate_search.candidates:
+                narrowing_result = self._run_s4_narrowing(
+                    prepared,
+                    augmented,
+                    candidate_search,
+                    cancellation=cancellation,
+                )
+                if _s4_cancellation_observed(narrowing_result, cancellation):
+                    return self._publish_interrupted(prepared)
+                # Candidate-only evidence must not enter NOT_FOUND or FOUND;
+                # retain the existing terminal schema while preserving the
+                # conservative uncertainty internally for later S5 review.
+                return self._publish_inconclusive(
+                    prepared, "indeterminate_observation", augmented
+                )
             if all(
                 item.state is SuccessorObservationState.PRESENT for item in augmented.observations
             ):
@@ -609,6 +644,103 @@ class SuccessorExecutionService:
                     error_code=_safe_execution_error_code(fallback_error),
                 )
             raise SuccessorExecutionError("internal_error") from error
+
+    def _run_s4_narrowing(
+        self,
+        prepared: SuccessorPreparedExecution,
+        coarse: SuccessorCoarseClassificationResult,
+        candidate_search: SuccessorCandidateFormationResult,
+        *,
+        cancellation: Callable[[], bool] | None,
+    ) -> EvidenceNarrowingResult | None:
+        """Run unpublished evidence narrowing for the earliest qualified run."""
+        candidate = next(iter(candidate_search.qualified_candidates), None)
+        if candidate is None:
+            _safe_log(
+                "phase7e.s4_candidate_search",
+                stage="formed",
+                candidate_count=len(candidate_search.candidates),
+                qualified_count=0,
+                provisional_count=len(candidate_search.candidates),
+                overflowed=candidate_search.overflowed,
+                overflow_count=candidate_search.overflow_count,
+                narrowing_evaluations=0,
+            )
+            return None
+        acquisition_service = getattr(self.narrowing, "acquisition_service", None)
+        classification_service = getattr(self.narrowing, "classification_service", None)
+        if acquisition_service is None or classification_service is None:
+            _safe_log(
+                "phase7e.s4_candidate_search",
+                stage="formed",
+                candidate_count=len(candidate_search.candidates),
+                qualified_count=len(candidate_search.qualified_candidates),
+                provisional_count=sum(not item.qualified for item in candidate_search.candidates),
+                overflowed=candidate_search.overflowed,
+                overflow_count=candidate_search.overflow_count,
+                narrowing_evaluations=0,
+                narrowing_reason="service_unavailable",
+            )
+            return None
+        midpoint_count = 0
+
+        def sample_midpoint(requested_time_utc: datetime) -> SuccessorSearchSample | None:
+            nonlocal midpoint_count
+            if cancellation is not None and cancellation():
+                raise EvidenceNarrowingCancelledError
+            segment_id = _s4_segment_for_midpoint(prepared.plan, requested_time_utc)
+            if segment_id is None:
+                return SuccessorSearchSample(
+                    f"s4-gap-{midpoint_count + 1}",
+                    None,
+                    None,
+                    requested_time_utc=requested_time_utc,
+                    available=False,
+                    gap=True,
+                )
+            midpoint_count += 1
+            target = CoarseTargetAssignment(
+                100000 + midpoint_count,
+                requested_time_utc,
+                TargetAvailability.AVAILABLE,
+                segment_id,
+                None,
+            )
+            acquisition = acquisition_service.acquire_midpoint(prepared.plan, target)
+            observation = classification_service.classify_target(
+                prepared.plan, target, acquisition, prepared.authority
+            )
+            return SuccessorSearchSample.from_observation(observation)
+
+        result = narrow_candidate_interval(
+            candidate,
+            sample_midpoint,
+            policy=EvidenceNarrowingPolicy(
+                target_width_seconds=getattr(
+                    getattr(self.narrowing, "policy", None), "target_width_seconds", 30
+                ),
+                maximum_iterations=getattr(
+                    getattr(self.narrowing, "policy", None), "maximum_iterations", 6
+                ),
+            ),
+            should_cancel=cancellation,
+        )
+        _safe_log(
+            "phase7e.s4_candidate_search",
+            stage="narrowed",
+            candidate_count=len(candidate_search.candidates),
+            qualified_count=len(candidate_search.qualified_candidates),
+            provisional_count=sum(not item.qualified for item in candidate_search.candidates),
+            overflowed=candidate_search.overflowed,
+            overflow_count=candidate_search.overflow_count,
+            narrowing_evaluations=len(result.midpoint_samples),
+            narrowing_completion=result.completion.value,
+            narrowing_reason=result.reason_code,
+            interval_width_seconds=result.interval_width_seconds,
+            coverage_incomplete=result.coverage_incomplete,
+            coarse_observation_count=len(coarse.observations),
+        )
+        return result
 
     def publish_safety_terminal(
         self,
@@ -1004,6 +1136,40 @@ def _bracket_intersects_gap(plan: MultiSegmentCoarsePlan, bracket: object) -> bo
     if not isinstance(start, datetime) or not isinstance(end, datetime):
         return True
     return any(gap.start_utc < end and gap.end_utc > start for gap in plan.gaps)
+
+
+def _candidate_search(
+    prepared: SuccessorPreparedExecution,
+    coarse: SuccessorCoarseClassificationResult,
+) -> SuccessorCandidateFormationResult:
+    """Derive process-local S4 candidates from carried S3 bands only."""
+    samples = tuple(SuccessorSearchSample.from_observation(item) for item in coarse.observations)
+    return form_disappearance_candidates(
+        samples,
+        seed_reference_time_utc=prepared.baseline_time_utc,
+        seed_reference_observation_id="confirmed_reference",
+    )
+
+
+def _s4_cancellation_observed(
+    result: EvidenceNarrowingResult | None,
+    cancellation: Callable[[], bool] | None,
+) -> bool:
+    if result is not None and result.completion is EvidenceNarrowingCompletion.CANCELLED:
+        return True
+    return cancellation is not None and cancellation()
+
+
+def _s4_segment_for_midpoint(plan: MultiSegmentCoarsePlan, midpoint: datetime) -> str | None:
+    candidates = tuple(
+        item
+        for item in plan.segments
+        if item.start_utc <= midpoint < item.end_utc
+        or midpoint == plan.search_end_utc == item.end_utc
+    )
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: (item.start_utc, item.end_utc, item.segment_id)).segment_id
 
 
 def _observation_record(item: SuccessorObservation) -> dict[str, object]:

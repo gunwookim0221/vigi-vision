@@ -8,7 +8,7 @@ delegated to the existing process-isolated B4 EfficientSAM boundary.
 
 # The classifier boundary intentionally keeps the complete input explicit;
 # suppress only style rules that would obscure those contract fields.
-# ruff: noqa: D102, D105, D107, EM101, PLR0913, RUF021
+# ruff: noqa: C901, D102, D105, D107, EM101, PLR0913, RUF021, SLF001
 # pyright: reportPrivateUsage=false, reportUnnecessaryIsInstance=false, reportUnreachable=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportAttributeAccessIssue=false, reportAny=false
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from time import perf_counter
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 from vigi_vision.investigation_confirmation_models import (
     ConfirmationRoi,
@@ -82,6 +82,7 @@ _TIMING_PRECISION_CODES = frozenset(
 )
 _AUTHORITY_VERSION = "phase7e-successor-authority-v1"
 _CLASSIFICATION_VERSION = "phase7e-successor-coarse-classification-v1"
+_SEARCH_EVIDENCE_RESULT_INDEX = 3
 _SAFE_REASON_CODES = frozenset(
     {
         "invalid_mask",
@@ -488,8 +489,11 @@ class SuccessorObservation:
     fallback_reason: str | None = None
     observability: str = "USABLE"
     candidate_trace: tuple[CandidateTraceEntry, ...] = ()
+    # S4 consumes this only in-process.  It is intentionally private and is
+    # omitted from every durable/public observation projection.
+    _search_evidence: SearchEvidence | None = field(default=None, repr=False, compare=False)
 
-    def __post_init__(self) -> None:  # noqa: C901
+    def __post_init__(self) -> None:
         if (
             not self.plan_id
             or not self.target_id
@@ -548,6 +552,8 @@ class SuccessorObservation:
             or self.observability not in _OBSERVABILITY_STATES
             or not isinstance(self.candidate_trace, tuple)
             or len(self.candidate_trace) > _MAX_CANDIDATE_TRACE
+            or self._search_evidence is not None
+            and not isinstance(self._search_evidence, SearchEvidence)
         ):
             raise SuccessorClassificationContractError
         for trace in self.candidate_trace:
@@ -925,6 +931,14 @@ class SuccessorCoarseClassificationService:
             if not isinstance(classified, SuccessorClassifierResult):
                 raise SuccessorClassificationContractError
             comparison = _safe_comparison(classified.comparison)
+            search_evidence: SearchEvidence | None = None
+            if (
+                len(evaluation) > _SEARCH_EVIDENCE_RESULT_INDEX
+                and isinstance(evaluation[_SEARCH_EVIDENCE_RESULT_INDEX], SearchEvidence)
+            ):
+                search_evidence = cast(
+                    "SearchEvidence", evaluation[_SEARCH_EVIDENCE_RESULT_INDEX]
+                )
             if _is_occluded_result(classified):
                 saw_occluded = True
                 last_comparison = comparison
@@ -971,6 +985,7 @@ class SuccessorCoarseClassificationService:
                 else None,
                 observability="USABLE",
                 candidate_trace=tuple(trace),
+                _search_evidence=search_evidence,
             )
         fallback_reason = _FALLBACK_REASON if saw_occluded else "DECODE_UNAVAILABLE"
         return _observation(
@@ -1046,7 +1061,7 @@ class SuccessorCoarseClassificationService:
                 "completed",
                 fast_elapsed,
             )
-            self._record_search_evidence(
+            evidence = self._record_search_evidence(
                 classified,
                 fast_present_hit=True,
                 correlation_id=correlation_id,
@@ -1055,6 +1070,7 @@ class SuccessorCoarseClassificationService:
                 "classified",
                 classified,
                 fast_elapsed,
+                evidence,
             )
         self.metrics.delegated_cases += 1
         _emit_fast_path_event("delegated", fast_elapsed, self.metrics, correlation_id)
@@ -1076,12 +1092,12 @@ class SuccessorCoarseClassificationService:
             )
         if not isinstance(classified, SuccessorClassifierResult):
             raise SuccessorClassificationContractError
-        self._record_search_evidence(
+        evidence = self._record_search_evidence(
             classified,
             fast_present_hit=False,
             correlation_id=correlation_id,
         )
-        return ("classified", classified, classified.elapsed_ms)
+        return ("classified", classified, classified.elapsed_ms, evidence)
 
     def _record_search_evidence(
         self,
@@ -1089,7 +1105,7 @@ class SuccessorCoarseClassificationService:
         *,
         fast_present_hit: bool,
         correlation_id: str,
-    ) -> None:
+    ) -> SearchEvidence | None:
         """Evaluate S3 evidence without allowing it to affect classification."""
         self.metrics.search_evidence_evaluations += 1
         match classified.outcome:
@@ -1108,7 +1124,7 @@ class SuccessorCoarseClassificationService:
                 correlation_id,
                 classified.outcome,
             )
-            return
+            return None
         started = perf_counter()
         try:
             evidence = evaluate_search_evidence(
@@ -1124,7 +1140,7 @@ class SuccessorCoarseClassificationService:
                 correlation_id,
                 classified.outcome,
             )
-            return
+            return None
         self.metrics.search_evidence_elapsed_ms_total += max(
             0, round((perf_counter() - started) * 1000)
         )
@@ -1136,7 +1152,7 @@ class SuccessorCoarseClassificationService:
                 correlation_id,
                 classified.outcome,
             )
-            return
+            return None
         _increment_search_evidence_metrics(self.metrics, evidence, classified.outcome)
         _emit_search_evidence_event(
             evidence,
@@ -1144,6 +1160,7 @@ class SuccessorCoarseClassificationService:
             correlation_id,
             classified.outcome,
         )
+        return evidence
 
 
 def _ordered_candidates(
@@ -1240,6 +1257,7 @@ def _observation(
     fallback_reason: str | None = None,
     observability: str = "USABLE",
     candidate_trace: tuple[CandidateTraceEntry, ...] = (),
+    _search_evidence: SearchEvidence | None = None,
 ) -> SuccessorObservation:
     if frame_candidate is not None:
         frame_utc = frame_candidate.frame_utc
@@ -1338,6 +1356,7 @@ def _observation(
         fallback_reason,
         observability,
         candidate_trace,
+        _search_evidence,
     )
 
 
@@ -1381,6 +1400,7 @@ def _with_ordinal(item: SuccessorObservation, ordinal: int) -> SuccessorObservat
         item.fallback_reason,
         item.observability,
         item.candidate_trace,
+        item._search_evidence,
     )
 
 
@@ -1458,6 +1478,7 @@ def reidentify_observation(
         item.fallback_reason,
         item.observability,
         item.candidate_trace,
+        item._search_evidence,
     )
 
 

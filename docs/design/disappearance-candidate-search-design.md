@@ -2,9 +2,11 @@
 
 ## Status and authority
 
-**Status: the architecture was approved at Initial Review. Phase S3 now has a
-local shadow-only implementation and preserved-data measurement; candidate
-formation, narrowing, persistence, and public behavior remain unimplemented.**
+**Status: the architecture was approved at Initial Review. Phase S3 has a
+local shadow-only implementation and preserved-data measurement. Phase S4's
+internal, unpublished candidate-formation/narrowing implementation and its
+cancellation lifecycle correction are approved. Persistence and public
+behavior remain unimplemented.**
 
 The implemented Phase 7 and Schema 8 recording-search contracts remain
 authoritative in
@@ -23,12 +25,17 @@ completed records.
 
 The local S3 implementation adds only a pure internal evidence evaluator,
 process-local counters, and best-effort diagnostics at the existing successor
-classification boundary. It does not add observation fields, persisted
-records, terminal behavior, API/UI output, or a candidate interval. The
+classification boundary. S4 carries the resulting band as a private,
+process-local observation hint and derives bounded candidates at the execution
+boundary; neither is serialized. It does not add persisted records, terminal
+behavior, API/UI output, or a public candidate interval. The
 preserved-data report is produced by
 `tools/measure_search_evidence_s3.py`; its labels are historical/preserved
 classifier results and it makes no disappearance-recall claim. Independent
-manual event-window labels remain mandatory for S6.
+manual event-window labels remain mandatory for S6. The S4 preserved-data
+sanity report is produced by `tools/measure_candidate_search_s4.py`; it groups
+available preserved rows for deterministic interval checks only and likewise
+makes no disappearance-recall or accuracy claim.
 
 The product remains a human-review aid. It does not determine theft or
 ownership, identify a person, or continuously track a person.
@@ -434,17 +441,33 @@ S3 is implemented locally as shadow-only behavior:
   separately from classifier state.
 
 S3 does not choose candidate persistence counts, form intervals, move bounds,
-or claim recall. Exact thresholds, persistence count, bounded candidate count,
-and independent event-window labels remain S4/S6 work.
+or claim recall. S4 currently uses a provisional repeated-material persistence
+rule and an internal maximum of eight ordered candidates; both remain review
+inputs rather than durable/public contracts. Independent event-window labels
+remain S6 work.
 
 ### S4 — candidate interval formation and evidence narrowing
 
-- implement the pure chronological candidate state machine;
-- reuse current midpoint/acquisition safeguards with evidence-based bounds;
-- tolerate `INDETERMINATE` classifications when search evidence is usable;
-- preserve wide intervals on insufficient/nonmonotonic evidence;
-- support bounded ordered candidates and deterministic overlap merging; and
-- validate interval containment before production cutover.
+- implemented locally as a pure chronological candidate state machine over
+  only the four approved S3 bands;
+- opens a provisional interval at the first material drop after a strong
+  anchor, qualifies it only after repeated material evidence, and preserves it
+  after strong recovery;
+- reuses actual frame ordering, bounded midpoint iteration, cancellation,
+  coverage checks, no-progress protection, and acquisition error semantics in
+  the internal evidence-narrowing adapter;
+- tolerates `INDETERMINATE` classifier states only when independent S3
+  evidence is directional, while ambiguous/insufficient evidence leaves the
+  enclosing interval unchanged;
+- records recording gaps and nonmonotonic evidence as safe, unpublished
+  uncertainty rather than fabricating precision;
+- keeps deterministic chronological candidates, suppresses duplicate drops,
+  and retains an explicit overflow count/identity list when the bounded
+  internal candidate limit is exceeded; and
+- deliberately leaves candidate-only intervals out of the Schema 8 terminal
+  and evidence projections. The implementation and cancellation correction
+  passed Initial and Follow-up Review; any production/persistence cutover
+  remains a later reviewed phase.
 
 ### S5 — precise verification and slow-path rationalization
 
@@ -512,10 +535,10 @@ No existing preserved corpus supplies complete human event-window ground
 truth. It can test determinism and regressions, but it cannot establish current
 candidate recall.
 
-## 16. Open design questions for Initial Review
+## 16. Open design questions for later phases
 
-The architecture is concrete enough to implement S3 in shadow mode. Initial
-Review should explicitly decide or constrain:
+The approved architecture now exercises S3 in shadow mode and S4 in an
+unpublished internal path. Later phase reviews must decide or constrain:
 
 1. whether the proposed conjunction for material reference drop is the right
    starting policy family before S3 selects numeric deltas;
@@ -532,9 +555,10 @@ or UI changes in S3.
 
 ## 17. Review recommendation
 
-An **Initial Review is recommended before S3 implementation**. This design
-materially changes search orchestration from state-bracket-first to
-candidate-evidence-first, introduces a new internal policy boundary, and may
-eventually require versioned durable evidence for candidate-only intervals.
-The current runtime remains unchanged until that review and later phase-specific
-implementation reviews approve each boundary.
+The S3 Initial Review was approved before its implementation and push. S4's
+Initial Review approved its candidate/narrowing semantics after one required
+cancellation correction; Follow-up Review approved that lifecycle correction
+and the complete unpublished S4 implementation. No further S4 review is
+required unless a new material regression appears. The current public/terminal
+contracts remain unchanged, and S5 or any durable/public candidate boundary
+requires its own phase-specific review.

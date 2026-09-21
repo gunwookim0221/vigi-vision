@@ -9,7 +9,8 @@ shadow work now computes separate reference-relative search evidence and
 bounded process-local diagnostics; it adds no schema, public evidence, API,
 UI, migration, or publication change. Every non-fast-hit case still delegates to
 the existing Schema 8/v3 classifier unchanged, and there is no fast ABSENT
-path. Future S4-S7 work now follows the separate
+path. S4's internal candidate formation/narrowing is now approved; future
+S5-S7 work follows the separate
 [disappearance-candidate-first search design](disappearance-candidate-search-design.md).**
 
 This document records the implementation design for simplifying new successor

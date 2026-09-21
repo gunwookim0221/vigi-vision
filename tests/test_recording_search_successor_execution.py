@@ -19,6 +19,7 @@ from anyio import CapacityLimiter
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import vigi_vision.recording_search_successor_execution as execution_module
 from vigi_vision.investigation_confirmation_api import install_investigation_confirmation_routes
 from vigi_vision.investigation_confirmation_models import (
     ConfirmationManifest,
@@ -41,6 +42,11 @@ from vigi_vision.recording_search_api import install_recording_search_routes
 from vigi_vision.recording_search_b3_media import DecodedMedia
 from vigi_vision.recording_search_successor import SuccessorPlanService
 from vigi_vision.recording_search_successor_acquisition import SuccessorTargetAcquisitionService
+from vigi_vision.recording_search_successor_candidate_search import (
+    EvidenceNarrowingResult,
+    SuccessorCandidateFormationResult,
+    SuccessorCandidateInterval,
+)
 from vigi_vision.recording_search_successor_classification import (
     SuccessorClassifierResult,
     SuccessorCoarseClassificationService,
@@ -454,6 +460,76 @@ def test_successor_complete_present_publishes_not_found(tmp_path: Path) -> None:
     result = service.execute(prepared)
     assert result.status == "NOT_FOUND"
     assert result.reason_code == "complete_present_coverage"
+
+
+def test_s4_narrowing_cancellation_publishes_interrupted_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = _service(tmp_path, ANCHOR + timedelta(hours=2))
+    confirmed = _confirmed(tmp_path)
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-s4cancel000000000000000000000000",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    candidate = SuccessorCandidateInterval(
+        "successor-candidate-v1-" + "a" * 64,
+        "anchor",
+        "drop",
+        ANCHOR,
+        ANCHOR + timedelta(seconds=60),
+        qualified=True,
+        provisional=False,
+    )
+    candidate_search = SuccessorCandidateFormationResult((candidate,))
+    cancellation_armed = False
+
+    def fake_candidate_search(
+        *_args: object, **_kwargs: object
+    ) -> SuccessorCandidateFormationResult:
+        return candidate_search
+
+    def cancellation() -> bool:
+        return cancellation_armed
+
+    original_narrow_candidate_interval = execution_module.narrow_candidate_interval
+
+    def narrow_with_cancellation(
+        candidate: object, midpoint_sampler: object, **kwargs: object
+    ) -> EvidenceNarrowingResult:
+        def arm_before_midpoint(midpoint: datetime) -> object:
+            nonlocal cancellation_armed
+            cancellation_armed = True
+            return midpoint_sampler(midpoint)  # type: ignore[operator]
+
+        return original_narrow_candidate_interval(
+            candidate,  # type: ignore[arg-type]
+            arm_before_midpoint,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(execution_module, "_candidate_search", fake_candidate_search)
+    monkeypatch.setattr(
+        execution_module, "narrow_candidate_interval", narrow_with_cancellation
+    )
+    published: list[SuccessorTerminal] = []
+    original_publish_terminal = service.publisher.publish_terminal
+
+    def publish_terminal(terminal: SuccessorTerminal) -> SuccessorTerminal:
+        published.append(terminal)
+        return original_publish_terminal(terminal)
+
+    monkeypatch.setattr(service.publisher, "publish_terminal", publish_terminal)
+
+    result = service.execute(prepared, cancellation=cancellation)
+
+    assert result.status == "INTERRUPTED"
+    assert result.reason_code == "cancelled"
+    assert result.status != "INCONCLUSIVE"
+    assert result.status != "FOUND"
+    assert result.reason_code != "incomplete_coverage"
+    assert len(published) == 1
 
 
 def test_historical_baseline_and_actual_anchor_are_durable_and_narrowable(tmp_path: Path) -> None:
