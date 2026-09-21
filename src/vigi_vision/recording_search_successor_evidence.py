@@ -225,10 +225,12 @@ class SuccessorEvidenceRepository:
 
     root: Path
     _lock: RLock
+    _staged_payloads: dict[tuple[str, str], dict[str, object]]
 
     def __init__(self, root: Path) -> None:
         self.root = root
         self._lock = RLock()
+        self._staged_payloads = {}
 
     def _directory(self, investigation_id: str, run_id: str) -> Path:
         if (
@@ -241,6 +243,9 @@ class SuccessorEvidenceRepository:
     def _manifest(self, investigation_id: str, run_id: str) -> Path:
         return self._directory(investigation_id, run_id) / "manifest.json"
 
+    def _staged_manifest(self, investigation_id: str, run_id: str) -> Path:
+        return self._directory(investigation_id, run_id) / "manifest.json.pending"
+
     def publish(
         self,
         prepared: SuccessorPreparedExecution,
@@ -248,15 +253,103 @@ class SuccessorEvidenceRepository:
         terminal: SuccessorTerminal,
     ) -> dict[str, object]:
         """Publish bounded JPEGs and a manifest, without overwriting a run."""
+        return self._publish_at_path(
+            prepared,
+            observations,
+            terminal,
+            self._manifest(prepared.request.investigation_id, prepared.request.run_id),
+        )
+
+    def stage(
+        self,
+        prepared: SuccessorPreparedExecution,
+        observations: tuple[SuccessorObservation, ...],
+        terminal: SuccessorTerminal,
+    ) -> dict[str, object]:
+        """Materialize evidence without making its normal result authoritative."""
+        investigation_id = prepared.request.investigation_id
+        run_id = prepared.request.run_id
+        key = (investigation_id, run_id)
+        staged_path = self._staged_manifest(
+            investigation_id,
+            run_id,
+        )
+        with self._lock:
+            try:
+                # Clean up the pre-finalization marker used by older runs.  A
+                # new execution must never reuse stale staging state.
+                staged_path.unlink(missing_ok=True)
+            except OSError as error:
+                raise SuccessorEvidenceError("evidence_cleanup_failed") from error
+            self._staged_payloads.pop(key, None)
+            payload = self._publish_at_path(
+                prepared,
+                observations,
+                terminal,
+                staged_path,
+                authoritative=False,
+            )
+            self._staged_payloads[key] = payload
+            return payload
+
+    def commit_staged(
+        self,
+        prepared: SuccessorPreparedExecution,
+    ) -> dict[str, object]:
+        """Make staged evidence authoritative with one atomic manifest write."""
+        investigation_id = prepared.request.investigation_id
+        run_id = prepared.request.run_id
+        manifest_path = self._manifest(investigation_id, run_id)
+        with self._lock:
+            if manifest_path.is_file():
+                self._staged_payloads.pop((investigation_id, run_id), None)
+                existing = self.read(investigation_id, run_id)
+                if existing is None:
+                    raise SuccessorEvidenceError("evidence_corrupt")
+                return existing
+            payload = self._staged_payloads.pop((investigation_id, run_id), None)
+            if payload is None:
+                raise SuccessorEvidenceError("evidence_unavailable")
+            try:
+                _atomic_json(manifest_path, payload)
+            except OSError as error:
+                raise SuccessorEvidenceError("evidence_publish_failed") from error
+            loaded = self.read(investigation_id, run_id)
+            if loaded is None:
+                raise SuccessorEvidenceError("evidence_readback_failed")
+            return loaded
+
+    def discard_staged(self, prepared: SuccessorPreparedExecution) -> None:
+        """Remove staged metadata; materialized frame artifacts may remain."""
+        staged_path = self._staged_manifest(
+            prepared.request.investigation_id, prepared.request.run_id
+        )
+        with self._lock:
+            self._staged_payloads.pop(
+                (prepared.request.investigation_id, prepared.request.run_id), None
+            )
+            try:
+                staged_path.unlink(missing_ok=True)
+            except OSError as error:
+                raise SuccessorEvidenceError("evidence_cleanup_failed") from error
+
+    def _publish_at_path(
+        self,
+        prepared: SuccessorPreparedExecution,
+        observations: tuple[SuccessorObservation, ...],
+        terminal: SuccessorTerminal,
+        manifest_path: Path,
+        *,
+        authoritative: bool = True,
+    ) -> dict[str, object]:
         if not observations or len(observations) > MAX_EVIDENCE_RECORDS:
             raise SuccessorEvidenceError("evidence_capacity_exceeded")
         investigation_id = prepared.request.investigation_id
         run_id = prepared.request.run_id
         directory = self._directory(investigation_id, run_id)
-        manifest_path = self._manifest(investigation_id, run_id)
         with self._lock:
-            if manifest_path.is_file():
-                existing = self.read(investigation_id, run_id)
+            if authoritative and manifest_path.is_file():
+                existing = self._read_manifest_path(manifest_path, investigation_id, run_id)
                 if existing is None:
                     raise SuccessorEvidenceError("evidence_corrupt")
                 return existing
@@ -350,8 +443,10 @@ class SuccessorEvidenceRepository:
                 "review_clip": {"status": "UNAVAILABLE", "reason": "phase8_not_requested"},
                 "entries": entries,
             }
+            if not authoritative:
+                return payload
             _atomic_json(manifest_path, payload)
-            loaded = self.read(investigation_id, run_id)
+            loaded = self._read_manifest_path(manifest_path, investigation_id, run_id)
             if loaded is None:
                 raise SuccessorEvidenceError("evidence_readback_failed")
             return loaded
@@ -359,14 +454,22 @@ class SuccessorEvidenceRepository:
     def read(self, investigation_id: str, run_id: str) -> dict[str, object] | None:
         path = self._manifest(investigation_id, run_id)
         with self._lock:
-            if not path.is_file():
-                return None
-            try:
-                value: object = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as error:
-                raise SuccessorEvidenceError("evidence_corrupt") from error
-            _validate_manifest(value, investigation_id, run_id)
-            return cast("dict[str, object]", value)
+            return self._read_manifest_path(path, investigation_id, run_id)
+
+    @staticmethod
+    def _read_manifest_path(
+        path: Path,
+        investigation_id: str,
+        run_id: str,
+    ) -> dict[str, object] | None:
+        if not path.is_file():
+            return None
+        try:
+            value: object = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise SuccessorEvidenceError("evidence_corrupt") from error
+        _validate_manifest(value, investigation_id, run_id)
+        return cast("dict[str, object]", value)
 
     def read_frame(self, investigation_id: str, run_id: str, digest: str) -> bytes | None:
         if len(digest) != 64 or any(char not in _SHA256 for char in digest):

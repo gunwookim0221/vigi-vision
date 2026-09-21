@@ -236,6 +236,15 @@ class _Classifier:
 class _PublishThenFailEvidence(SuccessorEvidenceRepository):
     """Persist evidence, then fail the terminal publication boundary."""
 
+    def stage(
+        self,
+        prepared: SuccessorPreparedExecution,
+        observations: tuple[SuccessorObservation, ...],
+        terminal: SuccessorTerminal,
+    ) -> dict[str, object]:
+        super().stage(prepared, observations, terminal)
+        raise SuccessorEvidenceError
+
     def publish(
         self,
         prepared: SuccessorPreparedExecution,
@@ -286,6 +295,33 @@ class _AnchorIndeterminateThenPresentClassifier(_Classifier):
         return SuccessorClassifierResult(ClassificationOutcome.PRESENT)
 
 
+class _CancelAfterB4ResultClassifier(_Classifier):
+    """Return a late coarse result while requesting cancellation before return."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.cancel_requested = False
+        self.cancellation_callbacks: list[object] = []
+
+    def classify_with_cancellation(  # noqa: PLR0913
+        self,
+        baseline: object,
+        probe: DecodedRgbImage,
+        width: int,
+        height: int,
+        roi: object,
+        correlation_id: str,
+        *,
+        cancellation: object,
+    ) -> SuccessorClassifierResult:
+        self.calls += 1
+        self.cancellation_callbacks.append(cancellation)
+        result = self.classify(baseline, probe, width, height, roi, correlation_id)
+        if self.calls == 2:
+            self.cancel_requested = True
+        return result
+
+
 def _confirmed(tmp_path: Path) -> ConfirmedInvestigationInput:
     path = tmp_path / "baseline.jpg"
     path.write_bytes(b"baseline")
@@ -320,7 +356,11 @@ def _confirmed(tmp_path: Path) -> ConfirmedInvestigationInput:
     )
 
 
-def _service(tmp_path: Path, absent_after: datetime) -> SuccessorExecutionService:
+def _service(
+    tmp_path: Path,
+    absent_after: datetime,
+    classifier: object | None = None,
+) -> SuccessorExecutionService:
     segment = _segment(ANCHOR + timedelta(minutes=30, seconds=1))
     planner = _Planner(segment)
     acquisition = SuccessorTargetAcquisitionService(
@@ -329,7 +369,10 @@ def _service(tmp_path: Path, absent_after: datetime) -> SuccessorExecutionServic
         _FrameDecoder(),
         temporary_directory=tmp_path / "temporary",
     )
-    classification = SuccessorCoarseClassificationService(_Classifier(), _MediaDecoder())
+    classification = SuccessorCoarseClassificationService(
+        _Classifier() if classifier is None else classifier,
+        _MediaDecoder(),
+    )
     return SuccessorExecutionService(
         SuccessorPlanService(planner),
         acquisition,
@@ -511,9 +554,7 @@ def test_s4_narrowing_cancellation_publishes_interrupted_once(
         )
 
     monkeypatch.setattr(execution_module, "_candidate_search", fake_candidate_search)
-    monkeypatch.setattr(
-        execution_module, "narrow_candidate_interval", narrow_with_cancellation
-    )
+    monkeypatch.setattr(execution_module, "narrow_candidate_interval", narrow_with_cancellation)
     published: list[SuccessorTerminal] = []
     original_publish_terminal = service.publisher.publish_terminal
 
@@ -567,7 +608,9 @@ def test_s5_verification_cancellation_publishes_interrupted_once(
     ) -> object:
         return replace(
             original_with_anchor(
-                prepared_execution, coarse, anchor_observation  # type: ignore[arg-type]
+                prepared_execution,
+                coarse,
+                anchor_observation,  # type: ignore[arg-type]
             ),
             candidate_bracket=None,
         )
@@ -621,6 +664,421 @@ def test_s5_verification_cancellation_publishes_interrupted_once(
     assert result.status == "INTERRUPTED"
     assert result.reason_code == "cancelled"
     assert len(published) == 1
+
+
+def test_cancellation_wins_over_late_b4_bracket_result_and_publishes_once(
+    tmp_path: Path,
+) -> None:
+    classifier = _CancelAfterB4ResultClassifier()
+    service = _service(tmp_path, ANCHOR + timedelta(minutes=1), classifier)
+    confirmed = _confirmed(tmp_path)
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-b4latecancel00000000000000000000",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    published: list[SuccessorTerminal] = []
+    original_publish_terminal = service.publisher.publish_terminal
+
+    def publish_terminal(terminal: SuccessorTerminal) -> SuccessorTerminal:
+        published.append(terminal)
+        return original_publish_terminal(terminal)
+
+    service.publisher.publish_terminal = publish_terminal  # type: ignore[method-assign]
+
+    result = service.execute(prepared, cancellation=lambda: classifier.cancel_requested)
+
+    assert result.status == "INTERRUPTED"
+    assert result.reason_code == "cancelled"
+    assert result.status != "FOUND"
+    assert result.status != "INCONCLUSIVE"
+    assert classifier.calls == 2
+    assert len(classifier.cancellation_callbacks) == classifier.calls
+    assert len(published) == 1
+    record = service.publisher.read(confirmed.investigation_id, prepared.request.run_id)
+    assert record is not None
+    assert record["status"] == "INTERRUPTED"
+
+
+def test_cancellation_before_b4_starts_publishes_interrupted_without_classification(
+    tmp_path: Path,
+) -> None:
+    classifier = _CancelAfterB4ResultClassifier()
+    service = _service(tmp_path, ANCHOR + timedelta(minutes=1), classifier)
+    confirmed = _confirmed(tmp_path)
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-b4precancel0000000000000000000",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+
+    result = service.execute(prepared, cancellation=lambda: True)
+
+    assert result.status == "INTERRUPTED"
+    assert result.reason_code == "cancelled"
+    assert classifier.calls == 0
+
+
+def test_cancellation_during_candidate_formation_blocks_not_found_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path, ANCHOR + timedelta(hours=2))
+    confirmed = _confirmed(tmp_path)
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-candidatecancel0000000000000000",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    cancellation_requested = False
+
+    def candidate_search_with_cancellation(
+        *_args: object,
+        **_kwargs: object,
+    ) -> SuccessorCandidateFormationResult:
+        nonlocal cancellation_requested
+        cancellation_requested = True
+        return SuccessorCandidateFormationResult(())
+
+    monkeypatch.setattr(
+        execution_module,
+        "_candidate_search",
+        candidate_search_with_cancellation,
+    )
+    published: list[SuccessorTerminal] = []
+    original_publish_terminal = service.publisher.publish_terminal
+
+    def publish_terminal(terminal: SuccessorTerminal) -> SuccessorTerminal:
+        published.append(terminal)
+        return original_publish_terminal(terminal)
+
+    monkeypatch.setattr(service.publisher, "publish_terminal", publish_terminal)
+
+    result = service.execute(prepared, cancellation=lambda: cancellation_requested)
+
+    assert cancellation_requested
+    assert result.status == "INTERRUPTED"
+    assert result.reason_code == "cancelled"
+    assert len(published) == 1
+    assert published[0].status == "INTERRUPTED"
+
+
+def test_cancellation_after_inconclusive_terminal_construction_wins_before_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path, ANCHOR + timedelta(hours=2), _IndeterminateClassifier())
+    confirmed = _confirmed(tmp_path)
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-inconclusivecancel000000000000",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    cancellation_requested = False
+    original_publish_terminal = SuccessorExecutionService._publish_terminal
+
+    def arm_before_publish(
+        execution_service: SuccessorExecutionService,
+        prepared_execution: SuccessorPreparedExecution,
+        terminal: SuccessorTerminal,
+        observations: tuple[SuccessorObservation, ...],
+        *,
+        cancellation: object = None,
+    ) -> SuccessorTerminal:
+        nonlocal cancellation_requested
+        cancellation_requested = True
+        return original_publish_terminal(
+            execution_service,
+            prepared_execution,
+            terminal,
+            observations,
+            cancellation=cancellation,  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(SuccessorExecutionService, "_publish_terminal", arm_before_publish)
+    published: list[SuccessorTerminal] = []
+    original_publisher = service.publisher.publish_terminal
+
+    def publish_terminal(terminal: SuccessorTerminal) -> SuccessorTerminal:
+        published.append(terminal)
+        return original_publisher(terminal)
+
+    monkeypatch.setattr(service.publisher, "publish_terminal", publish_terminal)
+
+    result = service.execute(prepared, cancellation=lambda: cancellation_requested)
+
+    assert result.status == "INTERRUPTED"
+    assert result.reason_code == "cancelled"
+    assert result.status != "INCONCLUSIVE"
+    assert len(published) == 1
+
+
+def test_cancellation_after_committed_normal_terminal_does_not_publish_second_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path, ANCHOR + timedelta(minutes=15))
+    confirmed = _confirmed(tmp_path)
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-postcommitcancel000000000000",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    first = service.execute(prepared)
+    assert first.status == "FOUND"
+    published: list[SuccessorTerminal] = []
+    original_publish_terminal = service.publisher.publish_terminal
+
+    def publish_terminal(terminal: SuccessorTerminal) -> SuccessorTerminal:
+        published.append(terminal)
+        return original_publish_terminal(terminal)
+
+    monkeypatch.setattr(service.publisher, "publish_terminal", publish_terminal)
+
+    second = service.execute(prepared, cancellation=lambda: True)
+
+    assert second.status == "FOUND"
+    assert second.terminal_result_id == first.terminal_result_id
+    assert published == []
+
+
+@pytest.mark.parametrize(
+    ("absent_after", "classifier", "expected_status"),
+    [
+        (ANCHOR + timedelta(hours=2), None, "NOT_FOUND"),
+        (ANCHOR + timedelta(minutes=15), None, "FOUND"),
+        (ANCHOR + timedelta(hours=2), _IndeterminateClassifier(), "INCONCLUSIVE"),
+    ],
+)
+def test_cancellation_during_evidence_staging_hides_normal_manifest(
+    tmp_path: Path,
+    absent_after: datetime,
+    classifier: object | None,
+    expected_status: str,
+) -> None:
+    service = _service(tmp_path, absent_after, classifier)
+    evidence_repository = SuccessorEvidenceRepository(tmp_path / "successor")
+    service.evidence_repository = evidence_repository
+    confirmed = replace(
+        _confirmed(tmp_path),
+        jpeg_sha256=hashlib.sha256(b"baseline").hexdigest(),
+    )
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-" + ("e" if expected_status == "FOUND" else "f") * 32,
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    cancellation_requested = False
+    original_stage = evidence_repository.stage
+
+    def stage_then_cancel(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal cancellation_requested
+        result = original_stage(*args, **kwargs)
+        cancellation_requested = True
+        return result
+
+    evidence_repository.stage = stage_then_cancel  # type: ignore[method-assign]
+
+    result = service.execute(prepared, cancellation=lambda: cancellation_requested)
+
+    assert expected_status in {"FOUND", "NOT_FOUND", "INCONCLUSIVE"}
+    assert result.status == "INTERRUPTED"
+    assert result.reason_code == "cancelled"
+    reopened = service.publisher.read(confirmed.investigation_id, prepared.request.run_id)
+    assert reopened is not None
+    assert reopened["status"] == "INTERRUPTED"
+    assert evidence_repository.read(confirmed.investigation_id, prepared.request.run_id) is None
+    pending = (
+        tmp_path
+        / "successor"
+        / confirmed.investigation_id
+        / prepared.request.run_id
+        / "evidence"
+        / "manifest.json.pending"
+    )
+    assert not pending.exists()
+
+
+@pytest.mark.parametrize(
+    ("absent_after", "classifier", "expected_status"),
+    [
+        (ANCHOR + timedelta(hours=2), None, "NOT_FOUND"),
+        (ANCHOR + timedelta(minutes=15), None, "FOUND"),
+        (ANCHOR + timedelta(hours=2), _IndeterminateClassifier(), "INCONCLUSIVE"),
+    ],
+)
+def test_non_cancelled_terminal_and_evidence_remain_consistent(
+    tmp_path: Path,
+    absent_after: datetime,
+    classifier: object | None,
+    expected_status: str,
+) -> None:
+    service = _service(tmp_path, absent_after, classifier)
+    evidence_repository = SuccessorEvidenceRepository(tmp_path / "successor")
+    service.evidence_repository = evidence_repository
+    confirmed = replace(
+        _confirmed(tmp_path),
+        jpeg_sha256=hashlib.sha256(b"baseline").hexdigest(),
+    )
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-" + ("1" if expected_status != "FOUND" else "2") * 32,
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+
+    result = service.execute(prepared)
+    evidence = evidence_repository.read(confirmed.investigation_id, prepared.request.run_id)
+
+    assert result.status == expected_status
+    assert evidence is not None
+    assert evidence["terminal_status"] == result.status
+    assert evidence["terminal_reason"] == result.reason_code
+    public_reader = Phase7EPublicService(
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        successor_execution=service,
+    )
+    assert public_reader.evidence(confirmed.investigation_id, prepared.request.run_id) == evidence
+
+
+def test_cancellation_after_authoritative_evidence_commit_preserves_normal_result(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path, ANCHOR + timedelta(hours=2))
+    evidence_repository = SuccessorEvidenceRepository(tmp_path / "successor")
+    service.evidence_repository = evidence_repository
+    confirmed = replace(
+        _confirmed(tmp_path),
+        jpeg_sha256=hashlib.sha256(b"baseline").hexdigest(),
+    )
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-" + "3" * 32,
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    cancellation_requested = False
+    original_commit = evidence_repository.commit_staged
+
+    def commit_then_cancel(prepared_execution: SuccessorPreparedExecution) -> dict[str, object]:
+        nonlocal cancellation_requested
+        result = original_commit(prepared_execution)
+        cancellation_requested = True
+        return result
+
+    evidence_repository.commit_staged = commit_then_cancel  # type: ignore[method-assign]
+
+    result = service.execute(prepared, cancellation=lambda: cancellation_requested)
+
+    assert result.status == "NOT_FOUND"
+    reopened = service.publisher.read(confirmed.investigation_id, prepared.request.run_id)
+    evidence = evidence_repository.read(confirmed.investigation_id, prepared.request.run_id)
+    assert reopened is not None
+    assert reopened["status"] == "NOT_FOUND"
+    assert evidence is not None
+    assert evidence["terminal_status"] == "NOT_FOUND"
+    assert evidence["terminal_reason"] == "complete_present_coverage"
+
+
+def test_recovery_suppresses_evidence_after_crash_before_terminal_commit(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path, ANCHOR + timedelta(hours=2))
+    evidence_repository = SuccessorEvidenceRepository(tmp_path / "successor")
+    service.evidence_repository = evidence_repository
+    confirmed = replace(
+        _confirmed(tmp_path),
+        jpeg_sha256=hashlib.sha256(b"baseline").hexdigest(),
+    )
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-" + "4" * 32,
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    original_commit = evidence_repository.commit_staged
+
+    def commit_then_stop(prepared_execution: SuccessorPreparedExecution) -> dict[str, object]:
+        original_commit(prepared_execution)
+        raise KeyboardInterrupt
+
+    evidence_repository.commit_staged = commit_then_stop  # type: ignore[method-assign]
+
+    with pytest.raises(KeyboardInterrupt):
+        service.execute(prepared)
+
+    before_recovery = service.publisher.read(confirmed.investigation_id, prepared.request.run_id)
+    assert before_recovery is not None
+    assert before_recovery["status"] == "RUNNING"
+    assert service.read_evidence(confirmed.investigation_id, prepared.request.run_id) is None
+
+    assert service.publisher.recover_abandoned() == 1
+
+    recovered = service.publisher.read(confirmed.investigation_id, prepared.request.run_id)
+    assert recovered is not None
+    assert recovered["status"] == "INTERRUPTED"
+    assert recovered["reason_code"] == "abandoned_after_restart"
+    assert service.read_evidence(confirmed.investigation_id, prepared.request.run_id) is None
+
+
+@pytest.mark.parametrize(
+    ("absent_after", "classifier", "expected_status"),
+    [
+        (ANCHOR + timedelta(hours=2), None, "NOT_FOUND"),
+        (ANCHOR + timedelta(minutes=15), None, "FOUND"),
+        (ANCHOR + timedelta(hours=2), _IndeterminateClassifier(), "INCONCLUSIVE"),
+    ],
+)
+def test_terminal_write_failure_suppresses_normal_evidence(
+    tmp_path: Path,
+    absent_after: datetime,
+    classifier: object | None,
+    expected_status: str,
+) -> None:
+    service = _service(tmp_path, absent_after, classifier)
+    evidence_repository = SuccessorEvidenceRepository(tmp_path / "successor")
+    service.evidence_repository = evidence_repository
+    confirmed = replace(
+        _confirmed(tmp_path),
+        jpeg_sha256=hashlib.sha256(b"baseline").hexdigest(),
+    )
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-" + ("5" if expected_status == "NOT_FOUND" else "6") * 32,
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    original_publish = service.publisher.publish_terminal
+
+    def fail_normal_terminal(terminal: SuccessorTerminal) -> SuccessorTerminal:
+        if terminal.status == expected_status:
+            raise OSError from None
+        return original_publish(terminal)
+
+    service.publisher.publish_terminal = fail_normal_terminal  # type: ignore[method-assign]
+
+    with pytest.raises(SuccessorExecutionError, match="internal_error"):
+        service.execute(prepared)
+
+    terminal = service.publisher.read(confirmed.investigation_id, prepared.request.run_id)
+    assert terminal is not None
+    assert terminal["status"] == "FAILED"
+    assert terminal["reason_code"] == "internal_error"
+    assert service.read_evidence(confirmed.investigation_id, prepared.request.run_id) is None
 
 
 def test_historical_baseline_and_actual_anchor_are_durable_and_narrowable(tmp_path: Path) -> None:

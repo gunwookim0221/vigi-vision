@@ -189,6 +189,8 @@ class SuccessorBinaryNarrowingService:
         plan: MultiSegmentCoarsePlan,
         coarse_result: SuccessorCoarseClassificationResult,
         authority: SuccessorClassificationAuthority,
+        *,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> SuccessorBinaryNarrowingResult:
         """Narrow a PRESENT→ABSENT bracket using actual midpoint frame times."""
         self._validate_input(plan, coarse_result, authority)
@@ -205,6 +207,7 @@ class SuccessorBinaryNarrowingService:
         progress_generation = 0
         completion = SuccessorNarrowingCompletion.NARROWED
         reason_code = "target_width_reached"
+        cancellation = should_cancel or self.should_cancel
 
         # The historical Phase 6 baseline may precede the successor plan's
         # acquisition horizon.  No midpoint before the anchor can be acquired
@@ -221,7 +224,7 @@ class SuccessorBinaryNarrowingService:
             _width_seconds(left, right) > self.policy.target_width_seconds
             and iterations < self.policy.maximum_iterations
         ):
-            if self.should_cancel is not None and self.should_cancel():
+            if cancellation is not None and cancellation():
                 completion = SuccessorNarrowingCompletion.CANCELLED
                 reason_code = "cancelled"
                 break
@@ -289,9 +292,18 @@ class SuccessorBinaryNarrowingService:
                 None,
             )
             acquisition = self.acquisition_service.acquire_midpoint(plan, target)
-            observation = self.classification_service.classify_target(
-                plan, target, acquisition, authority
-            )
+            if cancellation is None:
+                observation = self.classification_service.classify_target(
+                    plan, target, acquisition, authority
+                )
+            else:
+                observation = self.classification_service.classify_target(
+                    plan,
+                    target,
+                    acquisition,
+                    authority,
+                    cancellation=cancellation,
+                )
             midpoint_observations.append(observation)
             progress_generation += 1
             outcome = _completion_for_observation(observation)

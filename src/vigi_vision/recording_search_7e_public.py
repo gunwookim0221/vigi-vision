@@ -447,16 +447,15 @@ class Phase7EPublicService:
         """Return additive visual evidence for a reopened successor run."""
         if self.successor_execution is None or self.successor_execution.evidence_repository is None:
             return None
-        try:
-            return self.successor_execution.evidence_repository.read(investigation_id, run_id)
-        except SuccessorEvidenceError as error:
-            raise Phase7EPublicError("evidence_corrupt") from error
+        return self.successor_execution.read_evidence(investigation_id, run_id)
 
     def evidence_frame(self, investigation_id: str, run_id: str, digest: str) -> bytes | None:
         """Return one digest-addressed evidence JPEG."""
         if self.successor_execution is None or self.successor_execution.evidence_repository is None:
             return None
         try:
+            if self.evidence(investigation_id, run_id) is None:
+                return None
             return self.successor_execution.evidence_repository.read_frame(
                 investigation_id, run_id, digest
             )

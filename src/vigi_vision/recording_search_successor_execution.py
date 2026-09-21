@@ -30,6 +30,7 @@ from vigi_vision.investigation_confirmation_models import ConfirmedInvestigation
 from vigi_vision.object_presence_models import BinaryMask
 from vigi_vision.object_presence_values import ClassificationOutcome, DecodedRgbImage
 from vigi_vision.recording_search_7e_b4_process import (
+    B4ProcessCancelled,
     B4ProcessError,
     B4ProcessTimeout,
     EfficientSamWorkerSpec,
@@ -61,6 +62,7 @@ from vigi_vision.recording_search_successor_candidate_search import (
 )
 from vigi_vision.recording_search_successor_classification import (
     SuccessorClassificationAuthority,
+    SuccessorClassificationCancelledError,
     SuccessorClassificationContractError,
     SuccessorClassificationError,
     SuccessorClassifierResult,
@@ -93,6 +95,9 @@ if TYPE_CHECKING:
 
 SUCCESSOR_SCHEMA_VERSION = 8
 SUCCESSOR_RECORD_VERSION = "phase7e-successor-terminal-v1"
+_B4_CLASSIFIER_TIMEOUT_SECONDS = 60.0
+_B4_REFERENCE_TIMEOUT_SECONDS = 30.0
+_B4_STARTUP_TIMEOUT_SECONDS = 30.0
 _RUNNING = "RUNNING"
 _TERMINAL = frozenset({"FOUND", "NOT_FOUND", "INCONCLUSIVE", "FAILED", "INTERRUPTED"})
 _MAX_RECOVERY_RECORDS = 1024
@@ -402,8 +407,9 @@ class SuccessorB4Classifier:
 
     policy: ObjectPresenceDecisionPolicy
     worker_spec: EfficientSamWorkerSpec | StaticMaskWorkerSpec
-    timeout_seconds: float = 30.0
-    startup_timeout_seconds: float = 30.0
+    timeout_seconds: float = _B4_CLASSIFIER_TIMEOUT_SECONDS
+    startup_timeout_seconds: float = _B4_STARTUP_TIMEOUT_SECONDS
+    reference_timeout_seconds: float = _B4_REFERENCE_TIMEOUT_SECONDS
 
     @property
     def policy_identity(self) -> str:
@@ -413,7 +419,9 @@ class SuccessorB4Classifier:
     def classifier_identity(self) -> str:
         """Return the immutable policy/model identity used for mask reuse."""
         if isinstance(self.worker_spec, EfficientSamWorkerSpec):
-            return f"efficient-sam:{self.worker_spec.expected_sha256}:{self.worker_spec.device_mode}"
+            return (
+                f"efficient-sam:{self.worker_spec.expected_sha256}:{self.worker_spec.device_mode}"
+            )
         payload = json.dumps(
             self.worker_spec.payload(), sort_keys=True, separators=(",", ":")
         ).encode()
@@ -427,6 +435,8 @@ class SuccessorB4Classifier:
         source_height: int,
         roi: object,
         correlation_id: str,
+        *,
+        cancellation: Callable[[], bool] | None = None,
     ) -> SuccessorClassifierResult:
         return self._classify(
             baseline_image,
@@ -436,6 +446,29 @@ class SuccessorB4Classifier:
             roi,
             correlation_id,
             baseline_mask=None,
+            cancellation=cancellation,
+        )
+
+    def classify_with_cancellation(
+        self,
+        baseline_image: DecodedRgbImage,
+        probe_image: DecodedRgbImage,
+        source_width: int,
+        source_height: int,
+        roi: object,
+        correlation_id: str,
+        *,
+        cancellation: Callable[[], bool],
+    ) -> SuccessorClassifierResult:
+        """Run B4 through the existing process cancellation boundary."""
+        return self.classify(
+            baseline_image,
+            probe_image,
+            source_width,
+            source_height,
+            roi,
+            correlation_id,
+            cancellation=cancellation,
         )
 
     def classify_with_baseline_mask(
@@ -448,6 +481,7 @@ class SuccessorB4Classifier:
         correlation_id: str,
         *,
         baseline_mask: BinaryMask,
+        cancellation: Callable[[], bool] | None = None,
     ) -> SuccessorClassifierResult:
         """Classify while reusing one compatible immutable baseline mask."""
         return self._classify(
@@ -458,6 +492,31 @@ class SuccessorB4Classifier:
             roi,
             correlation_id,
             baseline_mask=baseline_mask,
+            cancellation=cancellation,
+        )
+
+    def classify_with_baseline_mask_and_cancellation(
+        self,
+        baseline_image: DecodedRgbImage,
+        probe_image: DecodedRgbImage,
+        source_width: int,
+        source_height: int,
+        roi: object,
+        correlation_id: str,
+        *,
+        baseline_mask: BinaryMask,
+        cancellation: Callable[[], bool],
+    ) -> SuccessorClassifierResult:
+        """Reuse baseline support while honoring process cancellation."""
+        return self.classify_with_baseline_mask(
+            baseline_image,
+            probe_image,
+            source_width,
+            source_height,
+            roi,
+            correlation_id,
+            baseline_mask=baseline_mask,
+            cancellation=cancellation,
         )
 
     def _classify(
@@ -470,6 +529,7 @@ class SuccessorB4Classifier:
         correlation_id: str,
         *,
         baseline_mask: BinaryMask | None,
+        cancellation: Callable[[], bool] | None,
     ) -> SuccessorClassifierResult:
         started = perf_counter()
         try:
@@ -484,10 +544,13 @@ class SuccessorB4Classifier:
                 correlation_id=correlation_id,
                 timeout_seconds=self.timeout_seconds,
                 startup_timeout_seconds=self.startup_timeout_seconds,
+                cancellation=cancellation,
                 baseline_mask=baseline_mask,
             )
         except B4ProcessTimeout as error:
             raise SuccessorClassificationError("classifier_timeout") from error
+        except B4ProcessCancelled as error:
+            raise SuccessorClassificationCancelledError from error
         except (B4ProcessError, ClassificationPreparationError) as error:
             raise SuccessorClassificationError("classifier_failed") from error
         outcome = getattr(result, "outcome", None)
@@ -522,7 +585,7 @@ class SuccessorB4Classifier:
                 policy=self.policy,
                 worker_spec=self.worker_spec,
                 correlation_id=correlation_id,
-                timeout_seconds=self.timeout_seconds,
+                timeout_seconds=self.reference_timeout_seconds,
                 startup_timeout_seconds=self.startup_timeout_seconds,
                 reference_only=True,
             )
@@ -603,6 +666,21 @@ class SuccessorExecutionService:
             baseline_payload,
         )
 
+    def read_evidence(self, investigation_id: str, run_id: str) -> dict[str, object] | None:
+        """Return evidence only when the committed terminal confirms its result."""
+        if self.evidence_repository is None:
+            return None
+        try:
+            evidence = self.evidence_repository.read(investigation_id, run_id)
+            terminal = self.publisher.read(investigation_id, run_id)
+        except (SuccessorEvidenceError, SuccessorExecutionError):
+            return None
+        if evidence is None or terminal is None:
+            return None
+        if not _evidence_matches_terminal(evidence, terminal):
+            return None
+        return evidence
+
     def execute(  # noqa: C901, PLR0911
         self,
         prepared: SuccessorPreparedExecution,
@@ -622,25 +700,37 @@ class SuccessorExecutionService:
             anchor_target = _anchor_target(prepared.plan)
             anchor_acquisition = self.acquisition.acquire_anchor(prepared.plan, anchor_target)
             anchor_observation = self.classification.classify_anchor_target(
-                prepared.plan, anchor_target, anchor_acquisition, prepared.authority
+                prepared.plan,
+                anchor_target,
+                anchor_acquisition,
+                prepared.authority,
+                cancellation=cancellation,
             )
+            if cancellation is not None and cancellation():
+                return self._publish_interrupted(prepared)
             coarse_observations: list[SuccessorObservation] = []
             coarse = _coarse_snapshot(prepared, coarse_observations)
             augmented = _with_anchor_observation(prepared, coarse, anchor_observation)
             if augmented.candidate_bracket is not None:
-                return self._narrow_or_publish(prepared, augmented)
+                return self._narrow_or_publish(prepared, augmented, cancellation=cancellation)
             for target in prepared.plan.targets:
                 if cancellation is not None and cancellation():
                     return self._publish_interrupted(prepared)
                 acquisition = self.acquisition.acquire(prepared.plan, target)
                 observation = self.classification.classify_coarse_target(
-                    prepared.plan, target, acquisition, prepared.authority
+                    prepared.plan,
+                    target,
+                    acquisition,
+                    prepared.authority,
+                    cancellation=cancellation,
                 )
+                if cancellation is not None and cancellation():
+                    return self._publish_interrupted(prepared)
                 coarse_observations.append(observation)
                 coarse = _coarse_snapshot(prepared, coarse_observations)
                 augmented = _with_anchor_observation(prepared, coarse, anchor_observation)
                 if augmented.candidate_bracket is not None:
-                    return self._narrow_or_publish(prepared, augmented)
+                    return self._narrow_or_publish(prepared, augmented, cancellation=cancellation)
             candidate_search = _candidate_search(prepared, augmented)
             if prepared.plan.gaps:
                 if candidate_search.candidates:
@@ -660,7 +750,12 @@ class SuccessorExecutionService:
                     )
                     if _s5_cancellation_observed(verification, cancellation):
                         return self._publish_interrupted(prepared)
-                return self._publish_inconclusive(prepared, "incomplete_coverage", augmented)
+                return self._publish_inconclusive(
+                    prepared,
+                    "incomplete_coverage",
+                    augmented,
+                    cancellation=cancellation,
+                )
             if candidate_search.candidates:
                 narrowing_result = self._run_s4_narrowing(
                     prepared,
@@ -682,17 +777,23 @@ class SuccessorExecutionService:
                 # retain the existing terminal schema while preserving the
                 # conservative uncertainty internally for later S5 review.
                 return self._publish_inconclusive(
-                    prepared, "indeterminate_observation", augmented
+                    prepared,
+                    "indeterminate_observation",
+                    augmented,
+                    cancellation=cancellation,
                 )
             if all(
                 item.state is SuccessorObservationState.PRESENT for item in augmented.observations
             ):
-                return self._publish_not_found(prepared, augmented)
+                return self._publish_not_found(prepared, augmented, cancellation=cancellation)
             return self._publish_inconclusive(
                 prepared,
                 _inconclusive_reason(prepared.plan, augmented.observations),
                 augmented,
+                cancellation=cancellation,
             )
+        except SuccessorClassificationCancelledError:
+            return self._publish_interrupted(prepared)
         except SuccessorExecutionError:
             try:
                 self._publish_safety_terminal(prepared, "FAILED", "internal_error")
@@ -783,7 +884,11 @@ class SuccessorExecutionService:
             )
             acquisition = acquisition_service.acquire_midpoint(prepared.plan, target)
             observation = classification_service.classify_target(
-                prepared.plan, target, acquisition, prepared.authority
+                prepared.plan,
+                target,
+                acquisition,
+                prepared.authority,
+                cancellation=cancellation,
             )
             return SuccessorSearchSample.from_observation(observation)
 
@@ -929,23 +1034,49 @@ class SuccessorExecutionService:
         self,
         prepared: SuccessorPreparedExecution,
         augmented: SuccessorCoarseClassificationResult,
+        *,
+        cancellation: Callable[[], bool] | None = None,
     ) -> SuccessorTerminal:
         """Narrow the first bracket or preserve its safe coverage boundary."""
+        if cancellation is not None and cancellation():
+            return self._publish_interrupted(prepared)
         bracket = augmented.candidate_bracket
         if bracket is None:
             raise SuccessorExecutionError("internal_error")
         if _bracket_intersects_gap(prepared.plan, bracket):
-            return self._publish_inconclusive(prepared, "incomplete_coverage", augmented)
-        narrowed = self.narrowing.narrow(prepared.plan, augmented, prepared.authority)
+            if cancellation is not None and cancellation():
+                return self._publish_interrupted(prepared)
+            return self._publish_inconclusive(
+                prepared,
+                "incomplete_coverage",
+                augmented,
+                cancellation=cancellation,
+            )
+        narrowed = self.narrowing.narrow(
+            prepared.plan,
+            augmented,
+            prepared.authority,
+            should_cancel=cancellation,
+        )
+        if cancellation is not None and cancellation():
+            return self._publish_interrupted(prepared)
         if narrowed.completion is not SuccessorNarrowingCompletion.NARROWED:
-            return self._publish_inconclusive(prepared, narrowed.reason_code, augmented, narrowed)
-        return self._publish_found(prepared, augmented, narrowed)
+            return self._publish_inconclusive(
+                prepared,
+                narrowed.reason_code,
+                augmented,
+                narrowed,
+                cancellation=cancellation,
+            )
+        return self._publish_found(prepared, augmented, narrowed, cancellation=cancellation)
 
     def _publish_found(
         self,
         prepared: SuccessorPreparedExecution,
         coarse: SuccessorCoarseClassificationResult,
         narrowed: SuccessorBinaryNarrowingResult,
+        *,
+        cancellation: Callable[[], bool] | None = None,
     ) -> SuccessorTerminal:
         terminal = self._base_terminal(
             prepared, "FOUND", "disappearance_confirmed", not prepared.plan.gaps
@@ -969,10 +1100,19 @@ class SuccessorExecutionService:
                 {**terminal.as_record(), "terminal_result_id": None}
             ),
         )
-        return self._publish_terminal(prepared, terminal, observations)
+        return self._publish_terminal(
+            prepared,
+            terminal,
+            observations,
+            cancellation=cancellation,
+        )
 
     def _publish_not_found(
-        self, prepared: SuccessorPreparedExecution, coarse: SuccessorCoarseClassificationResult
+        self,
+        prepared: SuccessorPreparedExecution,
+        coarse: SuccessorCoarseClassificationResult,
+        *,
+        cancellation: Callable[[], bool] | None = None,
     ) -> SuccessorTerminal:
         observations = _observation_bundle(coarse)
         observed = tuple(item.frame_utc for item in observations if item.frame_utc is not None)
@@ -997,7 +1137,12 @@ class SuccessorExecutionService:
                 {**terminal.as_record(), "terminal_result_id": None}
             ),
         )
-        return self._publish_terminal(prepared, terminal, observations)
+        return self._publish_terminal(
+            prepared,
+            terminal,
+            observations,
+            cancellation=cancellation,
+        )
 
     def _publish_inconclusive(
         self,
@@ -1005,6 +1150,8 @@ class SuccessorExecutionService:
         reason: str,
         coarse: SuccessorCoarseClassificationResult,
         narrowed: SuccessorBinaryNarrowingResult | None = None,
+        *,
+        cancellation: Callable[[], bool] | None = None,
     ) -> SuccessorTerminal:
         terminal = self._base_terminal(prepared, "INCONCLUSIVE", reason, False)
         observations = _observation_bundle(coarse, narrowed)
@@ -1025,14 +1172,23 @@ class SuccessorExecutionService:
                 {**terminal.as_record(), "terminal_result_id": None}
             ),
         )
-        return self._publish_terminal(prepared, terminal, observations)
+        return self._publish_terminal(
+            prepared,
+            terminal,
+            observations,
+            cancellation=cancellation,
+        )
 
-    def _publish_terminal(
+    def _publish_terminal(  # noqa: C901
         self,
         prepared: SuccessorPreparedExecution,
         terminal: SuccessorTerminal,
         observations: tuple[SuccessorObservation, ...],
+        *,
+        cancellation: Callable[[], bool] | None = None,
     ) -> SuccessorTerminal:
+        if cancellation is not None and cancellation():
+            return self._publish_interrupted(prepared)
         _safe_log(
             "phase7e.terminal_publication",
             stage="started",
@@ -1040,9 +1196,12 @@ class SuccessorExecutionService:
             reason_code=terminal.reason_code,
             terminal_publication_outcome="pending",
         )
-        if self.evidence_repository is not None:
+        staged_evidence = False
+        evidence_repository = self.evidence_repository
+        if evidence_repository is not None:
             try:
-                self.evidence_repository.publish(prepared, observations, terminal)
+                evidence_repository.stage(prepared, observations, terminal)
+                staged_evidence = True
             except SuccessorEvidenceError as error:
                 _safe_log(
                     "phase7e.terminal_publication",
@@ -1053,6 +1212,38 @@ class SuccessorExecutionService:
                     error_code="publication_failed",
                 )
                 raise SuccessorExecutionError("publication_failed") from error
+        if cancellation is not None and cancellation():
+            if staged_evidence:
+                try:
+                    if evidence_repository is not None:
+                        evidence_repository.discard_staged(prepared)
+                except SuccessorEvidenceError:
+                    _safe_log(
+                        "phase7e.terminal_publication",
+                        stage="staged_evidence_cleanup_failed",
+                        status="INTERRUPTED",
+                        reason_code="cancelled",
+                        terminal_publication_outcome="retained_non_authoritative",
+                        error_code="cleanup_failed",
+                    )
+            return self._publish_interrupted(prepared)
+        if staged_evidence:
+            try:
+                if evidence_repository is not None:
+                    evidence_repository.commit_staged(prepared)
+            except SuccessorEvidenceError as error:
+                _safe_log(
+                    "phase7e.terminal_publication",
+                    stage="evidence_failed",
+                    status=terminal.status,
+                    reason_code=terminal.reason_code,
+                    terminal_publication_outcome="failed",
+                    error_code="publication_failed",
+                )
+                raise SuccessorExecutionError("publication_failed") from error
+            # The atomic manifest write is the authoritative evidence commit point.
+            # Cancellation observed after it is too late to replace the normal
+            # terminal with INTERRUPTED without recreating the inconsistency.
         try:
             result = self.publisher.publish_terminal(terminal)
         except Exception as error:
@@ -1307,7 +1498,9 @@ def _s4_segment_for_midpoint(plan: MultiSegmentCoarsePlan, midpoint: datetime) -
     )
     if not candidates:
         return None
-    return min(candidates, key=lambda item: (item.start_utc, item.end_utc, item.segment_id)).segment_id
+    return min(
+        candidates, key=lambda item: (item.start_utc, item.end_utc, item.segment_id)
+    ).segment_id
 
 
 def _observation_record(item: SuccessorObservation) -> dict[str, object]:
@@ -1380,6 +1573,19 @@ def _observed_start(observations: tuple[SuccessorObservation, ...], fallback: st
 def _terminal_identity(value: Mapping[str, object]) -> str | None:
     candidate = value.get("terminal_result_id")
     return candidate if isinstance(candidate, str) else None
+
+
+def _evidence_matches_terminal(
+    evidence: Mapping[str, object], terminal: Mapping[str, object]
+) -> bool:
+    """Require lifecycle-confirmed status and reason before exposing evidence."""
+    status = terminal.get("status")
+    reason_code = terminal.get("reason_code")
+    if status not in {"FOUND", "NOT_FOUND", "INCONCLUSIVE"}:
+        return False
+    return (
+        evidence.get("terminal_status") == status and evidence.get("terminal_reason") == reason_code
+    )
 
 
 def _terminal_from_record(value: Mapping[str, object]) -> SuccessorTerminal:

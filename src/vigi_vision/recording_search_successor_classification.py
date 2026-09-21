@@ -8,7 +8,7 @@ delegated to the existing process-isolated B4 EfficientSAM boundary.
 
 # The classifier boundary intentionally keeps the complete input explicit;
 # suppress only style rules that would obscure those contract fields.
-# ruff: noqa: C901, D102, D105, D107, EM101, PLR0913, RUF021, SLF001
+# ruff: noqa: C901, D102, D105, D107, EM101, PLR0912, PLR0913, RUF021, SLF001
 # pyright: reportPrivateUsage=false, reportUnnecessaryIsInstance=false, reportUnreachable=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportAttributeAccessIssue=false, reportAny=false
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ from vigi_vision.object_presence_evidence import ClassificationResult, RawCompar
 from vigi_vision.object_presence_models import BinaryMask
 from vigi_vision.object_presence_values import ClassificationOutcome, VisualStatus
 from vigi_vision.recording_search_7e_b4_process import (
+    B4ProcessCancelled,
     B4ProcessError,
     B4ProcessTimeout,
     EfficientSamWorkerSpec,
@@ -62,6 +63,8 @@ from vigi_vision.recording_search_successor_search_evidence import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from vigi_vision.object_presence_models import DecodedRgbImage
     from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
     from vigi_vision.recording_search_b3_contracts import MediaDecoder
@@ -127,6 +130,10 @@ class SuccessorClassificationError(RuntimeError):
             raise ValueError
         super().__init__(reason)
         self.reason: str = reason
+
+
+class SuccessorClassificationCancelledError(RuntimeError):
+    """The existing execution cancellation authority won during B4."""
 
 
 class SuccessorObservationState(str, Enum):
@@ -341,6 +348,8 @@ class EfficientSamSuccessorClassifier:
         source_height: int,
         roi: ConfirmationRoi,
         correlation_id: str,
+        *,
+        cancellation: Callable[[], bool] | None = None,
     ) -> SuccessorClassifierResult:
         started = perf_counter()
         try:
@@ -355,9 +364,12 @@ class EfficientSamSuccessorClassifier:
                 correlation_id=correlation_id,
                 timeout_seconds=self.timeout_seconds,
                 startup_timeout_seconds=self.startup_timeout_seconds,
+                cancellation=cancellation,
             )
         except B4ProcessTimeout as error:
             raise SuccessorClassificationError("classifier_timeout") from error
+        except B4ProcessCancelled as error:
+            raise SuccessorClassificationCancelledError from error
         except (B4ProcessError, ClassificationPreparationError) as error:
             raise SuccessorClassificationError("classifier_failed") from error
         if not isinstance(result, ClassificationResult):
@@ -371,6 +383,28 @@ class EfficientSamSuccessorClassifier:
             elapsed_ms,
         )
 
+    def classify_with_cancellation(
+        self,
+        baseline_image: DecodedRgbImage,
+        probe_image: DecodedRgbImage,
+        source_width: int,
+        source_height: int,
+        roi: ConfirmationRoi,
+        correlation_id: str,
+        *,
+        cancellation: Callable[[], bool],
+    ) -> SuccessorClassifierResult:
+        """Run the same classifier while honoring successor cancellation."""
+        return self.classify(
+            baseline_image,
+            probe_image,
+            source_width,
+            source_height,
+            roi,
+            correlation_id,
+            cancellation=cancellation,
+        )
+
     def classify_with_baseline_mask(
         self,
         baseline_image: DecodedRgbImage,
@@ -381,6 +415,7 @@ class EfficientSamSuccessorClassifier:
         correlation_id: str,
         *,
         baseline_mask: BinaryMask,
+        cancellation: Callable[[], bool] | None = None,
     ) -> SuccessorClassifierResult:
         """Classify while reusing one compatible immutable baseline mask."""
         started = perf_counter()
@@ -396,10 +431,13 @@ class EfficientSamSuccessorClassifier:
                 correlation_id=correlation_id,
                 timeout_seconds=self.timeout_seconds,
                 startup_timeout_seconds=self.startup_timeout_seconds,
+                cancellation=cancellation,
                 baseline_mask=baseline_mask,
             )
         except B4ProcessTimeout as error:
             raise SuccessorClassificationError("classifier_timeout") from error
+        except B4ProcessCancelled as error:
+            raise SuccessorClassificationCancelledError from error
         except (B4ProcessError, ClassificationPreparationError) as error:
             raise SuccessorClassificationError("classifier_failed") from error
         if not isinstance(result, ClassificationResult):
@@ -411,6 +449,30 @@ class EfficientSamSuccessorClassifier:
             result.comparison,
             "completed",
             elapsed_ms,
+        )
+
+    def classify_with_baseline_mask_and_cancellation(
+        self,
+        baseline_image: DecodedRgbImage,
+        probe_image: DecodedRgbImage,
+        source_width: int,
+        source_height: int,
+        roi: ConfirmationRoi,
+        correlation_id: str,
+        *,
+        baseline_mask: BinaryMask,
+        cancellation: Callable[[], bool],
+    ) -> SuccessorClassifierResult:
+        """Reuse the baseline mask while honoring successor cancellation."""
+        return self.classify_with_baseline_mask(
+            baseline_image,
+            probe_image,
+            source_width,
+            source_height,
+            roi,
+            correlation_id,
+            baseline_mask=baseline_mask,
+            cancellation=cancellation,
         )
 
     def prepare_reference(
@@ -720,9 +782,7 @@ class SuccessorCoarseClassificationService:
     )
     fast_present_policy: ObjectPresenceDecisionPolicy | None = None
     metrics: SuccessorPresenceMetrics = field(default_factory=SuccessorPresenceMetrics, repr=False)
-    search_evidence_policy: ObjectPresenceDecisionPolicy | None = field(
-        default=None, repr=False
-    )
+    search_evidence_policy: ObjectPresenceDecisionPolicy | None = field(default=None, repr=False)
 
     def prepare_reference(
         self, authority: SuccessorClassificationAuthority
@@ -779,6 +839,8 @@ class SuccessorCoarseClassificationService:
         plan: MultiSegmentCoarsePlan,
         acquisitions: tuple[SuccessorTargetAcquisitionResult, ...],
         authority: SuccessorClassificationAuthority,
+        *,
+        cancellation: Callable[[], bool] | None = None,
     ) -> SuccessorCoarseClassificationResult:
         self._validate_authority(plan, authority)
         expected_targets = {successor_target_id(plan, target): target for target in plan.targets}
@@ -797,7 +859,11 @@ class SuccessorCoarseClassificationService:
             ):
                 raise SuccessorClassificationContractError
             seen.add(acquisition.target_id)
-            facts.append(self._classify_target(plan, target, acquisition, authority))
+            facts.append(
+                self._classify_target(
+                    plan, target, acquisition, authority, cancellation=cancellation
+                )
+            )
         if seen != set(expected_targets):
             raise SuccessorClassificationContractError
         ordered = tuple(
@@ -823,6 +889,8 @@ class SuccessorCoarseClassificationService:
         target: CoarseTargetAssignment,
         acquisition: SuccessorTargetAcquisitionResult,
         authority: SuccessorClassificationAuthority,
+        *,
+        cancellation: Callable[[], bool] | None = None,
     ) -> SuccessorObservation:
         """Classify one chronological coarse target without requiring a full plan."""
         self._validate_authority(plan, authority)
@@ -835,7 +903,9 @@ class SuccessorCoarseClassificationService:
             or acquisition.assigned_segment_id != target.segment_id
         ):
             raise SuccessorClassificationContractError
-        return self._classify_target(plan, target, acquisition, authority)
+        return self._classify_target(
+            plan, target, acquisition, authority, cancellation=cancellation
+        )
 
     def classify_target(
         self,
@@ -843,6 +913,8 @@ class SuccessorCoarseClassificationService:
         target: CoarseTargetAssignment,
         acquisition: SuccessorTargetAcquisitionResult,
         authority: SuccessorClassificationAuthority,
+        *,
+        cancellation: Callable[[], bool] | None = None,
     ) -> SuccessorObservation:
         """Classify one bounded target, including a non-coarse midpoint target."""
         self._validate_authority(plan, authority)
@@ -855,7 +927,9 @@ class SuccessorCoarseClassificationService:
             or acquisition.assigned_segment_id != target.segment_id
         ):
             raise SuccessorClassificationContractError
-        return self._classify_target(plan, target, acquisition, authority)
+        return self._classify_target(
+            plan, target, acquisition, authority, cancellation=cancellation
+        )
 
     def classify_anchor_target(
         self,
@@ -863,6 +937,8 @@ class SuccessorCoarseClassificationService:
         target: CoarseTargetAssignment,
         acquisition: SuccessorTargetAcquisitionResult,
         authority: SuccessorClassificationAuthority,
+        *,
+        cancellation: Callable[[], bool] | None = None,
     ) -> SuccessorObservation:
         """Classify the actual frame at the successor search anchor."""
         self._validate_authority(plan, authority)
@@ -874,7 +950,9 @@ class SuccessorCoarseClassificationService:
             or acquisition.assigned_segment_id != target.segment_id
         ):
             raise SuccessorClassificationContractError
-        return self._classify_target(plan, target, acquisition, authority)
+        return self._classify_target(
+            plan, target, acquisition, authority, cancellation=cancellation
+        )
 
     def _validate_authority(
         self, plan: MultiSegmentCoarsePlan, authority: SuccessorClassificationAuthority
@@ -901,7 +979,11 @@ class SuccessorCoarseClassificationService:
         target: CoarseTargetAssignment,
         acquisition: SuccessorTargetAcquisitionResult,
         authority: SuccessorClassificationAuthority,
+        *,
+        cancellation: Callable[[], bool] | None = None,
     ) -> SuccessorObservation:
+        if cancellation is not None and cancellation():
+            raise SuccessorClassificationCancelledError
         if acquisition.status is not SuccessorTargetStatus.FRAME_AVAILABLE:
             state = SuccessorObservationState(acquisition.status.value)
             return _observation(
@@ -941,7 +1023,16 @@ class SuccessorCoarseClassificationService:
         last_comparison: dict[str, object] | None = None
         primary = candidates[0]
         for index, candidate in enumerate(candidates):
-            evaluation = self._evaluate_candidate(candidate, authority, acquisition.acquisition_id)
+            if cancellation is not None and cancellation():
+                raise SuccessorClassificationCancelledError
+            evaluation = self._evaluate_candidate(
+                candidate,
+                authority,
+                acquisition.acquisition_id,
+                cancellation=cancellation,
+            )
+            if cancellation is not None and cancellation():
+                raise SuccessorClassificationCancelledError
             if evaluation[0] == "decode_failed":
                 saw_decode_failure = True
                 decode_reason = (
@@ -1009,13 +1100,10 @@ class SuccessorCoarseClassificationService:
                 raise SuccessorClassificationContractError
             comparison = _safe_comparison(classified.comparison)
             search_evidence: SearchEvidence | None = None
-            if (
-                len(evaluation) > _SEARCH_EVIDENCE_RESULT_INDEX
-                and isinstance(evaluation[_SEARCH_EVIDENCE_RESULT_INDEX], SearchEvidence)
+            if len(evaluation) > _SEARCH_EVIDENCE_RESULT_INDEX and isinstance(
+                evaluation[_SEARCH_EVIDENCE_RESULT_INDEX], SearchEvidence
             ):
-                search_evidence = cast(
-                    "SearchEvidence", evaluation[_SEARCH_EVIDENCE_RESULT_INDEX]
-                )
+                search_evidence = cast("SearchEvidence", evaluation[_SEARCH_EVIDENCE_RESULT_INDEX])
             if _is_occluded_result(classified):
                 saw_occluded = True
                 last_comparison = comparison
@@ -1085,7 +1173,11 @@ class SuccessorCoarseClassificationService:
         candidate: SuccessorFrameCandidate,
         authority: SuccessorClassificationAuthority,
         correlation_id: str,
+        *,
+        cancellation: Callable[[], bool] | None = None,
     ) -> tuple[object, ...]:
+        if cancellation is not None and cancellation():
+            raise SuccessorClassificationCancelledError
         if (
             candidate.frame_width != authority.source_width
             or candidate.frame_height != authority.source_height
@@ -1124,6 +1216,8 @@ class SuccessorCoarseClassificationService:
             fast_elapsed = 0
         self.metrics.fast_path_elapsed_ms_total += fast_elapsed
         if fast_comparison is not None:
+            if cancellation is not None and cancellation():
+                raise SuccessorClassificationCancelledError
             self.metrics.fast_present_hits += 1
             _emit_fast_path_event(
                 "fast_present",
@@ -1157,24 +1251,55 @@ class SuccessorCoarseClassificationService:
             if callable(reuse_classifier) and _baseline_mask_reuse_eligible(
                 authority, self.classifier
             ):
-                classified = reuse_classifier(
-                    authority.baseline_image,
-                    decoded.image,
-                    authority.source_width,
-                    authority.source_height,
-                    authority.roi,
-                    correlation_id,
-                    baseline_mask=authority.reference_mask,
+                cancellation_reuse_classifier = getattr(
+                    self.classifier,
+                    "classify_with_baseline_mask_and_cancellation",
+                    None,
                 )
+                if cancellation is not None and callable(cancellation_reuse_classifier):
+                    classified = cancellation_reuse_classifier(
+                        authority.baseline_image,
+                        decoded.image,
+                        authority.source_width,
+                        authority.source_height,
+                        authority.roi,
+                        correlation_id,
+                        baseline_mask=authority.reference_mask,
+                        cancellation=cancellation,
+                    )
+                else:
+                    classified = reuse_classifier(
+                        authority.baseline_image,
+                        decoded.image,
+                        authority.source_width,
+                        authority.source_height,
+                        authority.roi,
+                        correlation_id,
+                        baseline_mask=authority.reference_mask,
+                    )
             else:
-                classified = self.classifier.classify(
-                    authority.baseline_image,
-                    decoded.image,
-                    authority.source_width,
-                    authority.source_height,
-                    authority.roi,
-                    correlation_id,
+                cancellation_classifier = getattr(
+                    self.classifier, "classify_with_cancellation", None
                 )
+                if cancellation is not None and callable(cancellation_classifier):
+                    classified = cancellation_classifier(
+                        authority.baseline_image,
+                        decoded.image,
+                        authority.source_width,
+                        authority.source_height,
+                        authority.roi,
+                        correlation_id,
+                        cancellation=cancellation,
+                    )
+                else:
+                    classified = self.classifier.classify(
+                        authority.baseline_image,
+                        decoded.image,
+                        authority.source_width,
+                        authority.source_height,
+                        authority.roi,
+                        correlation_id,
+                    )
         except SuccessorClassificationError as error:
             return (
                 "classifier_error",

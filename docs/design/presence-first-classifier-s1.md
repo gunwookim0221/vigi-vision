@@ -94,6 +94,23 @@ and once for the candidate. The fast path performs no candidate segmentation or
 alignment. The spawned-worker boundary also performs model readiness and request
 reconstruction per slow-path invocation.
 
+The successor candidate B4 invocation uses a separate bounded 60-second
+inference budget because measured CPU EfficientSAM execution can exceed the
+legacy 30-second ceiling. Worker startup and run-scoped reference preparation
+retain their existing 30-second budgets; the legacy Schema 5--7 classifier
+policy remains unchanged. This is an execution-policy correction only: it
+does not alter thresholds, segmentation geometry, retry behavior, evidence
+schemas, or terminal outcome mapping. The existing successor cancellation
+authority is propagated through the B4 process wait/cleanup boundary and is
+rechecked before any normal terminal publication, so cancellation retains
+precedence over a late classifier result. Successor evidence frames are
+materialized with an in-memory non-authoritative payload and made visible as a
+manifest only after that same guard; cancelled runs discard the staged payload
+and therefore cannot expose normal terminal evidence alongside an
+`INTERRUPTED` terminal. Reopen and public evidence reads also require the
+committed terminal to confirm the manifest status and reason; recovered or
+failed terminals fail closed even if an earlier manifest exists on disk.
+
 ### Comparison and decision behavior
 
 New successor runs use `baseline_support_v3`. The baseline mask defines target
