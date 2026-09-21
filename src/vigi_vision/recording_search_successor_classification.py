@@ -154,6 +154,18 @@ class SuccessorObservationState(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class BaselineMaskProvenance:
+    """Run-scoped identity proving which classifier context produced a mask."""
+
+    authority_identity: str
+    roi_identity: str
+    source_width: int
+    source_height: int
+    policy_identity: str
+    classifier_identity: str
+
+
+@dataclass(frozen=True, slots=True)
 class SuccessorClassificationAuthority:
     """Phase 6-owned baseline and ROI authority bound to one successor plan."""
 
@@ -167,6 +179,9 @@ class SuccessorClassificationAuthority:
     roi: ConfirmationRoi
     baseline_image: DecodedRgbImage = field(repr=False)
     reference_mask: BinaryMask | None = field(default=None, repr=False, compare=False)
+    reference_mask_provenance: BaselineMaskProvenance | None = field(
+        default=None, repr=False, compare=False
+    )
     fast_presence_reference: FastPresenceReference | None = field(
         default=None, repr=False, compare=False
     )
@@ -193,6 +208,8 @@ class SuccessorClassificationAuthority:
                 self.reference_mask.width != self.source_width
                 or self.reference_mask.height != self.source_height
             )
+            or self.reference_mask is None
+            and self.reference_mask_provenance is not None
         ):
             raise SuccessorClassificationContractError
 
@@ -312,6 +329,10 @@ class EfficientSamSuccessorClassifier:
     def policy_identity(self) -> str:
         return self.policy.identity
 
+    @property
+    def classifier_identity(self) -> str:
+        return f"efficient-sam:{self.worker_spec.expected_sha256}:{self.worker_spec.device_mode}"
+
     def classify(
         self,
         baseline_image: DecodedRgbImage,
@@ -334,6 +355,48 @@ class EfficientSamSuccessorClassifier:
                 correlation_id=correlation_id,
                 timeout_seconds=self.timeout_seconds,
                 startup_timeout_seconds=self.startup_timeout_seconds,
+            )
+        except B4ProcessTimeout as error:
+            raise SuccessorClassificationError("classifier_timeout") from error
+        except (B4ProcessError, ClassificationPreparationError) as error:
+            raise SuccessorClassificationError("classifier_failed") from error
+        if not isinstance(result, ClassificationResult):
+            raise SuccessorClassificationContractError
+        elapsed_ms = max(0, round((perf_counter() - started) * 1000))
+        return SuccessorClassifierResult(
+            result.outcome,
+            None if result.reason_code is None else result.reason_code.value,
+            result.comparison,
+            "completed",
+            elapsed_ms,
+        )
+
+    def classify_with_baseline_mask(
+        self,
+        baseline_image: DecodedRgbImage,
+        probe_image: DecodedRgbImage,
+        source_width: int,
+        source_height: int,
+        roi: ConfirmationRoi,
+        correlation_id: str,
+        *,
+        baseline_mask: BinaryMask,
+    ) -> SuccessorClassifierResult:
+        """Classify while reusing one compatible immutable baseline mask."""
+        started = perf_counter()
+        try:
+            result = run_b4_in_process(
+                baseline_image=baseline_image,
+                probe_image=probe_image,
+                source_width=source_width,
+                source_height=source_height,
+                roi=roi,
+                policy=self.policy,
+                worker_spec=self.worker_spec,
+                correlation_id=correlation_id,
+                timeout_seconds=self.timeout_seconds,
+                startup_timeout_seconds=self.startup_timeout_seconds,
+                baseline_mask=baseline_mask,
             )
         except B4ProcessTimeout as error:
             raise SuccessorClassificationError("classifier_timeout") from error
@@ -691,9 +754,23 @@ class SuccessorCoarseClassificationService:
         )
         if reference is None:
             return authority
+        classifier_identity = _classifier_identity(self.classifier)
+        provenance = (
+            None
+            if classifier_identity is None
+            else BaselineMaskProvenance(
+                authority.authority_identity,
+                authority.roi_identity,
+                authority.source_width,
+                authority.source_height,
+                self.classifier.policy_identity,
+                classifier_identity,
+            )
+        )
         return replace(
             authority,
             reference_mask=mask,
+            reference_mask_provenance=provenance,
             fast_presence_reference=reference,
         )
 
@@ -1076,14 +1153,28 @@ class SuccessorCoarseClassificationService:
         _emit_fast_path_event("delegated", fast_elapsed, self.metrics, correlation_id)
         classifier_started = perf_counter()
         try:
-            classified = self.classifier.classify(
-                authority.baseline_image,
-                decoded.image,
-                authority.source_width,
-                authority.source_height,
-                authority.roi,
-                correlation_id,
-            )
+            reuse_classifier = getattr(self.classifier, "classify_with_baseline_mask", None)
+            if callable(reuse_classifier) and _baseline_mask_reuse_eligible(
+                authority, self.classifier
+            ):
+                classified = reuse_classifier(
+                    authority.baseline_image,
+                    decoded.image,
+                    authority.source_width,
+                    authority.source_height,
+                    authority.roi,
+                    correlation_id,
+                    baseline_mask=authority.reference_mask,
+                )
+            else:
+                classified = self.classifier.classify(
+                    authority.baseline_image,
+                    decoded.image,
+                    authority.source_width,
+                    authority.source_height,
+                    authority.roi,
+                    correlation_id,
+                )
         except SuccessorClassificationError as error:
             return (
                 "classifier_error",
@@ -1511,6 +1602,33 @@ def _roi_valid(roi: ConfirmationRoi, width: int, height: int) -> bool:
         and roi.height > 0
         and roi.x + roi.width <= width
         and roi.y + roi.height <= height
+    )
+
+
+def _classifier_identity(classifier: object) -> str | None:
+    value = getattr(classifier, "classifier_identity", None)
+    return value if type(value) is str and value else None
+
+
+def _baseline_mask_reuse_eligible(
+    authority: SuccessorClassificationAuthority, classifier: object
+) -> bool:
+    mask = authority.reference_mask
+    provenance = authority.reference_mask_provenance
+    classifier_identity = _classifier_identity(classifier)
+    policy_identity = getattr(classifier, "policy_identity", None)
+    return bool(
+        isinstance(mask, BinaryMask)
+        and provenance is not None
+        and classifier_identity is not None
+        and provenance.authority_identity == authority.authority_identity
+        and provenance.roi_identity == authority.roi_identity
+        and provenance.source_width == authority.source_width
+        and provenance.source_height == authority.source_height
+        and provenance.policy_identity == policy_identity
+        and provenance.classifier_identity == classifier_identity
+        and mask.width == authority.source_width
+        and mask.height == authority.source_height
     )
 
 

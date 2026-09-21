@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 
     from vigi_vision.investigation_confirmation_models import ConfirmationRoi
     from vigi_vision.object_presence_evidence import ClassificationResult
-    from vigi_vision.object_presence_models import DecodedRgbImage
+    from vigi_vision.object_presence_models import BinaryMask, DecodedRgbImage
     from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
     from vigi_vision.recording_search_b3_contracts import (
         ClassificationHandle,
@@ -254,6 +254,7 @@ def classify_decoded_images(  # noqa: PLR0913
     roi: ConfirmationRoi,
     policy: ObjectPresenceDecisionPolicy,
     mask_predictor: MaskPredictor | None,
+    baseline_mask: BinaryMask | None = None,
     diagnostics_sink: Callable[[str, int], None] | None = None,
 ) -> ClassificationResult:
     """Run the authoritative B4 computation without legacy persistence.
@@ -270,6 +271,7 @@ def classify_decoded_images(  # noqa: PLR0913
         roi,
         policy,
         mask_predictor,
+        baseline_mask=baseline_mask,
         diagnostics_sink=diagnostics_sink,
     )
     try:

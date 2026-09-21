@@ -95,6 +95,7 @@ def predict_masks_for_images(  # noqa: PLR0913
     policy: ObjectPresenceDecisionPolicy,
     predictor: MaskPredictor | None,
     *,
+    baseline_mask: BinaryMask | None = None,
     diagnostics_sink: Callable[[str, int], None] | None = None,
 ) -> tuple[BinaryMask, BinaryMask]:
     """Produce masks from decoded pixels without requiring a persistence snapshot.
@@ -112,15 +113,28 @@ def predict_masks_for_images(  # noqa: PLR0913
         roi.y + (roi.height - 1) // 2,
     )
     prediction_calls = 0
+    baseline_prediction_calls = 0
+    candidate_prediction_calls = 0
     try:
+        if baseline_mask is None:
+            prediction_calls += 1
+            baseline_prediction_calls += 1
+            baseline = _prediction_to_mask(
+                predictor.predict_from_rgb(baseline_image, point, size),
+                size,
+                point,
+                policy,
+            )
+        else:
+            if (
+                baseline_mask.width != source_width
+                or baseline_mask.height != source_height
+                or not _mask_is_usable(baseline_mask, point, policy)
+            ):
+                _fail(ClassificationPreparationReason.INVALID_CLASSIFIER_OUTPUT)
+            baseline = baseline_mask
         prediction_calls += 1
-        baseline = _prediction_to_mask(
-            predictor.predict_from_rgb(baseline_image, point, size),
-            size,
-            point,
-            policy,
-        )
-        prediction_calls += 1
+        candidate_prediction_calls += 1
         probe = _prediction_to_mask(
             predictor.predict_from_rgb(probe_image, point, size),
             size,
@@ -139,6 +153,12 @@ def predict_masks_for_images(  # noqa: PLR0913
         _fail(ClassificationPreparationReason.CLASSIFIER_EXECUTION_FAILED)
     finally:
         _emit_diagnostic(diagnostics_sink, "segmentation_calls", prediction_calls)
+        _emit_diagnostic(
+            diagnostics_sink, "baseline_segmentation_calls", baseline_prediction_calls
+        )
+        _emit_diagnostic(
+            diagnostics_sink, "candidate_segmentation_calls", candidate_prediction_calls
+        )
     return baseline, probe
 
 

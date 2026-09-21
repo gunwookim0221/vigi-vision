@@ -198,6 +198,51 @@ def test_spawned_result_matches_shared_b4_computation() -> None:
     assert not _active_classifier_children()
 
 
+def test_spawned_result_reuses_compatible_baseline_mask_without_semantic_change() -> None:
+    baseline, probe, baseline_mask, probe_mask, roi, policy = _values()
+    probe_mask = BinaryMask.from_rows(
+        tuple(tuple(14 <= x < 20 and 14 <= y < 20 for x in range(32)) for y in range(32))
+    )
+    baseline_rows = baseline_mask.rows
+    full_events: list[dict[str, int | str]] = []
+    reused_events: list[dict[str, int | str]] = []
+    full = run_b4_in_process(
+        baseline_image=baseline,
+        probe_image=probe,
+        source_width=32,
+        source_height=32,
+        roi=roi,
+        policy=policy,
+        worker_spec=StaticMaskWorkerSpec(baseline_mask, probe_mask),
+        correlation_id="full-baseline",
+        timeout_seconds=3.0,
+        timing_sink=full_events.append,
+    )
+    reused = run_b4_in_process(
+        baseline_image=baseline,
+        probe_image=probe,
+        source_width=32,
+        source_height=32,
+        roi=roi,
+        policy=policy,
+        worker_spec=StaticMaskWorkerSpec(baseline_mask, probe_mask),
+        correlation_id="reused-baseline",
+        timeout_seconds=3.0,
+        baseline_mask=baseline_mask,
+        timing_sink=reused_events.append,
+    )
+
+    assert reused == full
+    assert full_events[-1]["baseline_segmentation_calls"] == 1
+    assert full_events[-1]["candidate_segmentation_calls"] == 1
+    assert full_events[-1]["segmentation_calls"] == 2
+    assert reused_events[-1]["baseline_segmentation_calls"] == 0
+    assert reused_events[-1]["candidate_segmentation_calls"] == 1
+    assert reused_events[-1]["segmentation_calls"] == 1
+    assert baseline_mask.rows == baseline_rows
+    assert not _active_classifier_children()
+
+
 def test_worker_failure_envelope_is_reaped_immediately() -> None:
     baseline, probe, _baseline_mask, _probe_mask, roi, policy = _values()
     pids: list[int] = []

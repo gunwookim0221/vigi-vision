@@ -409,6 +409,16 @@ class SuccessorB4Classifier:
     def policy_identity(self) -> str:
         return self.policy.identity
 
+    @property
+    def classifier_identity(self) -> str:
+        """Return the immutable policy/model identity used for mask reuse."""
+        if isinstance(self.worker_spec, EfficientSamWorkerSpec):
+            return f"efficient-sam:{self.worker_spec.expected_sha256}:{self.worker_spec.device_mode}"
+        payload = json.dumps(
+            self.worker_spec.payload(), sort_keys=True, separators=(",", ":")
+        ).encode()
+        return f"static-mask-worker-v1:{hashlib.sha256(payload).hexdigest()}"
+
     def classify(
         self,
         baseline_image: DecodedRgbImage,
@@ -417,6 +427,49 @@ class SuccessorB4Classifier:
         source_height: int,
         roi: object,
         correlation_id: str,
+    ) -> SuccessorClassifierResult:
+        return self._classify(
+            baseline_image,
+            probe_image,
+            source_width,
+            source_height,
+            roi,
+            correlation_id,
+            baseline_mask=None,
+        )
+
+    def classify_with_baseline_mask(
+        self,
+        baseline_image: DecodedRgbImage,
+        probe_image: DecodedRgbImage,
+        source_width: int,
+        source_height: int,
+        roi: object,
+        correlation_id: str,
+        *,
+        baseline_mask: BinaryMask,
+    ) -> SuccessorClassifierResult:
+        """Classify while reusing one compatible immutable baseline mask."""
+        return self._classify(
+            baseline_image,
+            probe_image,
+            source_width,
+            source_height,
+            roi,
+            correlation_id,
+            baseline_mask=baseline_mask,
+        )
+
+    def _classify(
+        self,
+        baseline_image: DecodedRgbImage,
+        probe_image: DecodedRgbImage,
+        source_width: int,
+        source_height: int,
+        roi: object,
+        correlation_id: str,
+        *,
+        baseline_mask: BinaryMask | None,
     ) -> SuccessorClassifierResult:
         started = perf_counter()
         try:
@@ -431,6 +484,7 @@ class SuccessorB4Classifier:
                 correlation_id=correlation_id,
                 timeout_seconds=self.timeout_seconds,
                 startup_timeout_seconds=self.startup_timeout_seconds,
+                baseline_mask=baseline_mask,
             )
         except B4ProcessTimeout as error:
             raise SuccessorClassificationError("classifier_timeout") from error

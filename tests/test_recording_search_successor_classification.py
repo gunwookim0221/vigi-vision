@@ -4,6 +4,7 @@ from __future__ import annotations
 # Their runtime shape is asserted through the service boundary.
 # ruff: noqa: ANN001, ANN003, ANN202, B017, PLR0913, PT011, PT017, PT018
 import hashlib
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -13,7 +14,7 @@ import vigi_vision.recording_search_successor_classification as classification_m
 from vigi_vision.investigation_confirmation_integrity import JpegIntegrity
 from vigi_vision.investigation_confirmation_models import ConfirmationRoi, RoiProvenance
 from vigi_vision.object_presence_evidence import RawComparison
-from vigi_vision.object_presence_models import DecodedRgbImage
+from vigi_vision.object_presence_models import BinaryMask, DecodedRgbImage
 from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
 from vigi_vision.object_presence_values import ClassificationOutcome, VisualReason, VisualStatus
 from vigi_vision.recording_models import RecordingSegment, RecordingWindow
@@ -31,6 +32,7 @@ from vigi_vision.recording_search_successor_acquisition import (
     successor_target_id,
 )
 from vigi_vision.recording_search_successor_classification import (
+    BaselineMaskProvenance,
     EfficientSamSuccessorClassifier,
     ObservableFrameFallbackPolicy,
     SuccessorClassificationAuthority,
@@ -424,6 +426,156 @@ class _ResultClassifier:
 
     def classify(self, *_args: object):
         return self.results.pop(0)
+
+
+class _ReusableClassifier:
+    policy_identity = "policy-test"
+    classifier_identity = "model-test"
+
+    def __init__(self) -> None:
+        self.full_calls = 0
+        self.reused_calls: list[BinaryMask] = []
+        self.reference_calls = 0
+
+    def prepare_reference(self, *_args: object) -> BinaryMask:
+        self.reference_calls += 1
+        return BinaryMask.from_rows(
+            tuple(tuple(10 <= x < 22 and 10 <= y < 22 for x in range(32)) for y in range(32))
+        )
+
+    def classify(self, *_args: object) -> SuccessorClassifierResult:
+        self.full_calls += 1
+        return _present_result()
+
+    def classify_with_baseline_mask(self, *_args: object, baseline_mask: BinaryMask):
+        self.reused_calls.append(baseline_mask)
+        return _present_result()
+
+
+def _authority_with_reusable_mask(plan, classifier: _ReusableClassifier):
+    authority = _authority(plan)
+    mask = BinaryMask.from_rows(
+        tuple(tuple(x == y for x in range(32)) for y in range(32))
+    )
+    provenance = BaselineMaskProvenance(
+        authority.authority_identity,
+        authority.roi_identity,
+        authority.source_width,
+        authority.source_height,
+        classifier.policy_identity,
+        classifier.classifier_identity,
+    )
+    return replace(
+        authority,
+        reference_mask=mask,
+        reference_mask_provenance=provenance,
+    ), mask
+
+
+def test_compatible_baseline_mask_is_reused_and_remains_immutable() -> None:
+    plan = _plan()
+    target = plan.targets[0]
+    classifier = _ReusableClassifier()
+    authority, mask = _authority_with_reusable_mask(plan, classifier)
+    before = mask.rows
+    service = SuccessorCoarseClassificationService(classifier, _Decoder())
+
+    observation = service.classify_coarse_target(
+        plan, target, _acquisition(plan, target), authority
+    )
+
+    assert observation.state is SuccessorObservationState.PRESENT
+    assert classifier.full_calls == 0
+    assert classifier.reused_calls == [mask]
+    assert mask.rows == before
+
+
+def test_prepare_reference_records_run_scoped_provenance() -> None:
+    plan = _plan()
+    classifier = _ReusableClassifier()
+    authority = _authority(plan)
+    service = SuccessorCoarseClassificationService(
+        classifier,
+        _Decoder(),
+        fast_present_policy=ObjectPresenceDecisionPolicy(
+            minimum_mask_overlap_for_comparison=0.1,
+            minimum_comparison_area=1,
+            minimum_clipped_mask_pixels=1,
+        ),
+    )
+
+    prepared = service.prepare_reference(authority)
+
+    assert classifier.reference_calls == 1
+    assert prepared.reference_mask is not None
+    assert prepared.reference_mask_provenance == BaselineMaskProvenance(
+        authority.authority_identity,
+        authority.roi_identity,
+        authority.source_width,
+        authority.source_height,
+        classifier.policy_identity,
+        classifier.classifier_identity,
+    )
+
+
+def test_baseline_mask_reuse_requires_complete_compatible_provenance() -> None:
+    plan = _plan()
+    classifier = _ReusableClassifier()
+    authority, _mask = _authority_with_reusable_mask(plan, classifier)
+    provenance = authority.reference_mask_provenance
+    assert provenance is not None
+    compatible = classification_module._baseline_mask_reuse_eligible
+
+    assert compatible(authority, classifier)
+    assert not compatible(
+        replace(
+            authority,
+            reference_mask_provenance=replace(provenance, authority_identity="other"),
+        ),
+        classifier,
+    )
+    assert not compatible(
+        replace(authority, reference_mask_provenance=replace(provenance, roi_identity="other")),
+        classifier,
+    )
+    assert not compatible(
+        replace(authority, reference_mask_provenance=replace(provenance, source_width=31)),
+        classifier,
+    )
+    assert not compatible(
+        replace(authority, reference_mask_provenance=replace(provenance, policy_identity="other")),
+        classifier,
+    )
+    assert not compatible(
+        replace(
+            authority,
+            reference_mask_provenance=replace(provenance, classifier_identity="other"),
+        ),
+        classifier,
+    )
+    assert not compatible(replace(authority, reference_mask_provenance=None), classifier)
+
+
+def test_incompatible_baseline_mask_falls_back_to_full_classifier() -> None:
+    plan = _plan()
+    target = plan.targets[0]
+    classifier = _ReusableClassifier()
+    authority, _mask = _authority_with_reusable_mask(plan, classifier)
+    provenance = authority.reference_mask_provenance
+    assert provenance is not None
+    authority = replace(
+        authority,
+        reference_mask_provenance=replace(provenance, classifier_identity="other-model"),
+    )
+    service = SuccessorCoarseClassificationService(classifier, _Decoder())
+
+    observation = service.classify_coarse_target(
+        plan, target, _acquisition(plan, target), authority
+    )
+
+    assert observation.state is SuccessorObservationState.PRESENT
+    assert classifier.full_calls == 1
+    assert classifier.reused_calls == []
 
 
 def _candidate(target, offset: int) -> SuccessorFrameCandidate:
