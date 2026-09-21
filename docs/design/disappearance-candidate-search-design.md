@@ -6,8 +6,10 @@
 local shadow-only implementation and preserved-data measurement. Phase S4's
 internal, unpublished candidate-formation/narrowing implementation and its
 cancellation lifecycle correction are approved. Phase S5 now adds internal
-candidate-local verification and measured slow-path accounting; persistence and
-public behavior remain unimplemented.**
+candidate-local verification and measured slow-path accounting. The S6
+implementation slice adds a bounded ambiguous-endpoint coarse-sampling
+fallback; fresh labeled real-run validation, persistence, and public behavior
+remain unimplemented.**
 
 The implemented Phase 7 and Schema 8 recording-search contracts remain
 authoritative in
@@ -563,8 +565,37 @@ The current S4 nonmonotonic rule remains authoritative: S4 stops at the
 enclosing interval, and S5 reports the resulting candidate as partial or
 unresolved rather than reordering or tightening it.
 
+### S6 implementation slice — bounded ambiguous-endpoint coarse sampling
+
+The successor executor now has one private, process-local recovery for the
+specific sampling-coverage miss found during S6 preparation. It runs only when
+the initial chronological scan has no state bracket or S3 candidate, the
+search-end observation has a frame and is `INDETERMINATE` with
+`USABLE_AMBIGUOUS` or `INSUFFICIENT` search evidence, a prior strong-reference
+observation exists, and the plan has no coverage gaps. It never treats
+`USABLE_AMBIGUOUS` as a material drop.
+
+The fallback schedules at most four deterministic interior temporal probes,
+using forward chronological spacing between the strong reference and the
+ambiguous endpoint. Existing requested times and identical actual frame
+identity (digest plus selected frame time) are reused rather than classified
+again. Raw decoded frame times may contain sub-second precision; each raw
+probe is normalized to a legal whole-second UTC interior time, advancing only
+when needed to remain strictly after the reference and skipping collisions.
+Each new probe uses the existing midpoint acquisition and
+fast-PRESENT/B4 classifier boundary, checks cancellation before acquisition and
+classification, and stops immediately when the existing state bracket or S4
+candidate appears. It records planned/actual probe times, route, S3 band,
+extra fast hits, extra B4 invocations, and the stop reason only in internal
+diagnostics. The probe count, B4 timeouts, terminal fencing, cancellation,
+durable Schema 8 shape, and public projections are unchanged. If no material
+drop is found, the existing conservative `INCONCLUSIVE` path remains
+authoritative.
+
 ### S6 — fresh real-run/NVR end-to-end validation
 
+- rerun the bounded fallback on one approved labeled positive/change case after
+  the implementation slice, without using a human timestamp to guide probes;
 - execute newly labeled recording searches using current code and the proposed
   candidate path;
 - prioritize event containment, candidate width, and complete misses;

@@ -9,7 +9,7 @@ foreign record family.
 # The orchestration is an explicit contract boundary; keep its state machine
 # readable while suppressing only diagnostics for protocol-shaped adapters.
 # pyright: reportAny=false, reportArgumentType=false, reportAttributeAccessIssue=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnannotatedClassAttribute=false, reportPrivateUsage=false, reportUnusedImport=false, reportUnusedCallResult=false, reportUnusedParameter=false, reportUnknownVariableType=false, reportDeprecated=false
-# ruff: noqa: D102, D107, E501, EM101, FBT001, FBT003, PLR0912, PLR0913, PLC0415, PTH105, PTH108, RUF007, SIM105, TC001, TC003
+# ruff: noqa: C901, D102, D107, E501, EM101, FBT001, FBT003, PLR0911, PLR0912, PLR0913, PLR0915, PLC0415, PTH105, PTH108, RUF007, SIM105, TC001, TC003
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ import os
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
 from time import perf_counter
@@ -81,6 +81,7 @@ from vigi_vision.recording_search_successor_narrowing import (
     SuccessorBinaryNarrowingService,
     SuccessorNarrowingCompletion,
 )
+from vigi_vision.recording_search_successor_search_evidence import SearchEvidenceBand
 from vigi_vision.recording_search_successor_verification import (
     CandidateVerificationCompletion,
     CandidateVerificationReport,
@@ -98,6 +99,8 @@ SUCCESSOR_RECORD_VERSION = "phase7e-successor-terminal-v1"
 _B4_CLASSIFIER_TIMEOUT_SECONDS = 60.0
 _B4_REFERENCE_TIMEOUT_SECONDS = 30.0
 _B4_STARTUP_TIMEOUT_SECONDS = 30.0
+_COARSE_FALLBACK_MAX_PROBES = 4
+_COARSE_FALLBACK_SEQUENCE_BASE = 1_000_000
 _RUNNING = "RUNNING"
 _TERMINAL = frozenset({"FOUND", "NOT_FOUND", "INCONCLUSIVE", "FAILED", "INTERRUPTED"})
 _MAX_RECOVERY_RECORDS = 1024
@@ -154,6 +157,24 @@ _SAFE_FALLBACK_TERMINALS = frozenset(
 
 class SuccessorExecutionError(RuntimeError):
     """A safe successor orchestration or publication error."""
+
+
+@dataclass(frozen=True, slots=True)
+class _CoarseFallbackPlan:
+    """Private bounded temporal-probe plan for an ambiguous endpoint."""
+
+    reason: str
+    reference_observation: SuccessorObservation | None = None
+    endpoint_observation: SuccessorObservation | None = None
+    probe_times: tuple[datetime, ...] = ()
+
+    @property
+    def eligible(self) -> bool:
+        return (
+            bool(self.probe_times)
+            and self.reference_observation is not None
+            and self.endpoint_observation is not None
+        )
 
 
 class _BaselineDecoder(Protocol):
@@ -681,7 +702,7 @@ class SuccessorExecutionService:
             return None
         return evidence
 
-    def execute(  # noqa: C901, PLR0911
+    def execute(
         self,
         prepared: SuccessorPreparedExecution,
         *,
@@ -732,6 +753,21 @@ class SuccessorExecutionService:
                 if augmented.candidate_bracket is not None:
                     return self._narrow_or_publish(prepared, augmented, cancellation=cancellation)
             candidate_search = _candidate_search(prepared, augmented)
+            if cancellation is not None and cancellation():
+                return self._publish_interrupted(prepared)
+            if not candidate_search.candidates:
+                augmented = self._run_coarse_fallback(
+                    prepared,
+                    augmented,
+                    coarse_observations,
+                    anchor_observation,
+                    cancellation=cancellation,
+                )
+                if cancellation is not None and cancellation():
+                    return self._publish_interrupted(prepared)
+                if augmented.candidate_bracket is not None:
+                    return self._narrow_or_publish(prepared, augmented, cancellation=cancellation)
+                candidate_search = _candidate_search(prepared, augmented)
             if prepared.plan.gaps:
                 if candidate_search.candidates:
                     narrowing_result = self._run_s4_narrowing(
@@ -820,6 +856,203 @@ class SuccessorExecutionService:
                     error_code=_safe_execution_error_code(fallback_error),
                 )
             raise SuccessorExecutionError("internal_error") from error
+
+    def _run_coarse_fallback(
+        self,
+        prepared: SuccessorPreparedExecution,
+        augmented: SuccessorCoarseClassificationResult,
+        coarse_observations: list[SuccessorObservation],
+        anchor_observation: SuccessorObservation,
+        *,
+        cancellation: Callable[[], bool] | None,
+    ) -> SuccessorCoarseClassificationResult:
+        """Take a small deterministic probe set when the endpoint is ambiguous."""
+        fallback = _plan_coarse_fallback(prepared, augmented)
+        if not fallback.eligible:
+            _safe_log(
+                "phase7e.coarse_sampling_fallback",
+                stage="skipped",
+                fallback_invoked=False,
+                reason=fallback.reason,
+                planned_probe_count=0,
+                actual_probe_count=0,
+                extra_fast_present_hits=0,
+                extra_b4_invocations=0,
+                stop_reason=fallback.reason,
+            )
+            return augmented
+
+        reference_observation = fallback.reference_observation
+        endpoint_observation = fallback.endpoint_observation
+        if reference_observation is None or endpoint_observation is None:
+            return augmented
+        planned_times = fallback.probe_times
+        _safe_log(
+            "phase7e.coarse_sampling_fallback",
+            stage="started",
+            fallback_invoked=True,
+            planned_probe_count=len(planned_times),
+            planned_probe_times=tuple(_timestamp(item) for item in planned_times),
+            reference_time_utc=_timestamp(
+                reference_observation.frame_utc or reference_observation.requested_time_utc
+            ),
+            endpoint_time_utc=_timestamp(endpoint_observation.requested_time_utc),
+            max_probe_count=_COARSE_FALLBACK_MAX_PROBES,
+        )
+        known_requested = {item.requested_time_utc for item in coarse_observations}
+        known_frame_keys = {
+            (item.frame_sha256, item.frame_utc)
+            for item in augmented.observations
+            if item.frame_sha256 is not None and item.frame_utc is not None
+        }
+        actual_probe_times: list[datetime] = []
+        fast_present_hits = 0
+        b4_invocations = 0
+        stop_reason = "probe_bound_exhausted"
+        bracket_pair: tuple[str, str] | None = None
+
+        def log_cancelled() -> None:
+            _safe_log(
+                "phase7e.coarse_sampling_fallback",
+                stage="cancelled",
+                fallback_invoked=True,
+                planned_probe_count=len(planned_times),
+                actual_probe_count=len(actual_probe_times),
+                actual_probe_times=tuple(_timestamp(item) for item in actual_probe_times),
+                extra_fast_present_hits=fast_present_hits,
+                extra_b4_invocations=b4_invocations,
+                bracket_pair=bracket_pair,
+                stop_reason="cancelled",
+            )
+
+        for index, requested_time in enumerate(planned_times, 1):
+            if cancellation is not None and cancellation():
+                log_cancelled()
+                raise SuccessorClassificationCancelledError
+            if requested_time in known_requested:
+                _safe_log(
+                    "phase7e.coarse_sampling_probe",
+                    stage="skipped",
+                    requested_time_utc=_timestamp(requested_time),
+                    reason="duplicate_requested_time",
+                    route="reused_existing_observation",
+                )
+                continue
+            segment_id = _s4_segment_for_midpoint(prepared.plan, requested_time)
+            if segment_id is None:
+                _safe_log(
+                    "phase7e.coarse_sampling_probe",
+                    stage="skipped",
+                    requested_time_utc=_timestamp(requested_time),
+                    reason="coverage_gap",
+                    route="none",
+                )
+                stop_reason = "coverage_gap"
+                continue
+            target = CoarseTargetAssignment(
+                _COARSE_FALLBACK_SEQUENCE_BASE + index,
+                requested_time,
+                TargetAvailability.AVAILABLE,
+                segment_id,
+                None,
+            )
+            acquisition = self.acquisition.acquire_midpoint(prepared.plan, target)
+            if cancellation is not None and cancellation():
+                log_cancelled()
+                raise SuccessorClassificationCancelledError
+            acquisition_frame_time = acquisition.frame_utc
+            if (
+                acquisition.frame_sha256 is not None
+                and acquisition_frame_time is not None
+                and (acquisition.frame_sha256, acquisition_frame_time) in known_frame_keys
+            ):
+                _safe_log(
+                    "phase7e.coarse_sampling_probe",
+                    stage="skipped",
+                    requested_time_utc=_timestamp(requested_time),
+                    actual_frame_time_utc=_timestamp(acquisition_frame_time),
+                    frame_sha256=acquisition.frame_sha256,
+                    reason="duplicate_frame",
+                    route="reused_existing_frame",
+                )
+                known_requested.add(requested_time)
+                continue
+            try:
+                observation = self.classification.classify_target(
+                    prepared.plan,
+                    target,
+                    acquisition,
+                    prepared.authority,
+                    cancellation=cancellation,
+                )
+            except SuccessorClassificationCancelledError:
+                log_cancelled()
+                raise
+            if cancellation is not None and cancellation():
+                log_cancelled()
+                raise SuccessorClassificationCancelledError
+            actual_probe_times.append(observation.frame_utc or requested_time)
+            known_requested.add(requested_time)
+            coarse_observations.append(observation)
+            if observation.frame_sha256 is not None and observation.frame_utc is not None:
+                known_frame_keys.add((observation.frame_sha256, observation.frame_utc))
+            evidence = getattr(observation, "_search_evidence", None)
+            route = _coarse_probe_route(observation)
+            if route == "fast-PRESENT":
+                fast_present_hits += 1
+            elif route == "B4":
+                b4_invocations += 1
+            augmented = _with_anchor_observation(
+                prepared,
+                _coarse_snapshot(prepared, coarse_observations),
+                anchor_observation,
+            )
+            candidate_search = _candidate_search(prepared, augmented)
+            if augmented.candidate_bracket is not None:
+                bracket_pair = (
+                    augmented.candidate_bracket.present_observation_id,
+                    augmented.candidate_bracket.absent_observation_id,
+                )
+            elif candidate_search.candidates:
+                candidate = candidate_search.candidates[0]
+                bracket_pair = (candidate.anchor_observation_id, candidate.drop_observation_id)
+            _safe_log(
+                "phase7e.coarse_sampling_probe",
+                stage="completed",
+                requested_time_utc=_timestamp(requested_time),
+                actual_frame_time_utc=(
+                    None if observation.frame_utc is None else _timestamp(observation.frame_utc)
+                ),
+                frame_sha256=observation.frame_sha256,
+                state=observation.state.value,
+                reason_code=observation.reason_code,
+                route=route,
+                evidence_band=(None if evidence is None else evidence.band.value),
+                fast_present_hit=(False if evidence is None else evidence.fast_present_hit),
+                b4_invocation=route == "B4",
+                candidate_count=len(candidate_search.candidates),
+                bracket_pair=bracket_pair,
+                probe_index=index,
+            )
+            if augmented.candidate_bracket is not None:
+                stop_reason = "state_bracket"
+                break
+            if candidate_search.candidates:
+                stop_reason = "material_drop_candidate"
+                break
+        _safe_log(
+            "phase7e.coarse_sampling_fallback",
+            stage="completed",
+            fallback_invoked=True,
+            planned_probe_count=len(planned_times),
+            actual_probe_count=len(actual_probe_times),
+            actual_probe_times=tuple(_timestamp(item) for item in actual_probe_times),
+            extra_fast_present_hits=fast_present_hits,
+            extra_b4_invocations=b4_invocations,
+            bracket_pair=bracket_pair,
+            stop_reason=stop_reason,
+        )
+        return augmented
 
     def _run_s4_narrowing(
         self,
@@ -1179,7 +1412,7 @@ class SuccessorExecutionService:
             cancellation=cancellation,
         )
 
-    def _publish_terminal(  # noqa: C901
+    def _publish_terminal(
         self,
         prepared: SuccessorPreparedExecution,
         terminal: SuccessorTerminal,
@@ -1469,6 +1702,119 @@ def _candidate_search(
         seed_reference_time_utc=prepared.baseline_time_utc,
         seed_reference_observation_id="confirmed_reference",
     )
+
+
+def _plan_coarse_fallback(
+    prepared: SuccessorPreparedExecution,
+    augmented: SuccessorCoarseClassificationResult,
+) -> _CoarseFallbackPlan:
+    """Build a bounded temporal probe plan without changing S3/S4 policy."""
+    if augmented.candidate_bracket is not None:
+        return _CoarseFallbackPlan("existing_state_bracket")
+    if prepared.plan.gaps:
+        return _CoarseFallbackPlan("coverage_gap")
+    endpoint_candidates = tuple(
+        item
+        for item in augmented.observations
+        if item.requested_time_utc == prepared.plan.search_end_utc and item.frame_utc is not None
+    )
+    if not endpoint_candidates:
+        return _CoarseFallbackPlan("endpoint_missing")
+    endpoint = max(
+        endpoint_candidates,
+        key=lambda item: (item.frame_utc or item.requested_time_utc, item.observation_id),
+    )
+    endpoint_evidence = getattr(endpoint, "_search_evidence", None)
+    if (
+        endpoint.state is not SuccessorObservationState.INDETERMINATE
+        or endpoint_evidence is None
+        or endpoint_evidence.band
+        not in {SearchEvidenceBand.USABLE_AMBIGUOUS, SearchEvidenceBand.INSUFFICIENT}
+    ):
+        return _CoarseFallbackPlan("endpoint_not_ambiguous")
+    references: list[SuccessorObservation] = []
+    for item in augmented.observations:
+        evidence = getattr(item, "_search_evidence", None)
+        if (
+            item.frame_utc is not None
+            and item.frame_utc < endpoint.requested_time_utc
+            and evidence is not None
+            and evidence.band is SearchEvidenceBand.STRONG_REFERENCE
+        ):
+            references.append(item)
+    if not references:
+        return _CoarseFallbackPlan("reference_side_missing")
+    reference = max(
+        references,
+        key=lambda item: (item.frame_utc or item.requested_time_utc, item.observation_id),
+    )
+    left = reference.frame_utc or reference.requested_time_utc
+    right = endpoint.requested_time_utc
+    existing_times = tuple(item.requested_time_utc for item in augmented.observations)
+    probe_times = _coarse_fallback_probe_times(left, right, existing_times)
+    if not probe_times:
+        return _CoarseFallbackPlan("no_unexplored_interval", reference, endpoint)
+    return _CoarseFallbackPlan("eligible", reference, endpoint, probe_times)
+
+
+def _coarse_fallback_probe_times(
+    start_utc: datetime,
+    end_utc: datetime,
+    existing_times: tuple[datetime, ...],
+    *,
+    maximum_probes: int = _COARSE_FALLBACK_MAX_PROBES,
+) -> tuple[datetime, ...]:
+    """Return legal whole-second interior quartiles, excluding sampled times.
+
+    Raw subdivision points retain the reference boundary's precision.  A raw
+    fractional point is floored to the containing UTC second; only when that
+    second is not strictly after the lower boundary is the next second used.
+    This keeps ordinary whole-second scheduling unchanged while making
+    fractional-boundary probes legal ``CoarseTargetAssignment`` values.  A
+    point that collides with an existing or previously normalized probe is
+    skipped rather than shifted to an unnecessary neighboring second.
+    """
+    if maximum_probes <= 0 or start_utc.tzinfo is None or end_utc.tzinfo is None:
+        return ()
+    start_utc = start_utc.astimezone(timezone.utc)
+    end_utc = end_utc.astimezone(timezone.utc)
+    if end_utc <= start_utc:
+        return ()
+    span_seconds = int((end_utc - start_utc).total_seconds())
+    if span_seconds <= 1:
+        return ()
+    lower_bound = start_utc.replace(microsecond=0) + timedelta(seconds=1)
+    upper_bound = end_utc.replace(microsecond=0)
+    if end_utc.microsecond == 0:
+        upper_bound -= timedelta(seconds=1)
+    if lower_bound > upper_bound:
+        return ()
+    existing = {item.astimezone(timezone.utc) for item in existing_times if item.tzinfo is not None}
+    selected: list[datetime] = []
+    denominator = maximum_probes + 1
+    for index in range(1, maximum_probes + 1):
+        offset_seconds = (span_seconds * index) // denominator
+        raw_candidate = start_utc + timedelta(seconds=offset_seconds)
+        candidate = raw_candidate.replace(microsecond=0)
+        if candidate < lower_bound:
+            candidate += timedelta(seconds=1)
+        if candidate > upper_bound or candidate < lower_bound:
+            continue
+        if candidate in existing or candidate in selected:
+            continue
+        if selected and candidate <= selected[-1]:
+            continue
+        selected.append(candidate)
+    return tuple(selected)
+
+
+def _coarse_probe_route(observation: SuccessorObservation) -> str:
+    evidence = getattr(observation, "_search_evidence", None)
+    if evidence is not None and evidence.fast_present_hit:
+        return "fast-PRESENT"
+    if observation.classifier_stage in {"completed", "timeout", "failed"}:
+        return "B4"
+    return "observation"
 
 
 def _s4_cancellation_observed(

@@ -52,6 +52,7 @@ from vigi_vision.recording_search_successor_classification import (
     SuccessorClassifierResult,
     SuccessorCoarseClassificationService,
     SuccessorObservation,
+    SuccessorObservationState,
 )
 from vigi_vision.recording_search_successor_evidence import (
     SuccessorEvidenceError,
@@ -65,6 +66,10 @@ from vigi_vision.recording_search_successor_execution import (
     SuccessorTerminalRepository,
 )
 from vigi_vision.recording_search_successor_narrowing import SuccessorBinaryNarrowingService
+from vigi_vision.recording_search_successor_search_evidence import (
+    SearchEvidence,
+    SearchEvidenceBand,
+)
 from vigi_vision.reference_frame_decoder import ReferenceFrameDecodeRequest
 from vigi_vision.reference_frame_models import (
     DecodedFrameEvidence,
@@ -192,13 +197,107 @@ class _ClassificationProxy:
         return self.delegate.classify_coarse_target(plan, target, *args, **kwargs)  # type: ignore[arg-type]
 
 
+class _CoarseFallbackEvidenceProxy:
+    """Attach deterministic S3 bands to production-shaped observations."""
+
+    def __init__(
+        self,
+        delegate: SuccessorCoarseClassificationService,
+        *,
+        material_after: datetime | None = ANCHOR + timedelta(minutes=6),
+        probes_present: bool = False,
+        cancel_after_first_probe: bool = False,
+    ) -> None:
+        self.delegate = delegate
+        self.probe_times: list[datetime] = []
+        self.material_after = material_after
+        self.probes_present = probes_present
+        self.cancel_after_first_probe = cancel_after_first_probe
+        self.cancel_requested = False
+
+    def prepare_reference(self, *args: object, **kwargs: object) -> object:
+        return self.delegate.prepare_reference(*args, **kwargs)  # type: ignore[arg-type]
+
+    def classify_anchor_target(self, *args: object, **kwargs: object) -> object:
+        observation = self.delegate.classify_anchor_target(*args, **kwargs)  # type: ignore[arg-type]
+        return replace(
+            observation,
+            state=SuccessorObservationState.PRESENT,
+            reason_code=None,
+            _search_evidence=SearchEvidence(
+                SearchEvidenceBand.STRONG_REFERENCE,
+                "reference_support_retained",
+                scene_stable=True,
+                fast_present_hit=True,
+            ),
+        )
+
+    def classify_coarse_target(
+        self, plan: object, target: object, *args: object, **kwargs: object
+    ) -> object:
+        observation = self.delegate.classify_coarse_target(  # type: ignore[arg-type]
+            plan, target, *args, **kwargs
+        )
+        return replace(
+            observation,
+            _search_evidence=SearchEvidence(
+                SearchEvidenceBand.USABLE_AMBIGUOUS,
+                "scene_instability_suppressed_direction",
+                scene_stable=False,
+                scene_discontinuity=True,
+                scene_only_suppressed=True,
+            ),
+        )
+
+    def classify_target(
+        self, plan: object, target: object, *args: object, **kwargs: object
+    ) -> object:
+        observation = self.delegate.classify_target(plan, target, *args, **kwargs)  # type: ignore[arg-type]
+        requested_time = observation.requested_time_utc  # type: ignore[union-attr]
+        self.probe_times.append(requested_time)
+        if self.probes_present:
+            evidence = SearchEvidence(
+                SearchEvidenceBand.STRONG_REFERENCE,
+                "reference_support_retained",
+                scene_stable=True,
+                fast_present_hit=True,
+            )
+            observation = replace(
+                observation,
+                state=SuccessorObservationState.PRESENT,
+                reason_code=None,
+            )
+        elif self.material_after is not None and requested_time >= self.material_after:
+            evidence = SearchEvidence(
+                SearchEvidenceBand.MATERIAL_DROP,
+                "object_reference_support_drop",
+                scene_stable=True,
+                object_degradation=True,
+            )
+        else:
+            evidence = SearchEvidence(
+                SearchEvidenceBand.USABLE_AMBIGUOUS,
+                "usable_reference_evidence_not_directional",
+                scene_stable=True,
+            )
+        if self.cancel_after_first_probe and len(self.probe_times) == 1:
+            self.cancel_requested = True
+        return replace(observation, _search_evidence=evidence)
+
+
 class _FrameDecoder:
+    def __init__(self, fractional_offset_seconds: float = 0.0) -> None:
+        self.fractional_offset_seconds = fractional_offset_seconds
+
     def decode(self, request: ReferenceFrameDecodeRequest) -> DecodedFrameEvidence:
         payload = request.clip_path.read_bytes()
         request.output_path.write_bytes(payload)
+        target_offset_seconds = request.target_offset_seconds
+        if target_offset_seconds > 0:
+            target_offset_seconds += self.fractional_offset_seconds
         return DecodedFrameEvidence(
             request.output_path,
-            request.target_offset_seconds,
+            target_offset_seconds,
             4,
             4,
             TimingPrecisionStatus.MEASURED_CLIP_RELATIVE,
@@ -383,6 +482,38 @@ def _service(
     )
 
 
+def _coarse_fallback_service(
+    tmp_path: Path,
+    *,
+    fractional_frame_offset_seconds: float = 0.0,
+    **proxy_kwargs: object,
+) -> tuple[SuccessorExecutionService, _CoarseFallbackEvidenceProxy]:
+    segment = _segment(ANCHOR + timedelta(minutes=30, seconds=1))
+    planner = _Planner(segment)
+    acquisition = SuccessorTargetAcquisitionService(
+        planner,
+        _Extractor(tmp_path, ANCHOR + timedelta(minutes=30)),
+        _FrameDecoder(fractional_frame_offset_seconds),
+        temporary_directory=tmp_path / "temporary",
+    )
+    classification = SuccessorCoarseClassificationService(
+        _IndeterminateClassifier(),
+        _MediaDecoder(),
+    )
+    proxy = _CoarseFallbackEvidenceProxy(classification, **proxy_kwargs)
+    return (
+        SuccessorExecutionService(
+            SuccessorPlanService(planner),
+            acquisition,
+            proxy,  # type: ignore[arg-type]
+            SuccessorBinaryNarrowingService(acquisition, classification),
+            _MediaDecoder(),
+            SuccessorTerminalRepository(tmp_path / "successor"),
+        ),
+        proxy,
+    )
+
+
 def create_successor_browser_uvicorn_app() -> FastAPI:
     """Build a real-Uvicorn successor app with only deterministic local doubles."""
     root = Path(os.environ["VIGI_SUCCESSOR_BROWSER_ROOT"])
@@ -504,6 +635,227 @@ def test_successor_complete_present_publishes_not_found(tmp_path: Path) -> None:
     result = service.execute(prepared)
     assert result.status == "NOT_FOUND"
     assert result.reason_code == "complete_present_coverage"
+
+
+def test_ambiguous_endpoint_uses_bounded_coarse_fallback_and_forms_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, proxy = _coarse_fallback_service(tmp_path)
+    confirmed = _confirmed(tmp_path)
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:32:32",
+        run_id="search-run-coarsefallback000000000000000000",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    candidate_results: list[SuccessorCandidateFormationResult] = []
+    original_candidate_search = execution_module._candidate_search
+
+    def capture_candidate_search(
+        prepared_execution: SuccessorPreparedExecution,
+        coarse: object,
+    ) -> SuccessorCandidateFormationResult:
+        result = original_candidate_search(prepared_execution, coarse)  # type: ignore[arg-type]
+        candidate_results.append(result)
+        return result
+
+    monkeypatch.setattr(execution_module, "_candidate_search", capture_candidate_search)
+    narrowing_inputs: list[SuccessorCandidateFormationResult] = []
+    original_run_s4 = SuccessorExecutionService._run_s4_narrowing
+
+    def capture_s4_narrowing(
+        execution: SuccessorExecutionService,
+        prepared_execution: SuccessorPreparedExecution,
+        coarse: object,
+        candidate_search: SuccessorCandidateFormationResult,
+        *,
+        cancellation: object,
+    ) -> object:
+        narrowing_inputs.append(candidate_search)
+        return original_run_s4(
+            execution,
+            prepared_execution,
+            coarse,  # type: ignore[arg-type]
+            candidate_search,
+            cancellation=cancellation,  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(SuccessorExecutionService, "_run_s4_narrowing", capture_s4_narrowing)
+
+    result = service.execute(prepared)
+
+    assert result.status == "INCONCLUSIVE"
+    assert result.reason_code == "indeterminate_observation"
+    assert proxy.probe_times == [
+        ANCHOR + timedelta(minutes=3),
+        ANCHOR + timedelta(minutes=6),
+    ]
+    assert any(item.candidates for item in candidate_results)
+    assert any(item.candidates for item in narrowing_inputs)
+    requested_times = tuple(item["requested_time_utc"] for item in result.coarse_observations)
+    assert "2026-09-04T05:20:32Z" in requested_times
+    assert "2026-09-04T05:23:32Z" in requested_times
+
+
+def test_fractional_reference_frame_execution_normalizes_coarse_assignments(
+    tmp_path: Path,
+) -> None:
+    service, proxy = _coarse_fallback_service(
+        tmp_path,
+        fractional_frame_offset_seconds=-0.25,
+        material_after=None,
+    )
+    prepared = service.prepare(
+        _confirmed(tmp_path),
+        search_end_time_text="2026-09-04T14:32:32",
+        run_id="search-run-coarsefractional000000000000000",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+
+    result = service.execute(prepared)
+
+    assert result.status == "INCONCLUSIVE"
+    assert result.status != "FAILED"
+    assert len(proxy.probe_times) == execution_module._COARSE_FALLBACK_MAX_PROBES
+    assert all(item.microsecond == 0 for item in proxy.probe_times)
+    assert proxy.probe_times == sorted(proxy.probe_times)
+    assert len(proxy.probe_times) == len(set(proxy.probe_times))
+
+
+def test_ambiguous_endpoint_with_only_ambiguous_probes_is_bounded_and_inconclusive(
+    tmp_path: Path,
+) -> None:
+    service, proxy = _coarse_fallback_service(tmp_path, material_after=None)
+    prepared = service.prepare(
+        _confirmed(tmp_path),
+        search_end_time_text="2026-09-04T14:32:32",
+        run_id="search-run-coarseambiguous00000000000000000",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+
+    result = service.execute(prepared)
+
+    assert result.status == "INCONCLUSIVE"
+    assert len(proxy.probe_times) == 4
+    assert len(proxy.probe_times) <= execution_module._COARSE_FALLBACK_MAX_PROBES
+
+
+def test_ambiguous_endpoint_with_present_probes_does_not_form_candidate(
+    tmp_path: Path,
+) -> None:
+    service, proxy = _coarse_fallback_service(tmp_path, probes_present=True)
+    prepared = service.prepare(
+        _confirmed(tmp_path),
+        search_end_time_text="2026-09-04T14:32:32",
+        run_id="search-run-coarsepresent00000000000000000",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+
+    result = service.execute(prepared)
+
+    assert result.status == "INCONCLUSIVE"
+    assert len(proxy.probe_times) == execution_module._COARSE_FALLBACK_MAX_PROBES
+
+
+def test_coarse_fallback_cancellation_stops_after_current_probe_and_publishes_once(
+    tmp_path: Path,
+) -> None:
+    service, proxy = _coarse_fallback_service(tmp_path, cancel_after_first_probe=True)
+    confirmed = _confirmed(tmp_path)
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:32:32",
+        run_id="search-run-coarsecancel000000000000000000",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    published: list[SuccessorTerminal] = []
+    original_publish = service.publisher.publish_terminal
+
+    def publish_terminal(terminal: SuccessorTerminal) -> SuccessorTerminal:
+        published.append(terminal)
+        return original_publish(terminal)
+
+    service.publisher.publish_terminal = publish_terminal  # type: ignore[method-assign]
+
+    result = service.execute(prepared, cancellation=lambda: proxy.cancel_requested)
+
+    assert result.status == "INTERRUPTED"
+    assert result.reason_code == "cancelled"
+    assert len(proxy.probe_times) == 1
+    assert len(published) == 1
+
+
+def test_coarse_fallback_probe_times_are_bounded_and_deduplicate_existing_observations() -> None:
+    start = ANCHOR
+    end = ANCHOR + timedelta(minutes=20)
+    expected = execution_module._coarse_fallback_probe_times(start, end, ())
+    deduplicated = execution_module._coarse_fallback_probe_times(
+        start,
+        end,
+        (expected[0], expected[-1]),
+    )
+
+    assert len(expected) == execution_module._COARSE_FALLBACK_MAX_PROBES
+    assert len(deduplicated) == execution_module._COARSE_FALLBACK_MAX_PROBES - 2
+    assert expected[0] not in deduplicated
+    assert expected[-1] not in deduplicated
+
+
+def test_coarse_fallback_probe_times_normalize_fractional_boundaries() -> None:
+    start = datetime(2026, 9, 21, 6, 9, 0, 250_000, tzinfo=UTC)
+    end = datetime(2026, 9, 21, 6, 15, tzinfo=UTC)
+
+    probes = execution_module._coarse_fallback_probe_times(start, end, ())
+
+    assert probes == (
+        datetime(2026, 9, 21, 6, 10, 11, tzinfo=UTC),
+        datetime(2026, 9, 21, 6, 11, 23, tzinfo=UTC),
+        datetime(2026, 9, 21, 6, 12, 35, tzinfo=UTC),
+        datetime(2026, 9, 21, 6, 13, 47, tzinfo=UTC),
+    )
+    assert all(item.microsecond == 0 for item in probes)
+    assert all(start < item < end for item in probes)
+    assert probes == tuple(sorted(probes))
+    assert len(probes) == len(set(probes)) <= execution_module._COARSE_FALLBACK_MAX_PROBES
+
+    fractional_end = end + timedelta(microseconds=750_000)
+    fractional_end_probes = execution_module._coarse_fallback_probe_times(
+        start,
+        fractional_end,
+        (),
+    )
+    assert all(item.microsecond == 0 for item in fractional_end_probes)
+    assert all(start < item < fractional_end for item in fractional_end_probes)
+    assert fractional_end_probes == tuple(sorted(set(fractional_end_probes)))
+
+
+def test_coarse_fallback_probe_times_collapse_narrow_fractional_interval() -> None:
+    start = datetime(2026, 9, 21, 6, 9, 0, 900_000, tzinfo=UTC)
+    end = datetime(2026, 9, 21, 6, 9, 4, 100_000, tzinfo=UTC)
+
+    probes = execution_module._coarse_fallback_probe_times(start, end, ())
+
+    assert probes == (
+        datetime(2026, 9, 21, 6, 9, 1, tzinfo=UTC),
+        datetime(2026, 9, 21, 6, 9, 2, tzinfo=UTC),
+    )
+    assert all(start < item < end for item in probes)
+    assert len(probes) < execution_module._COARSE_FALLBACK_MAX_PROBES
+    assert len(probes) == len(set(probes))
+
+
+def test_coarse_fallback_probe_times_preserve_whole_second_schedule() -> None:
+    start = ANCHOR
+    end = ANCHOR + timedelta(minutes=20)
+
+    probes = execution_module._coarse_fallback_probe_times(start, end, ())
+
+    assert probes == (
+        ANCHOR + timedelta(minutes=4),
+        ANCHOR + timedelta(minutes=8),
+        ANCHOR + timedelta(minutes=12),
+        ANCHOR + timedelta(minutes=16),
+    )
 
 
 def test_s4_narrowing_cancellation_publishes_interrupted_once(
