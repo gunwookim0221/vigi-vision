@@ -79,6 +79,11 @@ from vigi_vision.recording_search_successor_narrowing import (
     SuccessorBinaryNarrowingService,
     SuccessorNarrowingCompletion,
 )
+from vigi_vision.recording_search_successor_verification import (
+    CandidateVerificationCompletion,
+    CandidateVerificationReport,
+    verify_disappearance_candidates,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -593,6 +598,14 @@ class SuccessorExecutionService:
                     )
                     if _s4_cancellation_observed(narrowing_result, cancellation):
                         return self._publish_interrupted(prepared)
+                    verification = self._run_s5_verification(
+                        augmented,
+                        candidate_search,
+                        narrowing_result,
+                        cancellation=cancellation,
+                    )
+                    if _s5_cancellation_observed(verification, cancellation):
+                        return self._publish_interrupted(prepared)
                 return self._publish_inconclusive(prepared, "incomplete_coverage", augmented)
             if candidate_search.candidates:
                 narrowing_result = self._run_s4_narrowing(
@@ -602,6 +615,14 @@ class SuccessorExecutionService:
                     cancellation=cancellation,
                 )
                 if _s4_cancellation_observed(narrowing_result, cancellation):
+                    return self._publish_interrupted(prepared)
+                verification = self._run_s5_verification(
+                    augmented,
+                    candidate_search,
+                    narrowing_result,
+                    cancellation=cancellation,
+                )
+                if _s5_cancellation_observed(verification, cancellation):
                     return self._publish_interrupted(prepared)
                 # Candidate-only evidence must not enter NOT_FOUND or FOUND;
                 # retain the existing terminal schema while preserving the
@@ -741,6 +762,60 @@ class SuccessorExecutionService:
             coarse_observation_count=len(coarse.observations),
         )
         return result
+
+    def _run_s5_verification(
+        self,
+        coarse: SuccessorCoarseClassificationResult,
+        candidate_search: SuccessorCandidateFormationResult,
+        narrowing_result: EvidenceNarrowingResult | None,
+        *,
+        cancellation: Callable[[], bool] | None,
+    ) -> CandidateVerificationReport:
+        """Verify all retained candidates without changing terminal semantics."""
+        samples: list[SuccessorObservation | SuccessorSearchSample] = list(coarse.observations)
+        if narrowing_result is not None:
+            samples.extend(narrowing_result.midpoint_samples)
+        nonmonotonic_ids = ()
+        coverage_incomplete_ids = ()
+        if narrowing_result is not None:
+            if narrowing_result.completion is EvidenceNarrowingCompletion.NONMONOTONIC:
+                nonmonotonic_ids = (narrowing_result.candidate_id,)
+            if narrowing_result.coverage_incomplete:
+                coverage_incomplete_ids = (narrowing_result.candidate_id,)
+        report = verify_disappearance_candidates(
+            candidate_search.candidates,
+            samples,
+            overflowed=candidate_search.overflowed,
+            overflow_count=candidate_search.overflow_count,
+            nonmonotonic_candidate_ids=nonmonotonic_ids,
+            coverage_incomplete_candidate_ids=coverage_incomplete_ids,
+            should_cancel=cancellation,
+        )
+        _safe_log(
+            "phase7e.s5_candidate_verification",
+            stage="verified",
+            completion=report.completion.value,
+            candidate_count=report.metrics.candidate_count,
+            candidate_evaluations=report.metrics.candidate_evaluations,
+            verified_count=report.verified_count,
+            partial_count=sum(item.status.value == "PARTIAL" for item in report.results),
+            unresolved_count=report.unresolved_count,
+            overflowed=report.metrics.overflowed,
+            overflow_count=report.metrics.overflow_count,
+            verification_duration_ms=round(report.metrics.verification_duration_ms, 3),
+            actual_frame_count=report.metrics.actual_frame_count,
+            requested_sample_count=report.metrics.requested_sample_count,
+            reused_v3_invocations=report.metrics.reused_v3_invocations,
+            additional_v3_invocations=report.metrics.additional_v3_invocations,
+            segmentation_calls=report.metrics.segmentation_calls,
+            alignment_invocations=report.metrics.alignment_invocations,
+            alignment_comparisons=report.metrics.alignment_comparisons,
+            replacement_evidence_count=report.metrics.replacement_evidence_count,
+            occlusion_evidence_count=report.metrics.occlusion_evidence_count,
+            recovery_candidate_count=report.metrics.recovery_candidate_count,
+            gap_candidate_count=report.metrics.gap_candidate_count,
+        )
+        return report
 
     def publish_safety_terminal(
         self,
@@ -1156,6 +1231,15 @@ def _s4_cancellation_observed(
     cancellation: Callable[[], bool] | None,
 ) -> bool:
     if result is not None and result.completion is EvidenceNarrowingCompletion.CANCELLED:
+        return True
+    return cancellation is not None and cancellation()
+
+
+def _s5_cancellation_observed(
+    result: CandidateVerificationReport,
+    cancellation: Callable[[], bool] | None,
+) -> bool:
+    if result.completion is CandidateVerificationCompletion.CANCELLED:
         return True
     return cancellation is not None and cancellation()
 

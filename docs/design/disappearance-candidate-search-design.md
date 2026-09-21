@@ -5,8 +5,9 @@
 **Status: the architecture was approved at Initial Review. Phase S3 has a
 local shadow-only implementation and preserved-data measurement. Phase S4's
 internal, unpublished candidate-formation/narrowing implementation and its
-cancellation lifecycle correction are approved. Persistence and public
-behavior remain unimplemented.**
+cancellation lifecycle correction are approved. Phase S5 now adds internal
+candidate-local verification and measured slow-path accounting; persistence and
+public behavior remain unimplemented.**
 
 The implemented Phase 7 and Schema 8 recording-search contracts remain
 authoritative in
@@ -92,7 +93,9 @@ Repository inspection establishes these current boundaries:
 The midpoint selection, actual-frame ordering, gap checks, cancellation,
 iteration limit, no-progress handling, acquisition service, and final v3
 classifier remain useful. The state-only bracket predicate is the part that
-cannot be reused as-is.
+cannot be reused as-is. S5 reuses the actual observations and S4 midpoint
+samples already produced by those boundaries rather than inventing a second
+classifier state machine.
 
 ## 3. Target architecture
 
@@ -301,6 +304,48 @@ path. A candidate-only interval that remains visually indeterminate must not be
 adapted into the current `SuccessorBinaryNarrowingResult`, whose type truthfully
 requires those states.
 
+### 7.1 S5 candidate-local verification contract
+
+The internal S5 verifier is implemented in
+`recording_search_successor_verification.py` and is called only after S4 has
+formed candidates. It consumes coarse observations plus any actual-frame S4
+midpoint samples, merges duplicate observation IDs, and orders them by the
+decoded frame timestamp. Different observations are merged only when their
+frame and run/plan, acquisition, authority, ROI, policy, ordinal, digest, and
+classifier-result provenance agree; timestamp equality alone is never an
+identity proof. Runtime verification never treats a requested timestamp as an
+actual decoded-frame timestamp. It
+returns a process-local report with one of:
+
+- `VERIFIED`: only a qualified candidate with an observed `PRESENT` anchor and
+  `ABSENT` drop whose actual decoded frame times are present, strictly ordered,
+  and bound inside the candidate interval, with no recovery or
+  operational/gap caveat;
+- `PARTIAL`: useful directional evidence exists, but the candidate is
+  provisional, recovered, ambiguous, or otherwise not safe to call a
+  disappearance;
+- `UNRESOLVED`: coverage, operational, or evidence limitations prevent a safe
+  conclusion; and
+- `CANCELLED`: lifecycle cancellation occurred before the report completed.
+
+These labels are internal verification dispositions, not classifier states and
+not terminal states. Missing, equal, reversed, or out-of-interval actual frame
+times are `UNRESOLVED`, not `VERIFIED`. A provisional tail never becomes `VERIFIED` merely
+because its two coarse endpoints happen to be visually different. Recovery
+remains ambiguous, gap/nonmonotonic intervals are retained or widened, and
+operational failures never become `ABSENT`. Multiple retained candidates are
+processed in chronological order; overflow is reported as an explicit
+measurement fact rather than silently discarded.
+
+S5 deliberately reuses v3 results already present on the selected observations
+and S4 midpoint samples. It therefore adds zero redundant v3 invocations in
+the current path while measuring the reused precise work, actual frame count,
+alignment work, replacement/occlusion evidence, and verification duration. A
+future implementation may add bounded new v3 calls only when replay evidence
+shows that they change the candidate disposition. Cancellation returns through
+the existing `INTERRUPTED` publication path, which remains idempotent and
+exactly-once; S5 never publishes an internal report.
+
 ## 8. Role of the approved fast PRESENT path
 
 The corrected S2-1 fast path is preserved without threshold relaxation.
@@ -358,6 +403,10 @@ the current v3 path remains intact. S5 may skip v3 on noncandidate coarse
 samples only after S3/S4 evidence and a reviewed durable-contract plan prove
 that search behavior and strict reopen remain trustworthy.
 
+The current S5 implementation does not yet skip the existing coarse v3 path;
+it records that work as compatibility behavior and avoids a speculative
+runtime cutover.
+
 ## 11. Failure and safety behavior
 
 | Condition | Search-evidence action | Classification/terminal constraint |
@@ -397,6 +446,28 @@ The expected work is separated by stage:
 Decoding remains a real cost and is not described as avoided. Narrowing replay
 is bounded by the reviewed policy. Performance is secondary to candidate
 recall, and this design invents no latency or invocation-rate target.
+
+S5's preserved replay harness (`tools/measure_candidate_verification_s5.py`)
+reports actual local replay v3 invocations, candidate-local reused v3 work,
+candidate segmentation/model-predictor calls, alignment invocation and
+comparison counts, and verifier duration. These are measured observations, not
+acceptance targets.
+
+The current component disposition is:
+
+| Component | S5 disposition | Evidence basis |
+| --- | --- | --- |
+| Existing coarse v3 invocation | `COMPATIBILITY_ONLY` | Kept unchanged while the candidate path is internal |
+| Candidate-local v3 re-invocation | `REDUNDANT_IN_S5_PATH` | S4/coarse actual observations are reused |
+| Candidate segmentation/model inference | `REQUIRED_ONLY_FOR_SPECIFIC_CASES` | Needed when an unresolved candidate gains a new decisive frame |
+| Alignment search/comparisons | `REQUIRED_ONLY_FOR_SPECIFIC_CASES` | Relevant to bounded movement/replacement cases |
+| Replacement detection | `REQUIRED_ONLY_FOR_SPECIFIC_CASES` | Cannot be inferred from a stable support drop |
+| Occlusion logic | `REQUIRED_ONLY_FOR_SPECIFIC_CASES` | Recovery/temporary obstruction remains ambiguous |
+| Wider-scene normalization and support gates | `REQUIRED` | S3 safety prerequisite for directional evidence |
+| Candidate-only persistence/terminal/API/UI | `NEEDS_MORE_DATA` | Requires fresh labeled S6 evidence and a later contract review |
+
+No component is removed from the existing classifier based on the preserved
+corpus alone.
 
 ## 13. Compatibility, evidence, and rollout boundary
 
@@ -471,14 +542,26 @@ remain S6 work.
 
 ### S5 — precise verification and slow-path rationalization
 
-- apply v3 primarily to candidate endpoints, nearby frames, and ambiguous
-  narrowing points;
-- measure which segmentation, alignment, replacement, occlusion, and scene
-  checks change decisions;
-- remove no existing mechanism without comparative evidence;
-- decide the minimal versioned persistence/terminal/Phase 8 change for a
-  candidate that remains visually indeterminate; and
-- retain current behavior until that contract receives approval.
+S5 is implemented as an internal/process-local verification stage:
+
+- it verifies every retained qualified, provisional, recovery, gap,
+  nonmonotonic, multiple, and overflow candidate without changing the public
+  terminal result;
+- it reuses actual decoded-frame observations and S4 midpoint evidence, keeps
+  existing classifier semantics authoritative, and preserves unresolved
+  candidates instead of converting them to `ABSENT`/`FOUND`;
+- it routes cancellation through the existing exactly-once `INTERRUPTED`
+  lifecycle;
+- it records actual-frame ordering and bounded per-candidate dispositions;
+- `tools/measure_candidate_verification_s5.py` measures preserved replay v3,
+  segmentation, model/predictor, alignment, and verification cost; and
+- it classifies slow components using measured evidence. No speculative
+  mechanism removal, schema change, public candidate projection, or Phase 8
+  eligibility change is included.
+
+The current S4 nonmonotonic rule remains authoritative: S4 stops at the
+enclosing interval, and S5 reports the resulting candidate as partial or
+unresolved rather than reordering or tightening it.
 
 ### S6 — fresh real-run/NVR end-to-end validation
 
@@ -521,6 +604,25 @@ Secondary measures are:
 - decode, cheap-signal, narrowing, verification, and total search time; and
 - corrected fast-PRESENT rate.
 
+S5 additionally records candidate-local reused v3 invocations, actual local
+segmentation/model calls, alignment invocation/comparison counts, replacement
+and occlusion evidence, actual selected-frame counts, and verification
+duration. The preserved corpus has no independent disappearance labels, so
+these numbers are cost/distribution measurements only.
+
+The current bounded preserved replay (`limit=50`) covered 17 search groups and
+formed two qualified candidates. Both reused their preserved `PRESENT` to
+`ABSENT` endpoint states and were internally `VERIFIED`; the verifier added no
+v3, segmentation, predictor, or alignment calls and took 0.176 ms total
+(0.088 ms mean in the latest run). This is a compatibility/reuse measurement, not a production
+latency or accuracy claim; the rows contain no independent event-window labels
+and do not carry decoded-frame UTC or full runtime provenance, so the tool uses
+requested timestamps as a documented compatibility fallback; this does not
+validate the runtime actual-frame VERIFIED contract. Runtime S5 observations
+still preserve actual decoded frame timestamps. Of the 50 rows, 49 carried a preserved v3 state and zero
+fresh local v3 replays were needed by this run; that distinction is why the
+report exposes both counters.
+
 Fresh-run ground truth must be created independently of the search result. For
 each validation run, a human reviewer records the last clearly reference-like
 frame, the first clearly disappeared or materially changed frame, and relevant
@@ -537,8 +639,9 @@ candidate recall.
 
 ## 16. Open design questions for later phases
 
-The approved architecture now exercises S3 in shadow mode and S4 in an
-unpublished internal path. Later phase reviews must decide or constrain:
+The approved architecture now exercises S3 in shadow mode, S4 in an
+unpublished candidate path, and S5 in an unpublished verification path. Later
+phase reviews must decide or constrain:
 
 1. whether the proposed conjunction for material reference drop is the right
    starting policy family before S3 selects numeric deltas;
@@ -548,7 +651,9 @@ unpublished internal path. Later phase reviews must decide or constrain:
    versioned evidence/identity shape required for strict reopen;
 4. whether candidate-only `INCONCLUSIVE` results should become eligible for a
    review clip through a future Phase 8 contract, without weakening FOUND; and
-5. the exact production cutover gate after shadow S3 and pure S4 validation.
+5. which candidate-local segmentation/alignment/replacement/occlusion checks
+   materially change dispositions on fresh labeled runs; and
+6. the exact production cutover gate after S3-S5 validation.
 
 These are review decisions, not permission to implement schema, API, terminal,
 or UI changes in S3.
@@ -559,6 +664,8 @@ The S3 Initial Review was approved before its implementation and push. S4's
 Initial Review approved its candidate/narrowing semantics after one required
 cancellation correction; Follow-up Review approved that lifecycle correction
 and the complete unpublished S4 implementation. No further S4 review is
-required unless a new material regression appears. The current public/terminal
-contracts remain unchanged, and S5 or any durable/public candidate boundary
-requires its own phase-specific review.
+required unless a new material regression appears. S5 is implemented and
+tested as an internal/process-local stage, but an Initial Review is recommended
+before any S5 production cutover or new v3 invocation policy. The current
+public/terminal contracts remain unchanged, and any durable/public candidate
+boundary requires its own phase-specific review.

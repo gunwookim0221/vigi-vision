@@ -324,14 +324,16 @@ recall takes priority over exact classification of every coarse frame, fast
 PRESENT remains unchanged, fast ABSENT is not a required milestone, and v3 is
 planned as precise verification around candidate intervals. The approved S4
 implementation now forms and narrows unpublished process-local candidates while
-the current Schema 8 persistence and public contracts remain authoritative;
-S5-S7 require their own reviewed implementation work.
+the current Schema 8 persistence and public contracts remain authoritative.
+S5 now adds unpublished candidate-local verification and measured slow-path
+accounting; S6-S7 require their own reviewed implementation work.
 Search admission now uses the same effective start in the browser and backend:
 the later of the investigation anchor and selected baseline time; minute-level
 native `datetime-local` search-end values are accepted as whole seconds.
 The existing successor/browser chain still requires its final human real-NVR
-acceptance. S3 shadow evidence and S4 internal candidate narrowing are
-implemented and approved; S5-S7 remain future work.
+acceptance. S3 shadow evidence, S4 internal candidate narrowing, and S5
+internal candidate-local verification are implemented and approved; S6-S7
+remain future work.
 Correction B adds a bounded Windows-spawn process boundary around production
 Phase 7E B4 classification; timeout/cancellation terminate and reap the child,
 and late output cannot become evidence. Valid results allow a bounded two-second
@@ -400,9 +402,10 @@ capability.
    contract separately from `PRESENT`/`ABSENT`/`INDETERMINATE` in shadow mode;
    S4 now forms and internally narrows conservative candidate intervals even
    when useful observations are indeterminate, with explicit provisional-tail,
-   recovery, gap, nonmonotonic, and overflow handling. S5 reserves
-   segmentation, alignment, replacement, occlusion, and other v3 work
-   primarily for precise candidate verification; S6 performs fresh manually
+   recovery, gap, nonmonotonic, and overflow handling. S5 now applies precise
+   internal candidate verification and measures segmentation, alignment,
+   replacement, occlusion, and other slow-path work without public cutover;
+   S6 performs fresh manually
    labeled real-NVR validation centered on event containment and complete
    misses; and S7 performs reviewed evidence/review-media integration and
    closure. Do not loosen the approved fast-PRESENT gate or make fast ABSENT a

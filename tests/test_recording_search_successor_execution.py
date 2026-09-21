@@ -43,6 +43,7 @@ from vigi_vision.recording_search_b3_media import DecodedMedia
 from vigi_vision.recording_search_successor import SuccessorPlanService
 from vigi_vision.recording_search_successor_acquisition import SuccessorTargetAcquisitionService
 from vigi_vision.recording_search_successor_candidate_search import (
+    EvidenceNarrowingCompletion,
     EvidenceNarrowingResult,
     SuccessorCandidateFormationResult,
     SuccessorCandidateInterval,
@@ -529,6 +530,96 @@ def test_s4_narrowing_cancellation_publishes_interrupted_once(
     assert result.status != "INCONCLUSIVE"
     assert result.status != "FOUND"
     assert result.reason_code != "incomplete_coverage"
+    assert len(published) == 1
+
+
+def test_s5_verification_cancellation_publishes_interrupted_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = _service(tmp_path, ANCHOR + timedelta(hours=2))
+    confirmed = _confirmed(tmp_path)
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-s5cancel000000000000000000000000",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    candidate = SuccessorCandidateInterval(
+        "successor-candidate-v1-" + "b" * 64,
+        "anchor",
+        "drop",
+        ANCHOR,
+        ANCHOR + timedelta(seconds=60),
+        qualified=True,
+        provisional=False,
+    )
+    candidate_search = SuccessorCandidateFormationResult((candidate,))
+
+    def fake_candidate_search(
+        *_args: object, **_kwargs: object
+    ) -> SuccessorCandidateFormationResult:
+        return candidate_search
+
+    original_with_anchor = execution_module._with_anchor_observation
+
+    def without_bracket(
+        prepared_execution: object, coarse: object, anchor_observation: object
+    ) -> object:
+        return replace(
+            original_with_anchor(
+                prepared_execution, coarse, anchor_observation  # type: ignore[arg-type]
+            ),
+            candidate_bracket=None,
+        )
+
+    phase = "before_s5"
+    cancellation_checks = 0
+
+    def cancellation() -> bool:
+        nonlocal cancellation_checks
+        if phase != "s5":
+            return False
+        cancellation_checks += 1
+        return cancellation_checks >= 2
+
+    def fake_s4_narrowing(
+        _service: object,
+        _prepared: object,
+        _coarse: object,
+        _candidate_search: object,
+        *,
+        cancellation: object,
+    ) -> EvidenceNarrowingResult:
+        nonlocal phase
+        _ = cancellation
+        phase = "s5"
+        return EvidenceNarrowingResult(
+            candidate.candidate_id,
+            candidate.interval_start_utc,
+            candidate.interval_end_utc,
+            candidate.width_seconds,
+            0,
+            (),
+            EvidenceNarrowingCompletion.TARGET_WIDTH_REACHED,
+            "target_width_reached",
+        )
+
+    monkeypatch.setattr(execution_module, "_candidate_search", fake_candidate_search)
+    monkeypatch.setattr(execution_module, "_with_anchor_observation", without_bracket)
+    monkeypatch.setattr(SuccessorExecutionService, "_run_s4_narrowing", fake_s4_narrowing)
+    published: list[SuccessorTerminal] = []
+    original_publish_terminal = service.publisher.publish_terminal
+
+    def publish_terminal(terminal: SuccessorTerminal) -> SuccessorTerminal:
+        published.append(terminal)
+        return original_publish_terminal(terminal)
+
+    monkeypatch.setattr(service.publisher, "publish_terminal", publish_terminal)
+
+    result = service.execute(prepared, cancellation=cancellation)
+
+    assert result.status == "INTERRUPTED"
+    assert result.reason_code == "cancelled"
     assert len(published) == 1
 
 

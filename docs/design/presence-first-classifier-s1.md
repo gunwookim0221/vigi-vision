@@ -9,8 +9,9 @@ shadow work now computes separate reference-relative search evidence and
 bounded process-local diagnostics; it adds no schema, public evidence, API,
 UI, migration, or publication change. Every non-fast-hit case still delegates to
 the existing Schema 8/v3 classifier unchanged, and there is no fast ABSENT
-path. S4's internal candidate formation/narrowing is now approved; future
-S5-S7 work follows the separate
+path. S4's internal candidate formation/narrowing and S5's internal
+candidate-local verification are now implemented and approved; future S6-S7
+work follows the separate
 [disappearance-candidate-first search design](disappearance-candidate-search-design.md).**
 
 This document records the implementation design for simplifying new successor
@@ -611,8 +612,9 @@ adopted future direction is documented in
   in shadow mode (implemented locally; no public behavior change);
 - **S4:** form and narrow candidate intervals despite useful
   `INDETERMINATE` observations;
-- **S5:** apply v3 as precise verification and rationalize slow work only from
-  measured evidence;
+- **S5:** apply existing v3 evidence as internal candidate-local verification
+  and rationalize slow work only from measured evidence (implemented without
+  public/persistence changes);
 - **S6:** run fresh manually labeled NVR validation centered on event
   containment and complete misses; and
 - **S7:** perform reviewed integration, durable evidence/review-media changes
