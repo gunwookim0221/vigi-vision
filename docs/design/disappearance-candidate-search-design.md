@@ -3,13 +3,15 @@
 ## Status and authority
 
 **Status: the architecture was approved at Initial Review. Phase S3 has a
-local shadow-only implementation and preserved-data measurement. Phase S4's
+local shadow-only implementation, preserved-data measurement, and a validated
+localized-support change correction for the rack controlled case. Phase S4's
 internal, unpublished candidate-formation/narrowing implementation and its
 cancellation lifecycle correction are approved. Phase S5 now adds internal
 candidate-local verification and measured slow-path accounting. The S6
 implementation slice adds a bounded ambiguous-endpoint coarse-sampling
-fallback; fresh labeled real-run validation, persistence, and public behavior
-remain unimplemented.**
+fallback. One authoritative rack controlled case now validates the localized
+S3 correction and S4 containment; broader fresh labeled real-run validation,
+persistence, and public behavior remain unimplemented.**
 
 The implemented Phase 7 and Schema 8 recording-search contracts remain
 authoritative in
@@ -223,10 +225,47 @@ The policy is banded and conjunctive, not a general-purpose learned score:
    unavailable normalization, unusable quality, missing media, or malformed
    input. It does not move an evidence bound.
 
-Exact delta and persistence thresholds are S3 policy values to be selected
-from deterministic fixtures and labeled fresh runs. They must be versioned and
-reviewed before production behavior changes. No threshold is selected in this
-design document, and no current accuracy number is implied.
+The implemented localized-support correction keeps the fixed background bound
+as the normal scene guard. When a v3 row exceeds that aggregate bound, it may
+still become material-drop search evidence only when all of the following are
+true:
+
+- the independent v3 spatial scene profile is explicitly stable and has no
+  scene-stability veto;
+- complete finite alignment evidence is present and the existing registration
+  stability veto is evaluated rather than bypassed;
+- replacement evidence is explicitly false (missing evidence fails closed);
+- support NCC is at or below the existing ABSENT NCC maximum;
+- support change is at or above the existing ABSENT change minimum;
+- foreground retention is below the existing PRESENT foreground minimum; and
+- `support_change - background_change` is at least the full gap between the
+  existing ABSENT-change minimum and PRESENT-change maximum.
+
+The last term is the **localized support-change advantage**. Its minimum is
+derived from the existing policy (`0.70 - 0.30 = 0.40` for the validated
+policy), not introduced as a rack-specific threshold. It distinguishes change
+concentrated on the immutable target support from broad context change.
+
+The registration veto normally prevents this localized exception. A vetoed
+row is eligible only when independent whole-ROI evidence remains PRESENT-like
+while immutable-support NCC is ABSENT-like: whole-ROI NCC must meet the
+existing whole-ROI PRESENT minimum, and `roi_ncc - support_ncc` must meet the
+existing whole-ROI PRESENT / support ABSENT NCC gap. For the validated policy
+that gap is `0.60 - 0.20 = 0.40`. This is deterministic evidence that broader
+ROI correlation remains while change is concentrated on target support.
+Missing, non-finite, or incomplete ROI/alignment evidence cannot override the
+veto.
+
+The rule is restricted to internal S3 evidence: it does not change classifier
+state, claim `ABSENT`, override a spatial scene veto, or alter the fixed
+foreground/background policy values. Non-finite inputs fail closed as
+insufficient evidence.
+
+Any additional chronological-delta and persistence thresholds remain policy
+values to be selected from deterministic fixtures and labeled fresh runs. They
+must be versioned and reviewed before production behavior changes. The
+localized advantage above is derived only from existing policy bands; no
+standalone replacement threshold or accuracy number is introduced here.
 
 ## 6. Candidate interval formation
 
@@ -508,6 +547,13 @@ S3 is implemented locally as shadow-only behavior:
   decision when support is undersized;
 - scene-only discontinuity is explicitly prevented from becoming a directional
   material drop;
+- a v3-only localized support-change advantage can recover directional search
+  evidence when the aggregate context ratio exceeds its fixed bound but the
+  independent spatial scene profile remains stable; an existing registration
+  veto is overrideable only through complete, policy-derived whole-ROI versus
+  support NCC separation; replacement, broad scene motion, weak change,
+  retained PRESENT-level foreground, and malformed values remain
+  non-directional or insufficient;
 - the existing successor classifier records bounded process-local counters and
   best-effort diagnostics without changing its observation result; and
 - `tools/measure_search_evidence_s3.py` reports preserved replay distribution
@@ -653,6 +699,30 @@ validate the runtime actual-frame VERIFIED contract. Runtime S5 observations
 still preserve actual decoded frame timestamps. Of the 50 rows, 49 carried a preserved v3 state and zero
 fresh local v3 replays were needed by this run; that distinction is why the
 report exposes both counters.
+
+The authoritative rack controlled case then exposed an S3 generalization gap:
+its labeled ABSENT frame had foreground retention `0.556322`, aggregate
+background change `0.268713`, NCC `0.006280`, and support change `0.783061`.
+The fixed `0.43`/`0.12` policy therefore remained non-directional even though
+the v3 spatial scene profile was stable. Immutable replay of the localized
+support-change correction produced advantage `0.514348`, retained PRESENT as
+strong-reference, retained OCCLUDED and REPLACEMENT_OR_BACKGROUND_CHANGE as
+usable-ambiguous, and changed only ABSENT controls in the 168-row preserved
+safety matrix (28 localized hits, zero PRESENT/OCCLUDED/REPLACEMENT hits). The
+24-frame rack replay produced five material-drop samples, one qualified S4
+candidate covering `(2026-09-22T03:18:55Z, 2026-09-22T03:19:10Z]`, no
+classifier `ABSENT`, and no legal PRESENT-to-ABSENT state bracket. This is one
+controlled-case and preserved-matrix result, not a general accuracy claim or a
+public/persistence cutover approval.
+
+The follow-up registration-safety correction makes the classifier's existing
+camera-motion veto an explicit prerequisite of the localized path. The rack
+ABSENT row remains eligible because whole-ROI NCC `0.685426` remains above the
+existing `0.60` PRESENT bound while support NCC is `0.006280`, giving NCC
+separation `0.679146`. A camera-motion regression with a real registration veto
+and whole-ROI/support NCC separation `0.13` remains usable-ambiguous and forms
+no S4 candidate. Replaying the same 168 rows retains 28 localized hits, all on
+authoritatively labeled ABSENT rows, with no non-ABSENT localized hits.
 
 Fresh-run ground truth must be created independently of the search result. For
 each validation run, a human reviewer records the last clearly reference-like

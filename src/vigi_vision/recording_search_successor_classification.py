@@ -550,6 +550,7 @@ class SuccessorPresenceMetrics:
     search_evidence_fast_present_overlap: int = 0
     search_evidence_material_drop_indeterminate: int = 0
     search_evidence_scene_only_suppressed: int = 0
+    search_evidence_localized_support_drop: int = 0
     search_evidence_elapsed_ms_total: int = 0
 
 
@@ -1835,6 +1836,8 @@ def _increment_search_evidence_metrics(
             metrics.search_evidence_insufficient += 1
     if evidence.scene_only_suppressed:
         metrics.search_evidence_scene_only_suppressed += 1
+    if evidence.localized_support_drop:
+        metrics.search_evidence_localized_support_drop += 1
 
 
 def _emit_search_evidence_event(
@@ -1855,6 +1858,21 @@ def _emit_search_evidence_event(
                     "reason": None if evidence is None else evidence.reason_code,
                     "scene_only_suppressed": (
                         False if evidence is None else evidence.scene_only_suppressed
+                    ),
+                    "localized_support_change_advantage": (
+                        None if evidence is None else evidence.localized_support_change_advantage
+                    ),
+                    "localized_roi_support_ncc_advantage": (
+                        None if evidence is None else evidence.localized_roi_support_ncc_advantage
+                    ),
+                    "localized_support_drop": (
+                        False if evidence is None else evidence.localized_support_drop
+                    ),
+                    "registration_stability_veto": (
+                        False if evidence is None else evidence.registration_stability_veto
+                    ),
+                    "registration_veto_overridden": (
+                        False if evidence is None else evidence.registration_veto_overridden
                     ),
                     "search_evidence_evaluations": metrics.search_evidence_evaluations,
                     "search_evidence_failures": metrics.search_evidence_failures,

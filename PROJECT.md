@@ -316,8 +316,22 @@ background-support prerequisite; the corrected 50-observation replay retained
 seven fast PRESENT hits, all agreeing with current-v3 PRESENT, with no fast-hit
 ABSENT or INDETERMINATE disagreement. The approved S3 shadow layer now computes
 reference-relative search evidence and bounded process-local diagnostics without
-changing classifier, search, narrowing, terminal, or publication behavior. The
-next direction is now the
+changing classifier, terminal, or publication behavior. A fresh labeled rack
+controlled case exposed an aggregate-metric generalization miss; the corrected
+S3 evaluator now derives a v3-only localized support-change advantage from the
+existing support-change and fixed-context metrics. It retains the fixed
+foreground/background bounds and all spatial scene/replacement vetoes, changes
+no classifier state, and supplies only internal candidate-search direction. A
+registration-safety correction now evaluates the existing camera-motion veto
+and permits a localized S3 override only when complete whole-ROI evidence
+remains PRESENT-like while immutable-support NCC is ABSENT-like, using only
+existing policy bounds. Missing or malformed alignment/NCC evidence fails
+closed. An
+immutable 24-frame replay recovered one qualified S4 candidate containing the
+human interval without producing `ABSENT` or a legal state bracket; a 168-row
+preserved safety replay produced localized hits only on labeled ABSENT rows.
+This remains controlled validation, not a public/persisted candidate cutover.
+The next direction is now the
 [disappearance-candidate-first search](docs/design/disappearance-candidate-search-design.md):
 classification state remains separate from search evidence, candidate interval
 recall takes priority over exact classification of every coarse frame, fast
@@ -330,7 +344,8 @@ accounting. The S6 implementation slice adds a private bounded coarse-sampling
 fallback for an ambiguous search endpoint (at most four deterministic interior
 probes, existing classifier/acquisition reuse, cancellation and gap safety,
 whole-second UTC probe normalization for fractional decoded frame times, and
-diagnostics only); fresh labeled real-NVR validation and any public or
+diagnostics only). One labeled rack controlled case and its localized S3
+correction are validated; broader fresh real-NVR coverage and any public or
 persisted candidate contract remain pending.
 Search admission now uses the same effective start in the browser and backend:
 the later of the investigation anchor and selected baseline time; minute-level
@@ -338,8 +353,8 @@ native `datetime-local` search-end values are accepted as whole seconds.
 The existing successor/browser chain still requires its final human real-NVR
 acceptance. S3 shadow evidence, S4 internal candidate narrowing, and S5
 internal candidate-local verification are implemented and approved; S6's
-bounded fallback implementation is local and unpersisted, while fresh
-validation and S7 remain future work.
+bounded fallback implementation is local and unpersisted. One rack controlled
+case is complete, while broader S6 validation and S7 remain future work.
 Correction B adds a bounded Windows-spawn process boundary around production
 Phase 7E B4 classification; timeout/cancellation terminate and reap the child,
 and late output cannot become evidence. Valid results allow a bounded two-second
@@ -415,10 +430,13 @@ capability.
    fallback when an ambiguous endpoint has no initial bracket (maximum four
    interior probes, no gap/cancellation/schema/public changes); S6 then performs
    fresh manually labeled real-NVR validation centered on event containment and
-   complete misses; and S7 performs reviewed evidence/review-media integration
-   and closure. Do not loosen the approved fast-PRESENT gate or make fast ABSENT
-   a prerequisite. Existing persistence, API, terminal, and UI contracts remain
-   unchanged until their phase-specific reviews approve an implementation.
+   complete misses. One rack controlled case now validates the localized S3
+   correction and candidate containment, while broader independent scene and
+   confounder coverage remains required; S7 performs reviewed
+   evidence/review-media integration and closure. Do not loosen the approved
+   fast-PRESENT gate or make fast ABSENT a prerequisite. Existing persistence,
+   API, terminal, and UI contracts remain unchanged until their phase-specific
+   reviews approve an implementation.
 
 ## High-level roadmap
 

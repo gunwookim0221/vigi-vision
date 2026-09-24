@@ -85,10 +85,21 @@ def _record_shadow(record: dict[str, Any], policy: object) -> dict[str, Any]:
         "search_evidence": None if evidence is None else evidence.band.value,
         "search_evidence_reason": None if evidence is None else evidence.reason_code,
         "scene_discontinuity": False if evidence is None else evidence.scene_discontinuity,
-        "scene_only_suppressed": False
-        if evidence is None
-        else evidence.scene_only_suppressed,
+        "scene_only_suppressed": False if evidence is None else evidence.scene_only_suppressed,
         "object_degradation": False if evidence is None else evidence.object_degradation,
+        "localized_support_change_advantage": (
+            None if evidence is None else evidence.localized_support_change_advantage
+        ),
+        "localized_roi_support_ncc_advantage": (
+            None if evidence is None else evidence.localized_roi_support_ncc_advantage
+        ),
+        "localized_support_drop": (False if evidence is None else evidence.localized_support_drop),
+        "registration_stability_veto": (
+            False if evidence is None else evidence.registration_stability_veto
+        ),
+        "registration_veto_overridden": (
+            False if evidence is None else evidence.registration_veto_overridden
+        ),
     }
 
 
@@ -142,6 +153,15 @@ def _summary(records: list[dict[str, Any]], shadow_records: list[dict[str, Any]]
         ),
         "scene_only_changes_suppressed": sum(
             record["scene_only_suppressed"] for record in shadow_records
+        ),
+        "localized_support_drops": sum(
+            record["localized_support_drop"] for record in shadow_records
+        ),
+        "registration_stability_vetoes": sum(
+            record["registration_stability_veto"] for record in shadow_records
+        ),
+        "registration_veto_overrides": sum(
+            record["registration_veto_overridden"] for record in shadow_records
         ),
         "suspicious_material_drop_count": len(suspicious),
         "suspicious_material_drop_cases": suspicious[:20],
