@@ -697,6 +697,135 @@ def test_ambiguous_endpoint_uses_bounded_coarse_fallback_and_forms_candidate(
     assert "2026-09-04T05:23:32Z" in requested_times
 
 
+def test_qualified_s4_candidate_persists_and_reopens_without_public_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _proxy = _coarse_fallback_service(
+        tmp_path,
+        material_after=ANCHOR + timedelta(minutes=3),
+    )
+    service.evidence_repository = SuccessorEvidenceRepository(tmp_path / "successor")
+    confirmed = replace(
+        _confirmed(tmp_path),
+        jpeg_sha256=hashlib.sha256(b"baseline").hexdigest(),
+    )
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:32:32",
+        run_id="search-run-77777777777777777777777777777777",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    original_candidate_search = execution_module._candidate_search
+
+    def wait_for_qualified_candidate(
+        prepared_execution: SuccessorPreparedExecution,
+        coarse: object,
+    ) -> SuccessorCandidateFormationResult:
+        result = original_candidate_search(prepared_execution, coarse)  # type: ignore[arg-type]
+        if result.candidates and not result.qualified_candidates:
+            return SuccessorCandidateFormationResult(())
+        return result
+
+    monkeypatch.setattr(
+        execution_module,
+        "_candidate_search",
+        wait_for_qualified_candidate,
+    )
+
+    result = service.execute(prepared)
+    reopened = SuccessorEvidenceRepository(tmp_path / "successor").read_candidates(
+        confirmed.investigation_id,
+        prepared.request.run_id,
+    )
+    public_evidence = service.read_evidence(
+        confirmed.investigation_id,
+        prepared.request.run_id,
+    )
+
+    assert result.status == "INCONCLUSIVE"
+    assert result.reason_code == "indeterminate_observation"
+    assert result.first_absent_time_utc is None
+    assert len(reopened) == 1
+    assert reopened[0].qualified
+    assert reopened[0].candidate_id.startswith("successor-candidate-v1-")
+    assert len(reopened[0].supporting_observation_ids) >= 3
+    assert public_evidence is not None
+    assert public_evidence["version"] == "phase7e-successor-evidence-v1"
+    assert "candidate_state" not in public_evidence
+
+
+def test_narrowing_coverage_gap_prevents_candidate_persistence_and_public_promotion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _proxy = _coarse_fallback_service(
+        tmp_path,
+        material_after=ANCHOR + timedelta(minutes=3),
+    )
+    evidence_repository = SuccessorEvidenceRepository(tmp_path / "successor")
+    service.evidence_repository = evidence_repository
+    confirmed = replace(
+        _confirmed(tmp_path),
+        jpeg_sha256=hashlib.sha256(b"baseline").hexdigest(),
+    )
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:32:32",
+        run_id="search-run-88888888888888888888888888888888",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    original_candidate_search = execution_module._candidate_search
+
+    def wait_for_qualified_candidate(
+        prepared_execution: SuccessorPreparedExecution,
+        coarse: object,
+    ) -> SuccessorCandidateFormationResult:
+        result = original_candidate_search(prepared_execution, coarse)  # type: ignore[arg-type]
+        if result.candidates and not result.qualified_candidates:
+            return SuccessorCandidateFormationResult(())
+        return result
+
+    narrowed_candidates: list[SuccessorCandidateInterval] = []
+
+    def narrow_with_gap(
+        candidate: SuccessorCandidateInterval,
+        _midpoint_sampler: object,
+        **_kwargs: object,
+    ) -> EvidenceNarrowingResult:
+        narrowed_candidates.append(candidate)
+        return EvidenceNarrowingResult(
+            candidate.candidate_id,
+            candidate.interval_start_utc,
+            candidate.interval_end_utc,
+            candidate.width_seconds,
+            1,
+            (),
+            EvidenceNarrowingCompletion.GAP,
+            "midpoint_gap",
+            coverage_incomplete=True,
+        )
+
+    monkeypatch.setattr(execution_module, "_candidate_search", wait_for_qualified_candidate)
+    monkeypatch.setattr(execution_module, "narrow_candidate_interval", narrow_with_gap)
+
+    result = service.execute(prepared)
+    manifest = evidence_repository.read(confirmed.investigation_id, prepared.request.run_id)
+
+    assert len(narrowed_candidates) == 1
+    assert narrowed_candidates[0].qualified is True
+    assert narrowed_candidates[0].coverage_incomplete is False
+    assert result.status == "INCONCLUSIVE"
+    assert result.first_absent_time_utc is None
+    assert all(item["state"] != "ABSENT" for item in result.coarse_observations)
+    assert manifest is not None
+    assert manifest["terminal_status"] == "INCONCLUSIVE"
+    assert manifest["first_absent_observation_id"] is None
+    assert manifest["candidate_state"] is None
+    assert (
+        evidence_repository.read_candidates(confirmed.investigation_id, prepared.request.run_id)
+        == ()
+    )
+
+
 def test_fractional_reference_frame_execution_normalizes_coarse_assignments(
     tmp_path: Path,
 ) -> None:
@@ -1304,7 +1433,13 @@ def test_non_cancelled_terminal_and_evidence_remain_consistent(
         None,
         successor_execution=service,
     )
-    assert public_reader.evidence(confirmed.investigation_id, prepared.request.run_id) == evidence
+    public_evidence = dict(evidence)
+    public_evidence.pop("candidate_state")
+    public_evidence["version"] = "phase7e-successor-evidence-v1"
+    assert (
+        public_reader.evidence(confirmed.investigation_id, prepared.request.run_id)
+        == public_evidence
+    )
 
 
 def test_cancellation_after_authoritative_evidence_commit_preserves_normal_result(

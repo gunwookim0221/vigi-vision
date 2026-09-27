@@ -247,6 +247,18 @@ It does not alter replay, thresholds, or classification policy. FOUND review
 clips remain unavailable until the Phase 8 contract supplies one, and are
 explicitly labelled unavailable without hiding the image evidence.
 
+S7-1 adds an internal-only successor evidence v2 extension. Qualified S4
+disappearance candidates with complete required coverage are committed in the
+same atomic evidence manifest as
+their observation/frame provenance, together with the minimum closed S3 proof
+needed for strict restart reopen. Evidence v1 remains readable as having no
+persisted candidate. Candidate corruption, version mismatch, identity mismatch,
+or observation/time mismatch fails closed and is never replaced by a fresh
+recomputation. This extension does not change the Schema 8 terminal record,
+classifier vocabulary, public evidence projection, Phase 8 eligibility, or
+browser/API behavior; a persisted candidate remains `INCONCLUSIVE` internal
+search evidence rather than `ABSENT` or `FOUND`.
+
 The successor classifier exposes an additive asymmetric decision trace in each
 comparable observation. `PRESENT` requires confident identity alignment plus
 stable support appearance. `ABSENT` instead requires independent support loss,

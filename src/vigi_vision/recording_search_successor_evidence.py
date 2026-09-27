@@ -1,7 +1,7 @@
 """Durable, identity-bound visual evidence for Schema 8 successor runs."""
 
 # This module is a deliberately explicit persistence boundary.
-# ruff: noqa: C901, D102, D107, EM101, PLR0912, PLR0915, PLR2004, PLC0415, PTH105, PTH108, SIM105, TC003
+# ruff: noqa: C901, D102, D107, EM101, PLR0912, PLR0913, PLR0915, PLR2004, PLC0415, PTH105, PTH108, SIM105, TC003
 # pyright: reportAny=false, reportExplicitAny=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportAttributeAccessIssue=false, reportUnannotatedClassAttribute=false, reportImportCycles=false, reportUnusedCallResult=false, reportMissingImports=false, reportUnnecessaryIsInstance=false, reportUnnecessaryComparison=false, reportOperatorIssue=false
 
 from __future__ import annotations
@@ -17,6 +17,16 @@ from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING, Any, cast
 
+from vigi_vision.recording_search_successor_candidate_search import (
+    SuccessorCandidateInterval,
+    candidate_interval_identity,
+    candidate_persistence_eligible,
+)
+from vigi_vision.recording_search_successor_search_evidence import (
+    SearchEvidence,
+    SearchEvidenceBand,
+)
+
 if TYPE_CHECKING:
     from vigi_vision.recording_search_successor_classification import (
         SuccessorObservation,
@@ -25,9 +35,12 @@ if TYPE_CHECKING:
     SuccessorPreparedExecution = Any
     SuccessorTerminal = Any
 
-EVIDENCE_VERSION = "phase7e-successor-evidence-v1"
+LEGACY_EVIDENCE_VERSION = "phase7e-successor-evidence-v1"
+EVIDENCE_VERSION = "phase7e-successor-evidence-v2"
+CANDIDATE_EVIDENCE_VERSION = "phase7e-successor-candidates-v1"
 MAX_EVIDENCE_RECORDS = 64
 MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
+MAX_PERSISTED_CANDIDATES = 8
 _SHA256 = frozenset("0123456789abcdef")
 _INVESTIGATION_ID = re.compile(r"^object-disappearance-v3-ch[1-9][0-9]*-[0-9]{8}T[0-9]{6}Z$")
 _RUN_ID = re.compile(r"^search-run-[0-9a-f]{32}$")
@@ -58,7 +71,7 @@ _OBSERVATION_STATES = frozenset(
         "CLASSIFIER_FAILED",
     }
 )
-_MANIFEST_KEYS = frozenset(
+_LEGACY_MANIFEST_KEYS = frozenset(
     {
         "version",
         "investigation_id",
@@ -75,6 +88,54 @@ _MANIFEST_KEYS = frozenset(
         "first_absent_observation_id",
         "review_clip",
         "entries",
+    }
+)
+_MANIFEST_KEYS = _LEGACY_MANIFEST_KEYS | {"candidate_state"}
+_CANDIDATE_STATE_KEYS = frozenset(
+    {
+        "version",
+        "investigation_id",
+        "run_id",
+        "plan_id",
+        "authority_identity",
+        "roi_identity",
+        "reference_frame_resource_id",
+        "source_evidence_digest",
+        "candidates",
+        "evidence_rows",
+        "digest",
+    }
+)
+_CANDIDATE_KEYS = frozenset(
+    {
+        "candidate_id",
+        "anchor_observation_id",
+        "drop_observation_id",
+        "interval_start_utc",
+        "interval_end_utc",
+        "qualified",
+        "provisional",
+        "coverage_incomplete",
+        "recovery_observation_id",
+        "supporting_observation_ids",
+    }
+)
+_EVIDENCE_ROW_KEYS = frozenset({"observation_id", "frame_utc", "search_evidence"})
+_SEARCH_EVIDENCE_KEYS = frozenset(
+    {
+        "band",
+        "reason_code",
+        "reference_basis",
+        "scene_stable",
+        "scene_discontinuity",
+        "object_degradation",
+        "scene_only_suppressed",
+        "fast_present_hit",
+        "localized_support_change_advantage",
+        "localized_roi_support_ncc_advantage",
+        "localized_support_drop",
+        "registration_stability_veto",
+        "registration_veto_overridden",
     }
 )
 _ENTRY_KEYS = frozenset(
@@ -251,6 +312,7 @@ class SuccessorEvidenceRepository:
         prepared: SuccessorPreparedExecution,
         observations: tuple[SuccessorObservation, ...],
         terminal: SuccessorTerminal,
+        candidates: tuple[SuccessorCandidateInterval, ...] = (),
     ) -> dict[str, object]:
         """Publish bounded JPEGs and a manifest, without overwriting a run."""
         return self._publish_at_path(
@@ -258,6 +320,7 @@ class SuccessorEvidenceRepository:
             observations,
             terminal,
             self._manifest(prepared.request.investigation_id, prepared.request.run_id),
+            candidates=candidates,
         )
 
     def stage(
@@ -265,6 +328,7 @@ class SuccessorEvidenceRepository:
         prepared: SuccessorPreparedExecution,
         observations: tuple[SuccessorObservation, ...],
         terminal: SuccessorTerminal,
+        candidates: tuple[SuccessorCandidateInterval, ...] = (),
     ) -> dict[str, object]:
         """Materialize evidence without making its normal result authoritative."""
         investigation_id = prepared.request.investigation_id
@@ -288,6 +352,7 @@ class SuccessorEvidenceRepository:
                 terminal,
                 staged_path,
                 authoritative=False,
+                candidates=candidates,
             )
             self._staged_payloads[key] = payload
             return payload
@@ -341,9 +406,24 @@ class SuccessorEvidenceRepository:
         manifest_path: Path,
         *,
         authoritative: bool = True,
+        candidates: tuple[SuccessorCandidateInterval, ...] = (),
     ) -> dict[str, object]:
         if not observations or len(observations) > MAX_EVIDENCE_RECORDS:
             raise SuccessorEvidenceError("evidence_capacity_exceeded")
+        coverage_events = tuple(
+            (
+                item.requested_time_utc,
+                item.acquisition_status.value,
+                item.state.value,
+            )
+            for item in observations
+        )
+        if any(
+            not candidate_persistence_eligible(candidate)
+            or _candidate_interval_has_coverage_gap(candidate, coverage_events)
+            for candidate in candidates
+        ):
+            raise SuccessorEvidenceError("candidate_evidence_corrupt")
         investigation_id = prepared.request.investigation_id
         run_id = prepared.request.run_id
         directory = self._directory(investigation_id, run_id)
@@ -442,7 +522,14 @@ class SuccessorEvidenceRepository:
                 ),
                 "review_clip": {"status": "UNAVAILABLE", "reason": "phase8_not_requested"},
                 "entries": entries,
+                "candidate_state": _candidate_state(
+                    prepared,
+                    observations,
+                    candidates,
+                    entries,
+                ),
             }
+            _validate_manifest(payload, investigation_id, run_id)
             if not authoritative:
                 return payload
             _atomic_json(manifest_path, payload)
@@ -455,6 +542,19 @@ class SuccessorEvidenceRepository:
         path = self._manifest(investigation_id, run_id)
         with self._lock:
             return self._read_manifest_path(path, investigation_id, run_id)
+
+    def read_candidates(
+        self, investigation_id: str, run_id: str
+    ) -> tuple[SuccessorCandidateInterval, ...]:
+        """Reopen validated qualified S4 candidates without recomputation."""
+        manifest = self.read(investigation_id, run_id)
+        if manifest is None:
+            return ()
+        state = manifest.get("candidate_state")
+        if state is None:
+            return ()
+        records = cast("list[object]", cast("dict[str, object]", state)["candidates"])
+        return tuple(_candidate_from_record(item) for item in records)
 
     @staticmethod
     def _read_manifest_path(
@@ -677,17 +777,244 @@ def _observation_for_time(
     return best[0][2]
 
 
+def _candidate_state(
+    prepared: SuccessorPreparedExecution,
+    observations: tuple[SuccessorObservation, ...],
+    candidates: tuple[SuccessorCandidateInterval, ...],
+    entries: list[dict[str, object]],
+) -> dict[str, object] | None:
+    if not candidates:
+        return None
+    if any(not candidate_persistence_eligible(item) for item in candidates):
+        raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    coverage_events = tuple(
+        (
+            _parse_candidate_timestamp(entry["requested_time_utc"]),
+            cast("str", entry["acquisition_status"]),
+            cast("str", entry["state"]),
+        )
+        for entry in entries
+        if entry.get("role") in {"observation", "anchor"}
+    )
+    if any(_candidate_interval_has_coverage_gap(item, coverage_events) for item in candidates):
+        raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    ordered = tuple(
+        sorted(
+            candidates,
+            key=lambda item: (
+                item.interval_start_utc,
+                item.interval_end_utc,
+                item.candidate_id,
+            ),
+        )
+    )
+    if len({item.candidate_id for item in ordered}) != len(ordered):
+        raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    observation_by_id = {item.observation_id: item for item in observations}
+    required_ids = {
+        observation_id
+        for candidate in ordered
+        for observation_id in candidate.supporting_observation_ids
+        if observation_id != "confirmed_reference"
+    }
+    required_ids.update(
+        candidate.recovery_observation_id
+        for candidate in ordered
+        if candidate.recovery_observation_id is not None
+    )
+    rows: list[dict[str, object]] = []
+    for observation_id in required_ids:
+        observation = observation_by_id.get(observation_id)
+        if observation is None or observation.frame_utc is None:
+            raise SuccessorEvidenceError("candidate_evidence_corrupt")
+        evidence = getattr(observation, "_search_evidence", None)
+        if not isinstance(evidence, SearchEvidence):
+            raise SuccessorEvidenceError("candidate_evidence_corrupt")
+        rows.append(
+            {
+                "observation_id": observation_id,
+                "frame_utc": _timestamp(observation.frame_utc),
+                "search_evidence": _search_evidence_record(evidence),
+            }
+        )
+    rows.sort(key=lambda item: (str(item["frame_utc"]), str(item["observation_id"])))
+    payload: dict[str, object] = {
+        "version": CANDIDATE_EVIDENCE_VERSION,
+        "investigation_id": prepared.request.investigation_id,
+        "run_id": prepared.request.run_id,
+        "plan_id": prepared.plan.plan_id,
+        "authority_identity": prepared.authority.authority_identity,
+        "roi_identity": prepared.authority.roi_identity,
+        "reference_frame_resource_id": prepared.authority.reference_frame_resource_id,
+        "source_evidence_digest": _source_evidence_digest(entries, required_ids),
+        "candidates": [_candidate_record(item) for item in ordered],
+        "evidence_rows": rows,
+    }
+    payload["digest"] = _canonical_digest(payload)
+    return payload
+
+
+def _candidate_record(candidate: SuccessorCandidateInterval) -> dict[str, object]:
+    return {
+        "candidate_id": candidate.candidate_id,
+        "anchor_observation_id": candidate.anchor_observation_id,
+        "drop_observation_id": candidate.drop_observation_id,
+        "interval_start_utc": _timestamp(candidate.interval_start_utc),
+        "interval_end_utc": _timestamp(candidate.interval_end_utc),
+        "qualified": candidate.qualified,
+        "provisional": candidate.provisional,
+        "coverage_incomplete": candidate.coverage_incomplete,
+        "recovery_observation_id": candidate.recovery_observation_id,
+        "supporting_observation_ids": list(candidate.supporting_observation_ids),
+    }
+
+
+def _search_evidence_record(evidence: SearchEvidence) -> dict[str, object]:
+    return {
+        "band": evidence.band.value,
+        "reason_code": evidence.reason_code,
+        "reference_basis": evidence.reference_basis,
+        "scene_stable": evidence.scene_stable,
+        "scene_discontinuity": evidence.scene_discontinuity,
+        "object_degradation": evidence.object_degradation,
+        "scene_only_suppressed": evidence.scene_only_suppressed,
+        "fast_present_hit": evidence.fast_present_hit,
+        "localized_support_change_advantage": evidence.localized_support_change_advantage,
+        "localized_roi_support_ncc_advantage": evidence.localized_roi_support_ncc_advantage,
+        "localized_support_drop": evidence.localized_support_drop,
+        "registration_stability_veto": evidence.registration_stability_veto,
+        "registration_veto_overridden": evidence.registration_veto_overridden,
+    }
+
+
+def _canonical_digest(payload: dict[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _source_evidence_digest(entries: list[dict[str, object]], observation_ids: set[str]) -> str:
+    relevant = [
+        entry
+        for entry in entries
+        if entry.get("role") == "baseline" or entry.get("observation_id") in observation_ids
+    ]
+    return hashlib.sha256(
+        json.dumps(relevant, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _candidate_from_record(value: object) -> SuccessorCandidateInterval:
+    if not isinstance(value, dict) or set(value) != _CANDIDATE_KEYS:
+        raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    candidate_id = value.get("candidate_id")
+    anchor_id = value.get("anchor_observation_id")
+    drop_id = value.get("drop_observation_id")
+    qualified = value.get("qualified")
+    provisional = value.get("provisional")
+    coverage_incomplete = value.get("coverage_incomplete")
+    recovery_id = value.get("recovery_observation_id")
+    supporting = value.get("supporting_observation_ids")
+    if (
+        not isinstance(candidate_id, str)
+        or not isinstance(anchor_id, str)
+        or not isinstance(drop_id, str)
+        or type(qualified) is not bool
+        or type(provisional) is not bool
+        or type(coverage_incomplete) is not bool
+        or (recovery_id is not None and not isinstance(recovery_id, str))
+        or not isinstance(supporting, list)
+        or any(not isinstance(item, str) for item in supporting)
+    ):
+        raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    try:
+        start = _parse_timestamp(value["interval_start_utc"])
+        end = _parse_timestamp(value["interval_end_utc"])
+        return SuccessorCandidateInterval(
+            candidate_id,
+            anchor_id,
+            drop_id,
+            start,
+            end,
+            qualified,
+            provisional,
+            coverage_incomplete,
+            recovery_id,
+            tuple(supporting),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise SuccessorEvidenceError("candidate_evidence_corrupt") from error
+
+
+def _search_evidence_from_record(value: object) -> SearchEvidence:
+    if not isinstance(value, dict) or set(value) != _SEARCH_EVIDENCE_KEYS:
+        raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    band = value.get("band")
+    reason_code = value.get("reason_code")
+    reference_basis = value.get("reference_basis")
+    scene_stable = value.get("scene_stable")
+    bool_keys = (
+        "scene_discontinuity",
+        "object_degradation",
+        "scene_only_suppressed",
+        "fast_present_hit",
+        "localized_support_drop",
+        "registration_stability_veto",
+        "registration_veto_overridden",
+    )
+    advantage_keys = (
+        "localized_support_change_advantage",
+        "localized_roi_support_ncc_advantage",
+    )
+    if (
+        not isinstance(band, str)
+        or not isinstance(reason_code, str)
+        or not isinstance(reference_basis, str)
+        or (scene_stable is not None and type(scene_stable) is not bool)
+        or any(type(value.get(key)) is not bool for key in bool_keys)
+        or any(
+            item is not None and type(item) is not float
+            for item in (value.get(key) for key in advantage_keys)
+        )
+    ):
+        raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    try:
+        return SearchEvidence(
+            SearchEvidenceBand(band),
+            reason_code,
+            reference_basis,
+            scene_stable,
+            value["scene_discontinuity"],  # type: ignore[arg-type]
+            value["object_degradation"],  # type: ignore[arg-type]
+            value["scene_only_suppressed"],  # type: ignore[arg-type]
+            value["fast_present_hit"],  # type: ignore[arg-type]
+            value["localized_support_change_advantage"],  # type: ignore[arg-type]
+            value["localized_roi_support_ncc_advantage"],  # type: ignore[arg-type]
+            value["localized_support_drop"],  # type: ignore[arg-type]
+            value["registration_stability_veto"],  # type: ignore[arg-type]
+            value["registration_veto_overridden"],  # type: ignore[arg-type]
+        )
+    except (TypeError, ValueError) as error:
+        raise SuccessorEvidenceError("candidate_evidence_corrupt") from error
+
+
+def _parse_timestamp(value: object) -> datetime:
+    if not _valid_timestamp(value):
+        raise ValueError
+    return datetime.fromisoformat(cast("str", value)[:-1] + "+00:00")
+
+
 def _validate_manifest(value: object, investigation_id: str, run_id: str) -> None:
     if not isinstance(value, dict):
         raise SuccessorEvidenceError("evidence_corrupt")
-    if (
-        value.get("version") != EVIDENCE_VERSION
-        or value.get("investigation_id") != investigation_id
-        or value.get("run_id") != run_id
-    ):
+    version = value.get("version")
+    if version not in {LEGACY_EVIDENCE_VERSION, EVIDENCE_VERSION}:
+        raise SuccessorEvidenceError("evidence_schema_unsupported")
+    if value.get("investigation_id") != investigation_id or value.get("run_id") != run_id:
         raise SuccessorEvidenceError("evidence_corrupt")
     typed = cast("dict[str, object]", value)
-    if set(typed) != _MANIFEST_KEYS:
+    expected_keys = _MANIFEST_KEYS if version == EVIDENCE_VERSION else _LEGACY_MANIFEST_KEYS
+    if set(typed) != expected_keys:
         raise SuccessorEvidenceError("evidence_corrupt")
     plan_id = typed.get("plan_id")
     authority_identity = typed.get("authority_identity")
@@ -807,6 +1134,225 @@ def _validate_manifest(value: object, investigation_id: str, run_id: str) -> Non
     for item in cast("list[dict[str, object]]", entries):
         if item.get("role") == "baseline_link" and item.get("digest") != baseline_digest:
             raise SuccessorEvidenceError("evidence_corrupt")
+    if version == EVIDENCE_VERSION:
+        _validate_candidate_state(typed.get("candidate_state"), typed, baseline_entries[0])
+
+
+def _validate_candidate_state(
+    value: object,
+    manifest: dict[str, object],
+    baseline_entry: dict[str, object],
+) -> None:
+    if value is None:
+        return
+    if (
+        manifest.get("terminal_status") != "INCONCLUSIVE"
+        or manifest.get("first_absent_observation_id") is not None
+    ):
+        raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    if not isinstance(value, dict) or set(value) != _CANDIDATE_STATE_KEYS:
+        raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    state = cast("dict[str, object]", value)
+    if state.get("version") != CANDIDATE_EVIDENCE_VERSION:
+        raise SuccessorEvidenceError("candidate_evidence_schema_unsupported")
+    for key in ("investigation_id", "run_id", "plan_id", "authority_identity", "roi_identity"):
+        if state.get(key) != manifest.get(key):
+            raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    if state.get("reference_frame_resource_id") != baseline_entry.get(
+        "reference_frame_resource_id"
+    ):
+        raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    digest = state.get("digest")
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(char not in _SHA256 for char in digest)
+    ):
+        raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    unsigned = {key: item for key, item in state.items() if key != "digest"}
+    if (
+        not hashlib.sha256(
+            json.dumps(unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        == digest
+    ):
+        raise SuccessorEvidenceError("candidate_evidence_digest_mismatch")
+    source_evidence_digest = state.get("source_evidence_digest")
+    if (
+        not isinstance(source_evidence_digest, str)
+        or len(source_evidence_digest) != 64
+        or any(char not in _SHA256 for char in source_evidence_digest)
+    ):
+        raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    raw_rows = state.get("evidence_rows")
+    raw_candidates = state.get("candidates")
+    if (
+        not isinstance(raw_rows, list)
+        or not isinstance(raw_candidates, list)
+        or not raw_candidates
+        or len(raw_candidates) > MAX_PERSISTED_CANDIDATES
+    ):
+        raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    entries = cast("list[dict[str, object]]", manifest["entries"])
+    entry_by_observation_id: dict[str, dict[str, object]] = {}
+    for entry in entries:
+        observation_id = entry.get("observation_id")
+        if isinstance(observation_id, str):
+            if observation_id in entry_by_observation_id:
+                raise SuccessorEvidenceError("candidate_evidence_corrupt")
+            entry_by_observation_id[observation_id] = entry
+    evidence_by_id: dict[str, tuple[datetime, SearchEvidence]] = {}
+    row_order: list[tuple[datetime, str]] = []
+    for raw_row in raw_rows:
+        if not isinstance(raw_row, dict) or set(raw_row) != _EVIDENCE_ROW_KEYS:
+            raise SuccessorEvidenceError("candidate_evidence_corrupt")
+        observation_id = raw_row.get("observation_id")
+        if not isinstance(observation_id, str) or not observation_id:
+            raise SuccessorEvidenceError("candidate_evidence_corrupt")
+        frame_utc = _parse_candidate_timestamp(raw_row.get("frame_utc"))
+        evidence = _search_evidence_from_record(raw_row.get("search_evidence"))
+        entry = entry_by_observation_id.get(observation_id)
+        if entry is None or entry.get("frame_utc") != _timestamp(frame_utc):
+            raise SuccessorEvidenceError("candidate_evidence_corrupt")
+        if observation_id in evidence_by_id:
+            raise SuccessorEvidenceError("candidate_evidence_corrupt")
+        evidence_by_id[observation_id] = (frame_utc, evidence)
+        row_order.append((frame_utc, observation_id))
+    if row_order != sorted(row_order):
+        raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    candidates = tuple(_candidate_from_record(item) for item in raw_candidates)
+    candidate_order = tuple(
+        sorted(
+            candidates,
+            key=lambda item: (
+                item.interval_start_utc,
+                item.interval_end_utc,
+                item.candidate_id,
+            ),
+        )
+    )
+    if candidates != candidate_order or len({item.candidate_id for item in candidates}) != len(
+        candidates
+    ):
+        raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    required_evidence_ids: set[str] = set()
+    baseline_time = _parse_candidate_timestamp(baseline_entry.get("frame_utc"))
+    coverage_events = tuple(
+        (
+            _parse_candidate_timestamp(entry.get("requested_time_utc")),
+            cast("str", entry.get("acquisition_status")),
+            cast("str", entry.get("state")),
+        )
+        for entry in entries
+        if entry.get("role") in {"observation", "anchor"}
+    )
+    for candidate in candidates:
+        _validate_candidate(candidate, evidence_by_id, baseline_time, coverage_events)
+        required_evidence_ids.update(
+            item for item in candidate.supporting_observation_ids if item != "confirmed_reference"
+        )
+        if candidate.recovery_observation_id is not None:
+            required_evidence_ids.add(candidate.recovery_observation_id)
+    if required_evidence_ids != set(evidence_by_id):
+        raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    if _source_evidence_digest(entries, required_evidence_ids) != source_evidence_digest:
+        raise SuccessorEvidenceError("candidate_evidence_digest_mismatch")
+
+
+def _validate_candidate(
+    candidate: SuccessorCandidateInterval,
+    evidence_by_id: dict[str, tuple[datetime, SearchEvidence]],
+    baseline_time: datetime,
+    coverage_events: tuple[tuple[datetime, str, str], ...],
+) -> None:
+    if (
+        not candidate_persistence_eligible(candidate)
+        or _candidate_interval_has_coverage_gap(candidate, coverage_events)
+        or candidate.candidate_id
+        != candidate_interval_identity(
+            candidate.anchor_observation_id,
+            candidate.drop_observation_id,
+            candidate.interval_start_utc,
+            candidate.interval_end_utc,
+        )
+        or len(candidate.supporting_observation_ids) < 3
+        or len(set(candidate.supporting_observation_ids))
+        != len(candidate.supporting_observation_ids)
+        or candidate.anchor_observation_id not in candidate.supporting_observation_ids
+        or candidate.drop_observation_id not in candidate.supporting_observation_ids
+        or candidate.supporting_observation_ids[0] != candidate.anchor_observation_id
+        or candidate.supporting_observation_ids[1] != candidate.drop_observation_id
+        or candidate.recovery_observation_id in candidate.supporting_observation_ids
+    ):
+        raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    if candidate.anchor_observation_id == "confirmed_reference":
+        if candidate.interval_start_utc != baseline_time:
+            raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    else:
+        anchor = evidence_by_id.get(candidate.anchor_observation_id)
+        if (
+            anchor is None
+            or anchor[0] != candidate.interval_start_utc
+            or anchor[1].band is not SearchEvidenceBand.STRONG_REFERENCE
+        ):
+            raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    drop = evidence_by_id.get(candidate.drop_observation_id)
+    if (
+        drop is None
+        or drop[0] != candidate.interval_end_utc
+        or drop[1].band is not SearchEvidenceBand.MATERIAL_DROP
+    ):
+        raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    material_times: list[datetime] = []
+    for index, observation_id in enumerate(candidate.supporting_observation_ids):
+        if observation_id == "confirmed_reference":
+            continue
+        row = evidence_by_id.get(observation_id)
+        if row is None:
+            raise SuccessorEvidenceError("candidate_evidence_corrupt")
+        if index == 0:
+            if row[1].band is not SearchEvidenceBand.STRONG_REFERENCE:
+                raise SuccessorEvidenceError("candidate_evidence_corrupt")
+            continue
+        if row[1].band is not SearchEvidenceBand.MATERIAL_DROP:
+            raise SuccessorEvidenceError("candidate_evidence_corrupt")
+        material_times.append(row[0])
+    if (
+        len(material_times) < 2
+        or material_times != sorted(material_times)
+        or material_times[0] != candidate.interval_end_utc
+    ):
+        raise SuccessorEvidenceError("candidate_evidence_corrupt")
+    if candidate.recovery_observation_id is not None:
+        recovery = evidence_by_id.get(candidate.recovery_observation_id)
+        if (
+            recovery is None
+            or recovery[1].band is not SearchEvidenceBand.STRONG_REFERENCE
+            or recovery[0] <= material_times[-1]
+        ):
+            raise SuccessorEvidenceError("candidate_evidence_corrupt")
+
+
+def _candidate_interval_has_coverage_gap(
+    candidate: SuccessorCandidateInterval,
+    coverage_events: tuple[tuple[datetime, str, str], ...],
+) -> bool:
+    """Detect persisted unavailable/operational targets inside a candidate interval."""
+    return any(
+        candidate.interval_start_utc < requested_time < candidate.interval_end_utc
+        and (
+            acquisition_status != "FRAME_AVAILABLE"
+            or observation_state not in {"PRESENT", "ABSENT", "INDETERMINATE"}
+        )
+        for requested_time, acquisition_status, observation_state in coverage_events
+    )
+
+
+def _parse_candidate_timestamp(value: object) -> datetime:
+    try:
+        return _parse_timestamp(value)
+    except ValueError as error:
+        raise SuccessorEvidenceError("candidate_evidence_corrupt") from error
 
 
 def _valid_roi(value: dict[object, object], source_width: int, source_height: int) -> bool:
@@ -1143,4 +1689,10 @@ def _timestamp(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-__all__ = ("EVIDENCE_VERSION", "SuccessorEvidenceError", "SuccessorEvidenceRepository")
+__all__ = (
+    "CANDIDATE_EVIDENCE_VERSION",
+    "EVIDENCE_VERSION",
+    "LEGACY_EVIDENCE_VERSION",
+    "SuccessorEvidenceError",
+    "SuccessorEvidenceRepository",
+)

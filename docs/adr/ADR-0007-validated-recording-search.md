@@ -40,6 +40,18 @@ cadence-derived tolerance. Its mode and measured frame delta are additive
 evidence, while missing or untrusted timing remains a closed decode-unavailable
 outcome.
 
+S7-1 amends the successor evidence repository, not the public Schema 8 terminal
+contract. Only qualified S4 candidates with complete search, narrowing, and
+revalidation coverage are stored inside successor evidence v2 so
+the existing same-directory atomic manifest remains the sole evidence commit
+point. The nested candidate record is identity/provenance bound, digest checked,
+and digest-bound to its parent evidence entries,
+and reconstructed only after strict validation against persisted observation
+IDs, actual frame times, and closed S3 evidence. Evidence v1 remains readable
+with no candidate. A separate sidecar was rejected because it would create an
+evidence/candidate split-commit window. Persistence alone does not promote a
+candidate to classifier `ABSENT`, `FOUND`, or Phase 8 eligibility.
+
 ## Context
 
 Phase 6 publishes one immutable confirmed reference frame, channel, source-pixel

@@ -9,7 +9,7 @@ definitive disappearance result.
 
 # The state machine keeps the safety branches visible and intentionally uses
 # small internal dataclasses rather than a public schema.
-# ruff: noqa: C901, D102, D105, E501, PLR0912, PLR0915, PLR2004, RUF022
+# ruff: noqa: C901, D102, D105, PLR0912, PLR0915, PLR2004, RUF022
 # pyright: reportAny=false, reportUnnecessaryIsInstance=false, reportUnknownArgumentType=false, reportUnknownMemberType=false
 
 from __future__ import annotations
@@ -150,7 +150,9 @@ class SuccessorCandidateInterval:
             or self.provisional != (not self.qualified)
             or type(self.coverage_incomplete) is not bool
             or not isinstance(self.supporting_observation_ids, tuple)
-            or any(not isinstance(item, str) or not item for item in self.supporting_observation_ids)
+            or any(
+                not isinstance(item, str) or not item for item in self.supporting_observation_ids
+            )
         ):
             raise CandidateSearchContractError
 
@@ -173,6 +175,31 @@ class SuccessorCandidateInterval:
     def end_utc(self) -> datetime:
         """Return the conservative right bound."""
         return self.interval_end_utc
+
+
+def candidate_persistence_eligible(
+    candidate: object,
+    *,
+    narrowing_coverage_incomplete: bool = False,
+    revalidation_coverage_incomplete: bool = False,
+) -> bool:
+    """Return whether a qualified S4 candidate has complete persistence coverage.
+
+    Search formation may retain a qualified candidate across a gap so that the
+    surrounding execution can report conservative uncertainty. Durable
+    candidate evidence is stricter: candidate, narrowing, and revalidation
+    coverage must all be complete.
+    """
+    return (
+        isinstance(candidate, SuccessorCandidateInterval)
+        and type(narrowing_coverage_incomplete) is bool
+        and type(revalidation_coverage_incomplete) is bool
+        and candidate.qualified
+        and not candidate.provisional
+        and not candidate.coverage_incomplete
+        and not narrowing_coverage_incomplete
+        and not revalidation_coverage_incomplete
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,7 +350,10 @@ def merge_candidate_intervals(
     """Merge overlapping internal runs deterministically while keeping disjoint runs."""
     if not candidates:
         return ()
-    ordered = sorted(candidates, key=lambda item: (item.interval_start_utc, item.interval_end_utc, item.candidate_id))
+    ordered = sorted(
+        candidates,
+        key=lambda item: (item.interval_start_utc, item.interval_end_utc, item.candidate_id),
+    )
     merged: list[SuccessorCandidateInterval] = []
     for current in ordered:
         if not merged or current.interval_start_utc > merged[-1].interval_end_utc:
@@ -333,7 +363,11 @@ def merge_candidate_intervals(
         start = previous.interval_start_utc
         end = max(previous.interval_end_utc, current.interval_end_utc)
         qualified = previous.qualified or current.qualified
-        supporting = tuple(dict.fromkeys((*previous.supporting_observation_ids, *current.supporting_observation_ids)))
+        supporting = tuple(
+            dict.fromkeys(
+                (*previous.supporting_observation_ids, *current.supporting_observation_ids)
+            )
+        )
         merged[-1] = SuccessorCandidateInterval(
             _candidate_id(previous.anchor_observation_id, previous.drop_observation_id, start, end),
             previous.anchor_observation_id,
@@ -543,9 +577,10 @@ def narrow_candidate_interval(
     else:
         completion = EvidenceNarrowingCompletion.TARGET_WIDTH_REACHED
         reason = "target_width_reached"
-    if completion is EvidenceNarrowingCompletion.TARGET_WIDTH_REACHED and (
-        right - left
-    ).total_seconds() > selected_policy.target_width_seconds:
+    if (
+        completion is EvidenceNarrowingCompletion.TARGET_WIDTH_REACHED
+        and (right - left).total_seconds() > selected_policy.target_width_seconds
+    ):
         completion = EvidenceNarrowingCompletion.ITERATION_LIMIT
         reason = "iteration_limit"
     return EvidenceNarrowingResult(
@@ -584,9 +619,7 @@ def _sample_key(sample: SuccessorSearchSample) -> tuple[datetime, str]:
     return timestamp, sample.observation_id
 
 
-def _candidate_id(
-    anchor_id: str, drop_id: str, start: datetime, end: datetime
-) -> str:
+def _candidate_id(anchor_id: str, drop_id: str, start: datetime, end: datetime) -> str:
     payload = {
         "anchor_observation_id": anchor_id,
         "drop_observation_id": drop_id,
@@ -595,6 +628,21 @@ def _candidate_id(
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return "successor-candidate-v1-" + hashlib.sha256(encoded).hexdigest()
+
+
+def candidate_interval_identity(
+    anchor_observation_id: str,
+    drop_observation_id: str,
+    interval_start_utc: datetime,
+    interval_end_utc: datetime,
+) -> str:
+    """Return the stable identity used by persisted internal candidates."""
+    return _candidate_id(
+        anchor_observation_id,
+        drop_observation_id,
+        interval_start_utc,
+        interval_end_utc,
+    )
 
 
 def _midpoint(left: datetime, right: datetime) -> datetime:
@@ -616,6 +664,8 @@ __all__ = (
     "SuccessorCandidateFormationResult",
     "SuccessorCandidateInterval",
     "SuccessorSearchSample",
+    "candidate_persistence_eligible",
+    "candidate_interval_identity",
     "form_candidates",
     "form_disappearance_candidates",
     "merge_candidate_intervals",

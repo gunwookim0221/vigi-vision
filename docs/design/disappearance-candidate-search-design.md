@@ -10,8 +10,10 @@ cancellation lifecycle correction are approved. Phase S5 now adds internal
 candidate-local verification and measured slow-path accounting. The S6
 implementation slice adds a bounded ambiguous-endpoint coarse-sampling
 fallback. One authoritative rack controlled case now validates the localized
-S3 correction and S4 containment; broader fresh labeled real-run validation,
-persistence, and public behavior remain unimplemented.**
+S3 correction and S4 containment. S7-1 durably persists only qualified S4
+candidates in the internal successor evidence manifest and strictly reopens
+them after restart; public terminal, API/UI, Phase 8, and judgment behavior
+remain unchanged.**
 
 The implemented Phase 7 and Schema 8 recording-search contracts remain
 authoritative in
@@ -32,8 +34,8 @@ The local S3 implementation adds only a pure internal evidence evaluator,
 process-local counters, and best-effort diagnostics at the existing successor
 classification boundary. S4 carries the resulting band as a private,
 process-local observation hint and derives bounded candidates at the execution
-boundary; neither is serialized. It does not add persisted records, terminal
-behavior, API/UI output, or a public candidate interval. The
+boundary. S7-1 now serializes the minimum qualified-candidate proof described
+below, without making the candidate public or changing terminal meaning. The
 preserved-data report is produced by
 `tools/measure_search_evidence_s3.py`; its labels are historical/preserved
 classifier results and it makes no disappearance-recall claim. Independent
@@ -532,6 +534,42 @@ corpus alone.
   smuggled through FOUND-only Phase 8 eligibility.
 - Old runs remain byte-for-value reopenable under their recorded policies.
 
+### 13.1 S7-1 internal qualified-candidate persistence
+
+S7-1 extends the existing atomic successor evidence manifest from v1 to v2.
+The terminal manifest remains Schema 8 and unchanged. A v2 evidence manifest
+always has `candidate_state`: it is `null` when no qualified candidate is
+published, otherwise it contains the internal
+`phase7e-successor-candidates-v1` record. Existing v1 evidence manifests remain
+strictly readable and reopen as having no persisted candidate; an unknown
+evidence or candidate version fails closed.
+
+The candidate record preserves the deterministic candidate ID, interval,
+qualified/provisional flags, coverage and recovery facts, and ordered support
+observation IDs. Its proof rows contain the complete closed S3 `SearchEvidence`
+value for every referenced observation. Strict reopen binds those rows back to
+the same manifest's observation IDs and actual frame times, binds the state to
+the investigation, run, plan, authority, ROI, and immutable reference resource,
+recomputes the canonical candidate identity, requires a strong reference plus
+at least two material drops, validates chronological deterministic ordering,
+and verifies both a canonical SHA-256 digest over the candidate state and a
+digest binding its referenced rows to the parent evidence entries. Missing,
+malformed, mismatched, non-finite, unsupported-version, or digest-invalid data
+is rejected rather than discarded and recomputed.
+
+Candidate state is validated before the existing same-directory atomic evidence
+manifest write and strictly read back afterward. It therefore shares the
+existing evidence publication commit point and cannot be independently
+published as a partially paired sidecar. Known-good manifests are not replaced.
+Persistence eligibility is stricter than S4 qualification: candidate-level
+coverage must be complete, and any S4 narrowing or S5 revalidation coverage gap
+excludes that candidate. The writer enforces this before publication, and strict
+reopen rejects persisted incomplete-coverage markers or gap observations inside
+the candidate interval.
+The persisted object remains internal search evidence: it does not create
+classifier `ABSENT`, a `PRESENT -> ABSENT` bracket, `FOUND`, Phase 8 eligibility,
+or a browser/API projection.
+
 ## 14. Future phase plan
 
 ### S3 — search-evidence contract and signal
@@ -560,10 +598,10 @@ S3 is implemented locally as shadow-only behavior:
   separately from classifier state.
 
 S3 does not choose candidate persistence counts, form intervals, move bounds,
-or claim recall. S4 currently uses a provisional repeated-material persistence
-rule and an internal maximum of eight ordered candidates; both remain review
-inputs rather than durable/public contracts. Independent event-window labels
-remain S6 work.
+or claim recall. S4 uses a provisional repeated-material persistence rule and
+an internal maximum of eight ordered candidates. S7-1 now makes the qualified
+result of that reviewed policy durable for strict internal reopen, without
+making it a public contract. Independent event-window labels remain S6 work.
 
 ### S4 — candidate interval formation and evidence narrowing
 
@@ -585,7 +623,8 @@ remain S6 work.
   internal candidate limit is exceeded; and
 - deliberately leaves candidate-only intervals out of the Schema 8 terminal
   and evidence projections. The implementation and cancellation correction
-  passed Initial and Follow-up Review; any production/persistence cutover
+  passed Initial and Follow-up Review. S7-1 durably embeds qualified candidates
+  in the internal successor evidence manifest; any public or terminal cutover
   remains a later reviewed phase.
 
 ### S5 — precise verification and slow-path rationalization
@@ -652,6 +691,9 @@ authoritative.
 
 ### S7 — integration and closure
 
+- S7-1 is implemented: qualified S4 candidates and their minimum S3 proof are
+  durably bound to successor evidence v2 with atomic publication, strict reopen,
+  deterministic ordering, v1 compatibility, and fail-closed corruption checks;
 - cut over coarse search and narrowing only after review of S3-S6 evidence;
 - implement any approved versioned evidence/terminal/Phase 8 boundary;
 - verify strict reopen, publication, review-clip generation, browser projection,
@@ -713,7 +755,8 @@ safety matrix (28 localized hits, zero PRESENT/OCCLUDED/REPLACEMENT hits). The
 candidate covering `(2026-09-22T03:18:55Z, 2026-09-22T03:19:10Z]`, no
 classifier `ABSENT`, and no legal PRESENT-to-ABSENT state bracket. This is one
 controlled-case and preserved-matrix result, not a general accuracy claim or a
-public/persistence cutover approval.
+public cutover approval. It subsequently supplied one acceptance case for the
+separately reviewed S7-1 internal persistence boundary.
 
 The follow-up registration-safety correction makes the classifier's existing
 camera-motion veto an explicit prerequisite of the localized path. The rack
@@ -741,15 +784,16 @@ candidate recall.
 ## 16. Open design questions for later phases
 
 The approved architecture now exercises S3 in shadow mode, S4 in an
-unpublished candidate path, and S5 in an unpublished verification path. Later
-phase reviews must decide or constrain:
+unpublished candidate path, S5 in an unpublished verification path, and S7-1
+durable reopen for qualified internal candidates. Later phase reviews must
+decide or constrain:
 
 1. whether the proposed conjunction for material reference drop is the right
    starting policy family before S3 selects numeric deltas;
 2. the maximum ordered candidate count and whether a tail-only material drop
    always enters verification;
-3. when a candidate-only interval must become durable, and the minimum new
-   versioned evidence/identity shape required for strict reopen;
+3. whether later verified dispositions or narrower candidate bounds require a
+   compatible persisted successor extension before any public cutover;
 4. whether candidate-only `INCONCLUSIVE` results should become eligible for a
    review clip through a future Phase 8 contract, without weakening FOUND; and
 5. which candidate-local segmentation/alignment/replacement/occlusion checks
@@ -768,5 +812,6 @@ and the complete unpublished S4 implementation. No further S4 review is
 required unless a new material regression appears. S5 is implemented and
 tested as an internal/process-local stage, but an Initial Review is recommended
 before any S5 production cutover or new v3 invocation policy. The current
-public/terminal contracts remain unchanged, and any durable/public candidate
-boundary requires its own phase-specific review.
+public/terminal contracts remain unchanged, and any public candidate projection
+still requires its own phase-specific review. S7-1 supplies only
+the reviewed durable internal candidate/reopen boundary.

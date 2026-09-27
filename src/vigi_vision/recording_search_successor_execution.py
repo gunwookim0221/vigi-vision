@@ -56,7 +56,9 @@ from vigi_vision.recording_search_successor_candidate_search import (
     EvidenceNarrowingPolicy,
     EvidenceNarrowingResult,
     SuccessorCandidateFormationResult,
+    SuccessorCandidateInterval,
     SuccessorSearchSample,
+    candidate_persistence_eligible,
     form_disappearance_candidates,
     narrow_candidate_interval,
 )
@@ -73,6 +75,7 @@ from vigi_vision.recording_search_successor_classification import (
     reidentify_observation,
 )
 from vigi_vision.recording_search_successor_evidence import (
+    LEGACY_EVIDENCE_VERSION,
     SuccessorEvidenceError,
     SuccessorEvidenceRepository,
 )
@@ -700,7 +703,26 @@ class SuccessorExecutionService:
             return None
         if not _evidence_matches_terminal(evidence, terminal):
             return None
-        return evidence
+        # S7-1 candidate state is an internal persistence contract. Preserve
+        # the existing exact-key public/browser evidence projection.
+        projected = dict(evidence)
+        projected.pop("candidate_state", None)
+        projected["version"] = LEGACY_EVIDENCE_VERSION
+        return projected
+
+    def read_candidates(
+        self, investigation_id: str, run_id: str
+    ) -> tuple[SuccessorCandidateInterval, ...]:
+        """Reopen lifecycle-confirmed internal S4 candidates, failing closed."""
+        if self.evidence_repository is None:
+            return ()
+        evidence = self.evidence_repository.read(investigation_id, run_id)
+        terminal = self.publisher.read(investigation_id, run_id)
+        if evidence is None:
+            return ()
+        if terminal is None or not _evidence_matches_terminal(evidence, terminal):
+            raise SuccessorEvidenceError("candidate_evidence_lifecycle_mismatch")
+        return self.evidence_repository.read_candidates(investigation_id, run_id)
 
     def execute(
         self,
@@ -769,6 +791,7 @@ class SuccessorExecutionService:
                     return self._narrow_or_publish(prepared, augmented, cancellation=cancellation)
                 candidate_search = _candidate_search(prepared, augmented)
             if prepared.plan.gaps:
+                persistable_candidates: tuple[SuccessorCandidateInterval, ...] = ()
                 if candidate_search.candidates:
                     narrowing_result = self._run_s4_narrowing(
                         prepared,
@@ -786,10 +809,16 @@ class SuccessorExecutionService:
                     )
                     if _s5_cancellation_observed(verification, cancellation):
                         return self._publish_interrupted(prepared)
+                    persistable_candidates = _persistable_s4_candidates(
+                        candidate_search.candidates,
+                        narrowing_result,
+                        verification,
+                    )
                 return self._publish_inconclusive(
                     prepared,
                     "incomplete_coverage",
                     augmented,
+                    candidates=persistable_candidates,
                     cancellation=cancellation,
                 )
             if candidate_search.candidates:
@@ -809,6 +838,11 @@ class SuccessorExecutionService:
                 )
                 if _s5_cancellation_observed(verification, cancellation):
                     return self._publish_interrupted(prepared)
+                persistable_candidates = _persistable_s4_candidates(
+                    candidate_search.candidates,
+                    narrowing_result,
+                    verification,
+                )
                 # Candidate-only evidence must not enter NOT_FOUND or FOUND;
                 # retain the existing terminal schema while preserving the
                 # conservative uncertainty internally for later S5 review.
@@ -816,6 +850,7 @@ class SuccessorExecutionService:
                     prepared,
                     "indeterminate_observation",
                     augmented,
+                    candidates=persistable_candidates,
                     cancellation=cancellation,
                 )
             if all(
@@ -1384,6 +1419,7 @@ class SuccessorExecutionService:
         coarse: SuccessorCoarseClassificationResult,
         narrowed: SuccessorBinaryNarrowingResult | None = None,
         *,
+        candidates: tuple[SuccessorCandidateInterval, ...] = (),
         cancellation: Callable[[], bool] | None = None,
     ) -> SuccessorTerminal:
         terminal = self._base_terminal(prepared, "INCONCLUSIVE", reason, False)
@@ -1405,6 +1441,14 @@ class SuccessorExecutionService:
                 {**terminal.as_record(), "terminal_result_id": None}
             ),
         )
+        if candidates:
+            return self._publish_terminal(
+                prepared,
+                terminal,
+                observations,
+                candidates=candidates,
+                cancellation=cancellation,
+            )
         return self._publish_terminal(
             prepared,
             terminal,
@@ -1418,6 +1462,7 @@ class SuccessorExecutionService:
         terminal: SuccessorTerminal,
         observations: tuple[SuccessorObservation, ...],
         *,
+        candidates: tuple[SuccessorCandidateInterval, ...] = (),
         cancellation: Callable[[], bool] | None = None,
     ) -> SuccessorTerminal:
         if cancellation is not None and cancellation():
@@ -1433,7 +1478,15 @@ class SuccessorExecutionService:
         evidence_repository = self.evidence_repository
         if evidence_repository is not None:
             try:
-                evidence_repository.stage(prepared, observations, terminal)
+                if candidates:
+                    evidence_repository.stage(
+                        prepared,
+                        observations,
+                        terminal,
+                        candidates,
+                    )
+                else:
+                    evidence_repository.stage(prepared, observations, terminal)
                 staged_evidence = True
             except SuccessorEvidenceError as error:
                 _safe_log(
@@ -1815,6 +1868,34 @@ def _coarse_probe_route(observation: SuccessorObservation) -> str:
     if observation.classifier_stage in {"completed", "timeout", "failed"}:
         return "B4"
     return "observation"
+
+
+def _persistable_s4_candidates(
+    candidates: tuple[SuccessorCandidateInterval, ...],
+    narrowing_result: EvidenceNarrowingResult | None,
+    verification: CandidateVerificationReport,
+) -> tuple[SuccessorCandidateInterval, ...]:
+    """Keep only qualified candidates whose search and follow-up coverage is complete."""
+    narrowing_incomplete_ids: set[str] = set()
+    if narrowing_result is not None and (
+        narrowing_result.coverage_incomplete
+        or narrowing_result.completion is EvidenceNarrowingCompletion.GAP
+    ):
+        narrowing_incomplete_ids.add(narrowing_result.candidate_id)
+    revalidation_incomplete_ids = {
+        item.candidate.candidate_id
+        for item in verification.results
+        if item.reason_code in {"coverage_gap", "operational_failure"}
+    }
+    return tuple(
+        candidate
+        for candidate in candidates
+        if candidate_persistence_eligible(
+            candidate,
+            narrowing_coverage_incomplete=candidate.candidate_id in narrowing_incomplete_ids,
+            revalidation_coverage_incomplete=candidate.candidate_id in revalidation_incomplete_ids,
+        )
+    )
 
 
 def _s4_cancellation_observed(

@@ -3,8 +3,9 @@ from __future__ import annotations
 # Compact fixture helpers intentionally use dynamic namespace objects.
 # ruff: noqa: ANN001, ANN201, ANN202
 import hashlib
+import json
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from types import SimpleNamespace
 
@@ -15,13 +16,25 @@ from vigi_vision.investigation_confirmation_models import ConfirmationRoi, RoiPr
 from vigi_vision.recording_search_successor_acquisition import (
     SuccessorTargetStatus,
 )
+from vigi_vision.recording_search_successor_candidate_search import (
+    SuccessorCandidateInterval,
+    SuccessorSearchSample,
+    candidate_interval_identity,
+    candidate_persistence_eligible,
+    form_disappearance_candidates,
+)
 from vigi_vision.recording_search_successor_classification import (
     SuccessorObservation,
     SuccessorObservationState,
 )
 from vigi_vision.recording_search_successor_evidence import (
+    LEGACY_EVIDENCE_VERSION,
     SuccessorEvidenceError,
     SuccessorEvidenceRepository,
+)
+from vigi_vision.recording_search_successor_search_evidence import (
+    SearchEvidence,
+    SearchEvidenceBand,
 )
 
 UTC = timezone.utc
@@ -125,6 +138,67 @@ def _fixture(tmp_path):
         first_absent_time_utc=None,
     )
     return prepared, (baseline_link, observation), terminal
+
+
+def _qualified_candidate_fixture(tmp_path):
+    prepared, observations, _terminal = _fixture(tmp_path)
+    material = SearchEvidence(
+        SearchEvidenceBand.MATERIAL_DROP,
+        "object_reference_support_drop",
+        scene_stable=True,
+        object_degradation=True,
+    )
+    first_time = NOW.replace(second=1)
+    second_time = NOW.replace(second=2)
+    first = replace(
+        observations[-1],
+        observation_id="successor-observation-v1-material-a",
+        requested_time_utc=first_time,
+        frame_utc=first_time,
+        state=SuccessorObservationState.INDETERMINATE,
+        reason_code="insufficient_visual_evidence",
+        _search_evidence=material,
+    )
+    second = replace(
+        observations[-1],
+        observation_id="successor-observation-v1-material-b",
+        requested_time_utc=second_time,
+        frame_utc=second_time,
+        state=SuccessorObservationState.INDETERMINATE,
+        reason_code="insufficient_visual_evidence",
+        _search_evidence=material,
+    )
+    candidate = SuccessorCandidateInterval(
+        candidate_interval_identity("confirmed_reference", first.observation_id, NOW, first_time),
+        "confirmed_reference",
+        first.observation_id,
+        NOW,
+        first_time,
+        qualified=True,
+        provisional=False,
+        supporting_observation_ids=(
+            "confirmed_reference",
+            first.observation_id,
+            second.observation_id,
+        ),
+    )
+    terminal = SimpleNamespace(
+        status="INCONCLUSIVE",
+        reason_code="indeterminate_observation",
+        last_present_time_utc=None,
+        first_absent_time_utc=None,
+    )
+    return prepared, (observations[0], first, second), terminal, candidate
+
+
+def _manifest_path(root, prepared):
+    return (
+        root
+        / prepared.request.investigation_id
+        / prepared.request.run_id
+        / "evidence"
+        / "manifest.json"
+    )
 
 
 def test_publish_reopens_identity_bound_full_and_roi_frames(tmp_path):
@@ -246,6 +320,375 @@ def test_missing_old_run_is_evidence_unavailable(tmp_path):
         repository.read("object-disappearance-v3-ch1-20260912T050000Z", "search-run-" + "b" * 32)
         is None
     )
+
+
+def test_qualified_candidate_round_trip_preserves_internal_identity_and_proof(tmp_path):
+    prepared, observations, terminal, candidate = _qualified_candidate_fixture(tmp_path)
+    root = tmp_path / ".successor"
+    repository = SuccessorEvidenceRepository(root)
+
+    manifest = repository.publish(prepared, observations, terminal, (candidate,))
+    reopened = repository.read_candidates(
+        prepared.request.investigation_id, prepared.request.run_id
+    )
+
+    assert reopened == (candidate,)
+    assert (
+        repository.read_candidates(prepared.request.investigation_id, prepared.request.run_id)
+        == reopened
+    )
+    assert manifest["terminal_status"] == "INCONCLUSIVE"
+    assert manifest["first_absent_observation_id"] is None
+    assert all(item["state"] != "ABSENT" for item in manifest["entries"])
+    candidate_state = manifest["candidate_state"]
+    assert candidate_state is not None
+    assert len(candidate_state["evidence_rows"]) == 2
+
+
+def test_missing_candidate_state_reopens_as_no_candidate_for_legacy_manifest(tmp_path):
+    prepared, observations, terminal = _fixture(tmp_path)
+    root = tmp_path / ".successor"
+    repository = SuccessorEvidenceRepository(root)
+    manifest = repository.publish(prepared, observations, terminal)
+    manifest.pop("candidate_state")
+    manifest["version"] = LEGACY_EVIDENCE_VERSION
+    _manifest_path(root, prepared).write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert (
+        repository.read_candidates(prepared.request.investigation_id, prepared.request.run_id) == ()
+    )
+
+
+def test_candidate_state_with_unsupported_version_fails_closed(tmp_path):
+    prepared, observations, terminal, candidate = _qualified_candidate_fixture(tmp_path)
+    root = tmp_path / ".successor"
+    repository = SuccessorEvidenceRepository(root)
+    manifest = repository.publish(prepared, observations, terminal, (candidate,))
+    manifest["candidate_state"]["version"] = "phase7e-successor-candidates-v999"
+    _manifest_path(root, prepared).write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(SuccessorEvidenceError, match="candidate_evidence_schema_unsupported"):
+        repository.read_candidates(prepared.request.investigation_id, prepared.request.run_id)
+
+
+def test_successor_evidence_with_unsupported_version_fails_closed(tmp_path):
+    prepared, observations, terminal = _fixture(tmp_path)
+    root = tmp_path / ".successor"
+    repository = SuccessorEvidenceRepository(root)
+    manifest = repository.publish(prepared, observations, terminal)
+    manifest["version"] = "phase7e-successor-evidence-v999"
+    _manifest_path(root, prepared).write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(SuccessorEvidenceError, match="evidence_schema_unsupported"):
+        repository.read_candidates(prepared.request.investigation_id, prepared.request.run_id)
+
+
+def test_candidate_state_tampering_fails_digest_validation(tmp_path):
+    prepared, observations, terminal, candidate = _qualified_candidate_fixture(tmp_path)
+    root = tmp_path / ".successor"
+    repository = SuccessorEvidenceRepository(root)
+    manifest = repository.publish(prepared, observations, terminal, (candidate,))
+    manifest["candidate_state"]["candidates"][0]["interval_end_utc"] = "2026-09-12T05:00:03.000000Z"
+    _manifest_path(root, prepared).write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(SuccessorEvidenceError, match="candidate_evidence_digest_mismatch"):
+        repository.read_candidates(prepared.request.investigation_id, prepared.request.run_id)
+
+
+def test_candidate_evidence_row_mismatch_fails_even_with_recomputed_digest(tmp_path):
+    prepared, observations, terminal, candidate = _qualified_candidate_fixture(tmp_path)
+    root = tmp_path / ".successor"
+    repository = SuccessorEvidenceRepository(root)
+    manifest = repository.publish(prepared, observations, terminal, (candidate,))
+    state = manifest["candidate_state"]
+    state["evidence_rows"][0]["frame_utc"] = "2026-09-12T05:00:09.000000Z"
+    unsigned = {key: value for key, value in state.items() if key != "digest"}
+    state["digest"] = hashlib.sha256(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    _manifest_path(root, prepared).write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(SuccessorEvidenceError, match="candidate_evidence_corrupt"):
+        repository.read_candidates(prepared.request.investigation_id, prepared.request.run_id)
+
+
+def test_candidate_source_entry_tampering_fails_source_digest_validation(tmp_path):
+    prepared, observations, terminal, candidate = _qualified_candidate_fixture(tmp_path)
+    root = tmp_path / ".successor"
+    repository = SuccessorEvidenceRepository(root)
+    manifest = repository.publish(prepared, observations, terminal, (candidate,))
+    candidate_entry = next(
+        item
+        for item in manifest["entries"]
+        if item["observation_id"] == candidate.drop_observation_id
+    )
+    candidate_entry["classifier_elapsed_ms"] = 11
+    _manifest_path(root, prepared).write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(SuccessorEvidenceError, match="candidate_evidence_digest_mismatch"):
+        repository.read_candidates(prepared.request.investigation_id, prepared.request.run_id)
+
+
+def test_malformed_candidate_support_fails_before_publication(tmp_path):
+    prepared, observations, terminal, candidate = _qualified_candidate_fixture(tmp_path)
+    malformed = replace(
+        candidate,
+        supporting_observation_ids=("confirmed_reference", candidate.drop_observation_id),
+    )
+
+    with pytest.raises(SuccessorEvidenceError, match="candidate_evidence_corrupt"):
+        SuccessorEvidenceRepository(tmp_path / ".successor").publish(
+            prepared, observations, terminal, (malformed,)
+        )
+
+    assert not _manifest_path(tmp_path / ".successor", prepared).exists()
+
+
+def test_provisional_candidate_is_not_publishable_as_durable_candidate(tmp_path):
+    prepared, observations, terminal, candidate = _qualified_candidate_fixture(tmp_path)
+    provisional = replace(candidate, qualified=False, provisional=True)
+
+    with pytest.raises(SuccessorEvidenceError, match="candidate_evidence_corrupt"):
+        SuccessorEvidenceRepository(tmp_path / ".successor").publish(
+            prepared, observations, terminal, (provisional,)
+        )
+
+
+def test_search_gap_then_repeated_material_drop_is_not_persistable(tmp_path):
+    prepared, observations, terminal, candidate = _qualified_candidate_fixture(tmp_path)
+    material = observations[1]._search_evidence
+    assert material is not None
+    samples = (
+        SuccessorSearchSample(
+            observations[1].observation_id,
+            observations[1].frame_utc,
+            material,
+            "INDETERMINATE",
+            observations[1].requested_time_utc,
+            available=True,
+            gap=False,
+        ),
+        SuccessorSearchSample(
+            "successor-observation-v1-coverage-gap",
+            None,
+            None,
+            "REPLAY_TIMEOUT",
+            NOW + timedelta(milliseconds=1500),
+            available=False,
+            gap=True,
+        ),
+        SuccessorSearchSample(
+            observations[2].observation_id,
+            observations[2].frame_utc,
+            observations[2]._search_evidence,
+            "INDETERMINATE",
+            observations[2].requested_time_utc,
+            available=True,
+            gap=False,
+        ),
+    )
+
+    formed = form_disappearance_candidates(
+        samples,
+        seed_reference_time_utc=NOW,
+        seed_reference_observation_id="confirmed_reference",
+    )
+
+    assert len(formed.qualified_candidates) == 1
+    incomplete = formed.qualified_candidates[0]
+    assert incomplete.qualified is True
+    assert incomplete.coverage_incomplete is True
+    assert candidate_persistence_eligible(incomplete) is False
+    assert incomplete.candidate_id == candidate.candidate_id
+    repository = SuccessorEvidenceRepository(tmp_path / ".successor")
+    with pytest.raises(SuccessorEvidenceError, match="candidate_evidence_corrupt"):
+        repository.publish(prepared, observations, terminal, (incomplete,))
+    assert (
+        repository.read_candidates(prepared.request.investigation_id, prepared.request.run_id) == ()
+    )
+    assert not _manifest_path(tmp_path / ".successor", prepared).exists()
+
+
+def test_candidate_with_interval_gap_observation_is_not_publishable(tmp_path):
+    prepared, observations, terminal, candidate = _qualified_candidate_fixture(tmp_path)
+    gap = replace(
+        observations[-1],
+        observation_id="successor-observation-v1-coverage-gap-entry",
+        target_id="successor-target-v1-coverage-gap-entry",
+        acquisition_id="successor-acquisition-v1-coverage-gap-entry",
+        sequence=3,
+        ordinal=3,
+        requested_time_utc=NOW + timedelta(milliseconds=500),
+        frame_utc=None,
+        frame_pts_seconds=None,
+        frame_offset_seconds=None,
+        acquisition_status=SuccessorTargetStatus.REPLAY_TIMEOUT,
+        state=SuccessorObservationState.REPLAY_TIMEOUT,
+        reason_code="target_replay_timeout",
+        frame_sha256=None,
+        frame_bytes=None,
+        frame_width=None,
+        frame_height=None,
+        comparison=None,
+        classifier_stage=None,
+        classifier_elapsed_ms=None,
+        _search_evidence=None,
+    )
+    repository = SuccessorEvidenceRepository(tmp_path / ".successor")
+
+    with pytest.raises(SuccessorEvidenceError, match="candidate_evidence_corrupt"):
+        repository.publish(prepared, (*observations, gap), terminal, (candidate,))
+
+    assert (
+        repository.read_candidates(prepared.request.investigation_id, prepared.request.run_id) == ()
+    )
+    assert not _manifest_path(tmp_path / ".successor", prepared).exists()
+
+    valid_repository = SuccessorEvidenceRepository(tmp_path / "valid")
+    valid_manifest = valid_repository.publish(prepared, observations, terminal, (candidate,))
+    gap_repository = SuccessorEvidenceRepository(tmp_path / "gap")
+    gap_manifest = gap_repository.publish(prepared, (*observations, gap), terminal)
+    gap_manifest["candidate_state"] = valid_manifest["candidate_state"]
+    _manifest_path(tmp_path / "gap", prepared).write_text(
+        json.dumps(gap_manifest), encoding="utf-8"
+    )
+
+    with pytest.raises(SuccessorEvidenceError, match="candidate_evidence_corrupt"):
+        gap_repository.read_candidates(prepared.request.investigation_id, prepared.request.run_id)
+
+
+def test_strict_reopen_rejects_incomplete_candidate_with_valid_candidate_digest(tmp_path):
+    prepared, observations, terminal, candidate = _qualified_candidate_fixture(tmp_path)
+    root = tmp_path / ".successor"
+    repository = SuccessorEvidenceRepository(root)
+    manifest = repository.publish(prepared, observations, terminal, (candidate,))
+    candidate_record = manifest["candidate_state"]["candidates"][0]
+    candidate_record["coverage_incomplete"] = True
+    state = manifest["candidate_state"]
+    unsigned = {key: value for key, value in state.items() if key != "digest"}
+    state["digest"] = hashlib.sha256(
+        json.dumps(unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    _manifest_path(root, prepared).write_text(json.dumps(manifest), encoding="utf-8")
+
+    for _ in range(2):
+        with pytest.raises(SuccessorEvidenceError, match="candidate_evidence_corrupt"):
+            repository.read_candidates(prepared.request.investigation_id, prepared.request.run_id)
+
+
+@pytest.mark.parametrize("reason", ["camera_motion", "occlusion", "replacement"])
+def test_scene_or_confounder_only_evidence_does_not_form_a_persistable_candidate(reason):
+    strong = SearchEvidence(
+        SearchEvidenceBand.STRONG_REFERENCE,
+        "reference_support_retained",
+        scene_stable=True,
+    )
+    ambiguous = SearchEvidence(
+        SearchEvidenceBand.USABLE_AMBIGUOUS,
+        f"{reason}_suppressed_direction",
+        scene_stable=False,
+        scene_discontinuity=True,
+        scene_only_suppressed=True,
+    )
+    material = SearchEvidence(
+        SearchEvidenceBand.MATERIAL_DROP,
+        "object_reference_support_drop",
+        scene_stable=True,
+        object_degradation=True,
+    )
+    samples = tuple(
+        SuccessorSearchSample(
+            f"successor-observation-v1-{reason}-{index}",
+            NOW + timedelta(seconds=index),
+            evidence,
+            "PRESENT" if evidence.band is SearchEvidenceBand.STRONG_REFERENCE else "INDETERMINATE",
+            NOW + timedelta(seconds=index),
+            available=True,
+            gap=False,
+        )
+        for index, evidence in enumerate((strong, ambiguous, material))
+    )
+
+    formed = form_disappearance_candidates(samples)
+
+    assert not formed.qualified_candidates
+    assert all(not candidate_persistence_eligible(item) for item in formed.candidates)
+
+
+def test_multiple_candidates_publish_and_reopen_in_deterministic_order(tmp_path):
+    prepared, observations, terminal, first_candidate = _qualified_candidate_fixture(tmp_path)
+    template = observations[-1]
+    strong_time = NOW.replace(second=3)
+    third_time = NOW.replace(second=4)
+    fourth_time = NOW.replace(second=5)
+    strong = replace(
+        template,
+        observation_id="successor-observation-v1-strong-b",
+        requested_time_utc=strong_time,
+        frame_utc=strong_time,
+        state=SuccessorObservationState.PRESENT,
+        reason_code=None,
+        _search_evidence=SearchEvidence(
+            SearchEvidenceBand.STRONG_REFERENCE,
+            "reference_support_retained",
+            scene_stable=True,
+        ),
+    )
+    material = SearchEvidence(
+        SearchEvidenceBand.MATERIAL_DROP,
+        "object_reference_support_drop",
+        scene_stable=True,
+        object_degradation=True,
+    )
+    third = replace(
+        template,
+        observation_id="successor-observation-v1-material-c",
+        requested_time_utc=third_time,
+        frame_utc=third_time,
+        _search_evidence=material,
+    )
+    fourth = replace(
+        template,
+        observation_id="successor-observation-v1-material-d",
+        requested_time_utc=fourth_time,
+        frame_utc=fourth_time,
+        _search_evidence=material,
+    )
+    first_candidate = replace(
+        first_candidate,
+        recovery_observation_id=strong.observation_id,
+    )
+    second_candidate = SuccessorCandidateInterval(
+        candidate_interval_identity(
+            strong.observation_id,
+            third.observation_id,
+            strong_time,
+            third_time,
+        ),
+        strong.observation_id,
+        third.observation_id,
+        strong_time,
+        third_time,
+        qualified=True,
+        provisional=False,
+        supporting_observation_ids=(
+            strong.observation_id,
+            third.observation_id,
+            fourth.observation_id,
+        ),
+    )
+    repository = SuccessorEvidenceRepository(tmp_path / ".successor")
+
+    repository.publish(
+        prepared,
+        (*observations, strong, third, fourth),
+        terminal,
+        (second_candidate, first_candidate),
+    )
+
+    assert repository.read_candidates(
+        prepared.request.investigation_id, prepared.request.run_id
+    ) == (first_candidate, second_candidate)
 
 
 def test_baseline_support_comparison_reopens_with_all_metrics(tmp_path):

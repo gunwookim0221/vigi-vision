@@ -330,7 +330,12 @@ closed. An
 immutable 24-frame replay recovered one qualified S4 candidate containing the
 human interval without producing `ABSENT` or a legal state bracket; a 168-row
 preserved safety replay produced localized hits only on labeled ABSENT rows.
-This remains controlled validation, not a public/persisted candidate cutover.
+This remains controlled validation, not a public candidate cutover. S7-1 now
+persists only qualified S4 candidates with complete required coverage as
+internal successor evidence v2 with
+stable identity, minimum S3 proof, atomic publication, strict restart reopen,
+and v1 compatibility; it does not change Schema 8 terminal meaning, public
+projection, or Phase 8 eligibility.
 The next direction is now the
 [disappearance-candidate-first search](docs/design/disappearance-candidate-search-design.md):
 classification state remains separate from search evidence, candidate interval
@@ -345,16 +350,19 @@ fallback for an ambiguous search endpoint (at most four deterministic interior
 probes, existing classifier/acquisition reuse, cancellation and gap safety,
 whole-second UTC probe normalization for fractional decoded frame times, and
 diagnostics only). One labeled rack controlled case and its localized S3
-correction are validated; broader fresh real-NVR coverage and any public or
-persisted candidate contract remain pending.
+correction are validated. S7-1 internal qualified-candidate persistence is
+implemented; broader fresh real-NVR coverage and any public candidate/Phase 8
+contract remain pending.
 Search admission now uses the same effective start in the browser and backend:
 the later of the investigation anchor and selected baseline time; minute-level
 native `datetime-local` search-end values are accepted as whole seconds.
 The existing successor/browser chain still requires its final human real-NVR
 acceptance. S3 shadow evidence, S4 internal candidate narrowing, and S5
 internal candidate-local verification are implemented and approved; S6's
-bounded fallback implementation is local and unpersisted. One rack controlled
-case is complete, while broader S6 validation and S7 remain future work.
+bounded fallback implementation is local. S7-1 adds durable internal qualified-
+candidate reopen without a public cutover. One rack controlled case is complete,
+while broader S6 validation and later S7 public/review-media integration remain
+future work.
 Correction B adds a bounded Windows-spawn process boundary around production
 Phase 7E B4 classification; timeout/cancellation terminate and reap the child,
 and late output cannot become evidence. Valid results allow a bounded two-second
@@ -432,10 +440,12 @@ capability.
    fresh manually labeled real-NVR validation centered on event containment and
    complete misses. One rack controlled case now validates the localized S3
    correction and candidate containment, while broader independent scene and
-   confounder coverage remains required; S7 performs reviewed
+   confounder coverage remains required; S7-1 now persists and strictly reopens
+   qualified internal candidates, while later S7 work performs reviewed public
    evidence/review-media integration and closure. Do not loosen the approved
-   fast-PRESENT gate or make fast ABSENT a prerequisite. Existing persistence,
-   API, terminal, and UI contracts remain unchanged until their phase-specific
+   fast-PRESENT gate or make fast ABSENT a prerequisite. S7-1 is the reviewed
+   exception to the earlier process-local persistence boundary; public API,
+   terminal, and UI contracts remain unchanged until their phase-specific
    reviews approve an implementation.
 
 ## High-level roadmap
