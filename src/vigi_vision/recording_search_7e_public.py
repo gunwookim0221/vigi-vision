@@ -63,6 +63,7 @@ from vigi_vision.recording_search_7e_repository import (
 )
 from vigi_vision.recording_search_7e_validation import Phase7EValidationError
 from vigi_vision.recording_search_b3_media import InMemoryRgbDecoder
+from vigi_vision.recording_search_lock import LocalInvestigationLock
 from vigi_vision.recording_search_successor import (
     SuccessorPlanError,
     SuccessorPlanRequest,
@@ -631,6 +632,54 @@ class Phase7EPublicService:
             tuple(bundle.coarse_targets),
         )
 
+    def acquire_successor_ownership(
+        self, prepared: Phase7EPreparedRequest
+    ) -> LocalInvestigationLock | None:
+        """Acquire the existing investigation OS lock before successor admission."""
+        if prepared.successor is None:
+            raise Phase7EPublicError("invalid_request")
+        try:
+            lock = LocalInvestigationLock(
+                self.repository.lock_path(prepared.request.investigation_id)
+            )
+            return lock if lock.try_acquire(self.repository.lock_timeout_seconds) else None
+        except (OSError, Phase7ECorruptError) as error:
+            raise Phase7EPublicError("recording_search_execution_unavailable") from error
+
+    def recover_successor_abandoned(
+        self, prepared: Phase7EPreparedRequest, ownership: LocalInvestigationLock
+    ) -> None:
+        """Recover only a prior unowned RUNNING record while holding its OS lock."""
+        self._require_successor_owner(prepared, ownership)
+        if self.successor_execution is None:
+            raise Phase7EPublicError("recording_search_execution_unavailable")
+        try:
+            self.successor_execution.publisher.recover_abandoned(
+                investigation_id=prepared.request.investigation_id, ownership=ownership
+            )
+        except (OSError, SuccessorExecutionError) as error:
+            raise Phase7EPublicError("search_run_corrupt") from error
+
+    def publish_successor_running(
+        self, prepared: Phase7EPreparedRequest, ownership: LocalInvestigationLock
+    ) -> None:
+        """Make the active run identity visible before returning ACCEPTED."""
+        self._require_successor_owner(prepared, ownership)
+        if self.successor_execution is None or prepared.successor is None:
+            raise Phase7EPublicError("recording_search_execution_unavailable")
+        try:
+            self.successor_execution.publisher.publish_running(prepared.successor)
+        except SuccessorExecutionError as error:
+            raise Phase7EPublicError("search_run_corrupt") from error
+
+    def _require_successor_owner(
+        self, prepared: Phase7EPreparedRequest, ownership: LocalInvestigationLock
+    ) -> None:
+        if not ownership.held or ownership.path != self.repository.lock_path(
+            prepared.request.investigation_id
+        ):
+            raise Phase7EPublicError("recording_search_execution_unavailable")
+
     def resolve_existing(  # noqa: C901 - strict legacy/successor reopen dispatch.
         self, prepared: Phase7EPreparedRequest
     ) -> Phase7EPublicStatus | None:
@@ -688,25 +737,40 @@ class Phase7EPublicService:
                 raise Phase7EPublicError("search_run_corrupt") from error
         return self.status(request.investigation_id, request.run_id)
 
-    def execute_prepared(  # noqa: C901
+    def execute_prepared(  # noqa: C901, PLR0912 - successor/legacy dispatch stays explicit.
         self,
         prepared: Phase7EPreparedRequest,
         *,
         cancellation: Callable[[], bool] | None = None,
         create_phase8_handoff: bool = False,
+        successor_ownership: LocalInvestigationLock | None = None,
     ) -> Phase7EPublicStatus:
         """Execute one already validated request under one cancellable invocation."""
         if prepared.successor is not None:
             if self.successor_execution is None:
                 raise Phase7EPublicError("recording_search_execution_unavailable")
+            ownership = successor_ownership or self.acquire_successor_ownership(prepared)
+            if ownership is None:
+                raise Phase7EPublicError("already_running")
             try:
-                self.successor_execution.execute(prepared.successor, cancellation=cancellation)
-            except SuccessorExecutionError as error:
-                raise Phase7EPublicError(str(error)) from error
-            return self.status(
-                prepared.successor.request.investigation_id,
-                prepared.successor.request.run_id,
-            )
+                self._require_successor_owner(prepared, ownership)
+                if successor_ownership is None:
+                    self.recover_successor_abandoned(prepared, ownership)
+                    existing = self.resolve_existing(prepared)
+                    if existing is not None:
+                        return existing
+                    self.publish_successor_running(prepared, ownership)
+                try:
+                    self.successor_execution.execute(prepared.successor, cancellation=cancellation)
+                except SuccessorExecutionError as error:
+                    raise Phase7EPublicError(str(error)) from error
+                return self.status(
+                    prepared.successor.request.investigation_id,
+                    prepared.successor.request.run_id,
+                )
+            finally:
+                if successor_ownership is None:
+                    ownership.release()
         request_domain = prepared.request
         try:
             with self.executor.invocation(
@@ -866,7 +930,9 @@ class Phase7EPublicService:
         """Interrupt bounded, strictly reopened active runs left by a prior process."""
         recovered = 0
         if self.successor_execution is not None:
-            recovered += self.successor_execution.publisher.recover_abandoned()
+            recovered += self.successor_execution.publisher.recover_abandoned(
+                lock_path_for=self.repository.lock_path
+            )
         try:
             self.repository.ensure_root()
             candidates = _bounded_recovery_candidates(self.repository.root)

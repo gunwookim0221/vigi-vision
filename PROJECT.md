@@ -367,6 +367,12 @@ terminal-status reads, including same-server ledger retries and strict internal
 candidate reopen. Missing or corrupt evidence fails these reads closed;
 candidate-only evidence remains public `INCONCLUSIVE`, not ABSENT/FOUND.
 Historical Schema 5–7 reads and immutable failed terminals remain unchanged.
+New successor admission now holds the existing per-investigation OS lock from
+the durable RUNNING claim through worker terminalization and cleanup, so
+independent managers sharing the artifact root cannot execute a second active
+run. An identical active retry reuses its run identity; a different run receives
+`already_running`. Completed retries still strictly reopen, and startup
+recovery interrupts only RUNNING records without a live lock owner.
 One rack controlled case is complete, while broader real-NVR acceptance and
 Phase 8 review-media integration remain future work.
 Correction B adds a bounded Windows-spawn process boundary around production

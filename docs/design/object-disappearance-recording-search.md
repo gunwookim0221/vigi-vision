@@ -1566,6 +1566,16 @@ state is a fixed safe 500 category. Malformed JSON remains HTTP 400
 `invalid_request`. No response contains native errors, paths, credentials, SDK
 payloads, or internal manifests.
 
+For new successor work, the existing per-investigation OS-backed lock is the
+shared execution owner across independent managers using one artifact root.
+Admission acquires it, rechecks durable state, and publishes RUNNING before
+returning `ACCEPTED`; the worker retains it through terminalization and cleanup.
+An identical active retry resolves the same run without another worker, while
+a different run is `already_running`. Terminal retries strictly reopen without
+execution. Process death releases the OS lock; startup recovery interrupts only
+unowned RUNNING records before later admission. No separate lease or epoch is
+introduced for this local-filesystem ownership boundary.
+
 The application owns one fixed one-worker executor and a bounded 64-entry
 request ledger; it has no unbounded queue. The worker calls the same
 `Phase7EPublicService` used by CLI, holds existing invocation ownership across

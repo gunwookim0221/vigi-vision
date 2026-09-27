@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import sys
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -29,6 +30,8 @@ _LOGGER = logging.getLogger("uvicorn.error.vigi_vision.phase7e")
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from vigi_vision.recording_search_lock import LocalInvestigationLock
+
 
 class Phase7EBackgroundService(Protocol):
     """Production methods required by the bounded background lifecycle."""
@@ -48,7 +51,20 @@ class Phase7EBackgroundService(Protocol):
         *,
         cancellation: Callable[[], bool] | None = None,
         create_phase8_handoff: bool = False,
+        successor_ownership: LocalInvestigationLock | None = None,
     ) -> Phase7EPublicStatus: ...
+
+    def acquire_successor_ownership(
+        self, prepared: Phase7EPreparedRequest
+    ) -> LocalInvestigationLock | None: ...
+
+    def recover_successor_abandoned(
+        self, prepared: Phase7EPreparedRequest, ownership: LocalInvestigationLock
+    ) -> None: ...
+
+    def publish_successor_running(
+        self, prepared: Phase7EPreparedRequest, ownership: LocalInvestigationLock
+    ) -> None: ...
 
     def status(self, investigation_id: str, run_id: str) -> Phase7EPublicStatus: ...
 
@@ -90,6 +106,7 @@ class _Job:
     failure_diagnostic: Phase7EFailureDiagnostic | None = None
     future: Future[None] | None = field(default=None, repr=False)
     watchdog: Timer | None = field(default=None, repr=False)
+    ownership: LocalInvestigationLock | None = field(default=None, repr=False)
 
     @property
     def run_id(self) -> str:
@@ -147,6 +164,7 @@ class Phase7EBackgroundManager:
         prepared: Phase7EPreparedRequest,
     ) -> Phase7EStartReceipt:
         """Serialize durable retry resolution with process-local admission."""
+        is_successor = getattr(prepared, "successor", None) is not None
         completed_receipt: Phase7EStartReceipt | None = None
         with self._lock:
             if self._closed:
@@ -160,7 +178,7 @@ class Phase7EBackgroundManager:
                 ):
                     raise Phase7EPublicError(_CONFLICT)
                 receipt = prior.receipt()
-                if receipt.status in {"ACCEPTED", "RUNNING"} or prepared.successor is None:
+                if receipt.status in {"ACCEPTED", "RUNNING"} or not is_successor:
                     return receipt
                 completed_receipt = receipt
 
@@ -172,6 +190,9 @@ class Phase7EBackgroundManager:
             if existing is None or existing.phase7.status != completed_receipt.status:
                 raise Phase7EPublicError(_CORRUPT)
             return completed_receipt
+
+        if is_successor:
+            return self._admit_successor(investigation_id, search_end, request_id, prepared)
 
         existing = self._service.resolve_existing(prepared)
         if existing is not None:
@@ -207,6 +228,95 @@ class Phase7EBackgroundManager:
             job.watchdog.daemon = True
             job.watchdog.start()
             return Phase7EStartReceipt(request_id, investigation_id, job.run_id, "ACCEPTED")
+
+    def _admit_successor(  # noqa: C901, PLR0912, PLR0915 - explicit owner arbitration.
+        self,
+        investigation_id: str,
+        search_end: str,
+        request_id: str,
+        prepared: Phase7EPreparedRequest,
+    ) -> Phase7EStartReceipt:
+        """Claim the investigation OS lock before exposing one successor worker."""
+        active_same_run = False
+        try:
+            existing = self._service.resolve_existing(prepared)
+        except Phase7EPublicError as error:
+            if error.code != _ALREADY_RUNNING:
+                raise
+            active_same_run = True
+            existing = None
+        if existing is not None:
+            job = _Job(request_id, investigation_id, search_end, prepared)
+            job.status = existing.phase7.status
+            with self._lock:
+                self._remember(job)
+            return job.receipt()
+
+        ownership = self._service.acquire_successor_ownership(prepared)
+        if ownership is None:
+            if active_same_run:
+                return Phase7EStartReceipt(
+                    request_id, investigation_id, prepared.request.run_id, "RUNNING"
+                )
+            # The other manager may have published its active claim after our
+            # first read; distinguish an identical retry from a foreign run.
+            try:
+                _ = self._service.resolve_existing(prepared)
+            except Phase7EPublicError as error:
+                if error.code == _ALREADY_RUNNING:
+                    return Phase7EStartReceipt(
+                        request_id, investigation_id, prepared.request.run_id, "RUNNING"
+                    )
+                raise
+            raise Phase7EPublicError(_ALREADY_RUNNING)
+
+        transferred = False
+        try:
+            self._service.recover_successor_abandoned(prepared, ownership)
+            existing = self._service.resolve_existing(prepared)
+            if existing is not None:
+                job = _Job(request_id, investigation_id, search_end, prepared)
+                job.status = existing.phase7.status
+                with self._lock:
+                    self._remember(job)
+                return job.receipt()
+            with self._lock:
+                if self._closed:
+                    raise Phase7EPublicError(_UNAVAILABLE)
+                if self._active_request_id is not None:
+                    raise Phase7EPublicError(_ALREADY_RUNNING)
+                self._service.publish_successor_running(prepared, ownership)
+                job = _Job(request_id, investigation_id, search_end, prepared)
+                job.ownership = ownership
+                self._remember(job)
+                self._active_request_id = request_id
+                try:
+                    job.future = self._executor.submit(self._run, job)
+                except RuntimeError as error:
+                    self._active_request_id = None
+                    # The durable RUNNING claim already exists. Close it while
+                    # still owning the investigation before releasing the lock.
+                    try:
+                        terminal = self._service.publish_background_terminal(
+                            prepared, status="FAILED", reason_code="internal_error"
+                        )
+                        job.status = terminal.phase7.status
+                        job.error_code = terminal.phase7.reason_code
+                    except Exception:  # noqa: BLE001 - startup recovery owns the fallback.
+                        job.status = "RUNNING"
+                    raise Phase7EPublicError(_UNAVAILABLE) from error
+                transferred = True
+                job.watchdog = Timer(
+                    self._execution_deadline_seconds,
+                    self._watchdog_expired,
+                    args=(job,),
+                )
+                job.watchdog.daemon = True
+                job.watchdog.start()
+                return Phase7EStartReceipt(request_id, investigation_id, job.run_id, "ACCEPTED")
+        finally:
+            if not transferred:
+                ownership.release()
 
     def status(self, investigation_id: str, run_id: str) -> Phase7EPublicStatus:
         """Read durable status first, then project only pre-admission worker state."""
@@ -269,14 +379,21 @@ class Phase7EBackgroundManager:
         """Apply bounded durable interruption recovery before serving requests."""
         _ = self._service.recover_abandoned()
 
-    def _run(self, job: _Job) -> None:
+    def _run(self, job: _Job) -> None:  # noqa: C901, PLR0912 - lifecycle branches stay explicit.
         with self._lock:
             job.status = "RUNNING"
         try:
-            result = self._service.execute_prepared(
-                job.prepared,
-                cancellation=job.cancellation.is_set,
-            )
+            if job.ownership is None:
+                result = self._service.execute_prepared(
+                    job.prepared,
+                    cancellation=job.cancellation.is_set,
+                )
+            else:
+                result = self._service.execute_prepared(
+                    job.prepared,
+                    cancellation=job.cancellation.is_set,
+                    successor_ownership=job.ownership,
+                )
             with self._lock:
                 job.status = result.phase7.status
                 job.error_code = result.phase7.reason_code
@@ -316,10 +433,47 @@ class Phase7EBackgroundManager:
         finally:
             if job.watchdog is not None:
                 job.watchdog.cancel()
-            self._recover_unexpected_running(job)
-            with self._lock:
-                if self._active_request_id == job.request_id:
-                    self._active_request_id = None
+            original_error = sys.exc_info()[1]
+            finalization_error: BaseException | None = original_error
+            try:
+                self._recover_unexpected_running(job)
+            except BaseException as error:  # noqa: BLE001 - cleanup must run on every exit.
+                if finalization_error is None:
+                    finalization_error = error
+                _safe_log(
+                    "phase7e.worker_lifecycle",
+                    stage="shutdown_reconciliation_failed",
+                    phase="successor_execution",
+                    status="RUNNING",
+                    error_code="terminal_reconciliation_failed",
+                )
+            try:
+                with self._lock:
+                    if self._active_request_id == job.request_id:
+                        self._active_request_id = None
+            except BaseException as error:  # noqa: BLE001 - attempt lock release afterward.
+                if finalization_error is None:
+                    finalization_error = error
+                _safe_log(
+                    "phase7e.worker_lifecycle",
+                    stage="active_state_cleanup_failed",
+                    phase="successor_execution",
+                    error_code="active_state_cleanup_failed",
+                )
+            try:
+                if job.ownership is not None:
+                    job.ownership.release()
+            except BaseException as error:  # noqa: BLE001 - preserve higher-priority failures.
+                if finalization_error is None:
+                    finalization_error = error
+                _safe_log(
+                    "phase7e.worker_lifecycle",
+                    stage="ownership_release_failed",
+                    phase="successor_execution",
+                    error_code="ownership_release_failed",
+                )
+            if original_error is None and finalization_error is not None:
+                raise finalization_error
 
     def _publish_worker_terminal(self, job: _Job) -> None:
         """Persist a safe terminal when the worker exits without one."""

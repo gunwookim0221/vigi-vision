@@ -11,7 +11,7 @@ import time
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from threading import Event
+from threading import Barrier, Event, Lock, Thread
 from types import SimpleNamespace
 from urllib.request import Request, urlopen
 
@@ -39,15 +39,21 @@ from vigi_vision.investigation_confirmation_models import (
 )
 from vigi_vision.object_presence_values import ClassificationOutcome, DecodedRgbImage
 from vigi_vision.recording_models import RecordingSegment, RecordingWindow, ReplayRequest
-from vigi_vision.recording_search_7e_background import Phase7EBackgroundManager
+from vigi_vision.recording_search_7e_background import (
+    Phase7EBackgroundManager,
+    Phase7EStartReceipt,
+)
 from vigi_vision.recording_search_7e_public import (
+    Phase7EPreparedRequest,
     Phase7EPublicError,
     Phase7EPublicService,
+    Phase7EPublicStatus,
     approved_phase7e_policy,
 )
 from vigi_vision.recording_search_7e_repository import RecordingSearch7ERepository
 from vigi_vision.recording_search_api import install_recording_search_routes
 from vigi_vision.recording_search_b3_media import DecodedMedia
+from vigi_vision.recording_search_lock import LocalInvestigationLock
 from vigi_vision.recording_search_successor import SuccessorPlanService
 from vigi_vision.recording_search_successor_acquisition import SuccessorTargetAcquisitionService
 from vigi_vision.recording_search_successor_candidate_search import (
@@ -1065,6 +1071,408 @@ def test_active_successor_duplicate_does_not_require_uncommitted_evidence(
     finally:
         release.set()
         manager.close()
+
+
+@pytest.mark.parametrize("same_request", [True, False])
+def test_independent_managers_share_one_successor_execution_owner(  # noqa: C901, PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    same_request: bool,  # noqa: FBT001
+) -> None:
+    """A second server instance cannot admit another worker for one investigation."""
+    release = Event()
+    entered = [Event(), Event()]
+    publications = {"evidence": 0, "terminal": 0}
+    confirmed = replace(_confirmed(tmp_path), jpeg_sha256=hashlib.sha256(b"baseline").hexdigest())
+    policy, classifier_policy, object_policy = approved_phase7e_policy()
+
+    class _Confirmation:
+        def load_confirmed(self, investigation_id: str) -> ConfirmedInvestigationInput:
+            assert investigation_id == confirmed.investigation_id
+            return confirmed
+
+    class _GatedPublic:
+        def __init__(self, delegate: Phase7EPublicService, index: int) -> None:
+            self.delegate = delegate
+            self.index = index
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.delegate, name)
+
+        def execute_prepared(self, *args: object, **kwargs: object) -> Phase7EPublicStatus:
+            entered[self.index].set()
+            assert release.wait(5)
+            return self.delegate.execute_prepared(*args, **kwargs)  # type: ignore[arg-type]
+
+    managers: list[Phase7EBackgroundManager] = []
+    executions: list[SuccessorExecutionService] = []
+    for index in range(2):
+        execution = _service(tmp_path, ANCHOR + timedelta(minutes=15))
+        execution.evidence_repository = SuccessorEvidenceRepository(tmp_path / "successor")
+        executions.append(execution)
+        original_stage = execution.evidence_repository.stage
+        original_terminal = execution.publisher.publish_terminal
+
+        def stage(*args: object, _original: object = original_stage, **kwargs: object) -> object:
+            publications["evidence"] += 1
+            return _original(*args, **kwargs)  # type: ignore[operator]
+
+        def terminal(
+            *args: object, _original: object = original_terminal, **kwargs: object
+        ) -> object:
+            publications["terminal"] += 1
+            return _original(*args, **kwargs)  # type: ignore[operator]
+
+        monkeypatch.setattr(execution.evidence_repository, "stage", stage)
+        monkeypatch.setattr(execution.publisher, "publish_terminal", terminal)
+        public = Phase7EPublicService(
+            RecordingSearch7ERepository(tmp_path / "legacy"),
+            SimpleNamespace(),
+            _Confirmation(),
+            None,
+            None,
+            policy,
+            classifier_policy,
+            object_policy,
+            SimpleNamespace(status=lambda *_args: (None, None)),
+            lambda: ANCHOR + timedelta(hours=1),
+            None,
+            execution,
+        )
+        managers.append(Phase7EBackgroundManager(_GatedPublic(public, index)))  # type: ignore[arg-type]
+    first_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    second_id = first_id if same_request else "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    try:
+        first = managers[0].start(confirmed.investigation_id, "2026-09-04T14:47:32", first_id)
+        assert first.status == "ACCEPTED"
+        assert entered[0].wait(2)
+        managers[1].recover_startup()
+        assert (
+            managers[0].status(confirmed.investigation_id, first.run_id).phase7.status == "RUNNING"
+        )
+        if same_request:
+            second = managers[1].start(confirmed.investigation_id, "2026-09-04T14:47:32", second_id)
+            assert second.run_id == first.run_id
+            assert second.status in {"ACCEPTED", "RUNNING"}
+        else:
+            with pytest.raises(Phase7EPublicError, match="already_running"):
+                managers[1].start(confirmed.investigation_id, "2026-09-04T14:47:32", second_id)
+        assert not entered[1].wait(0.1)
+        release.set()
+        first_future = managers[0]._jobs[first_id].future
+        assert first_future is not None
+        first_future.result(timeout=10)
+        assert managers[0].status(confirmed.investigation_id, first.run_id).phase7.status == "FOUND"
+        assert publications == {"evidence": 1, "terminal": 1}
+        assert executions[1].acquisition.replay_extractor.calls == 0
+        if same_request:
+            retry = managers[1].start(confirmed.investigation_id, "2026-09-04T14:47:32", first_id)
+            assert retry.status == "FOUND"
+            assert retry.run_id == first.run_id
+            assert publications == {"evidence": 1, "terminal": 1}
+            manifest_path = (
+                tmp_path
+                / "successor"
+                / confirmed.investigation_id
+                / first.run_id
+                / "evidence"
+                / "manifest.json"
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["plan_id"] = "successor-plan-v1-tampered"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with pytest.raises(Phase7EPublicError, match="search_run_corrupt"):
+                managers[1].start(confirmed.investigation_id, "2026-09-04T14:47:32", first_id)
+        else:
+            next_run = managers[1].start(
+                confirmed.investigation_id, "2026-09-04T14:47:32", second_id
+            )
+            assert next_run.status == "ACCEPTED"
+            next_future = managers[1]._jobs[second_id].future
+            assert next_future is not None
+            next_future.result(timeout=10)
+            next_status = managers[1].status(confirmed.investigation_id, next_run.run_id)
+            assert next_status.phase7.status == "FOUND"
+            assert publications == {"evidence": 2, "terminal": 2}
+    finally:
+        release.set()
+        for manager in managers:
+            manager.close()
+
+
+def test_successor_recovery_skips_live_owner_and_releases_crashed_owner(tmp_path: Path) -> None:
+    """A RUNNING record is interrupted only after its OS owner is gone."""
+    repository = RecordingSearch7ERepository(tmp_path / "legacy")
+    publisher = SuccessorTerminalRepository(tmp_path / "legacy" / ".successor")
+    service = _service(tmp_path, ANCHOR + timedelta(minutes=15))
+    prepared = service.prepare(
+        _confirmed(tmp_path),
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-" + "d" * 32,
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    publisher.publish_running(prepared)
+    lock = LocalInvestigationLock(repository.lock_path(prepared.request.investigation_id))
+    assert lock.try_acquire(0)
+    try:
+        assert publisher.recover_abandoned(lock_path_for=repository.lock_path) == 0
+        active = publisher.read(prepared.request.investigation_id, prepared.request.run_id)
+        assert active is not None
+        assert active["status"] == "RUNNING"
+    finally:
+        lock.release()
+    assert publisher.recover_abandoned(lock_path_for=repository.lock_path) == 1
+    recovered = publisher.read(prepared.request.investigation_id, prepared.request.run_id)
+    assert recovered is not None
+    assert recovered["status"] == "INTERRUPTED"
+    assert publisher.recover_abandoned(lock_path_for=repository.lock_path) == 0
+
+
+def test_worker_reconciliation_error_releases_owner_and_allows_next_manager(  # noqa: PLR0915
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A corrupt/readback failure remains observable without leaking ownership."""
+    confirmed = replace(_confirmed(tmp_path), jpeg_sha256=hashlib.sha256(b"baseline").hexdigest())
+    policy, classifier_policy, object_policy = approved_phase7e_policy()
+    entered = Event()
+    release = Event()
+    fail_readback = Event()
+    readback_error_code = "successor_publication_corrupt"
+    publications = {"evidence": 0, "terminal": 0}
+
+    class _Confirmation:
+        def load_confirmed(self, investigation_id: str) -> ConfirmedInvestigationInput:
+            assert investigation_id == confirmed.investigation_id
+            return confirmed
+
+    class _GatedPublic:
+        def __init__(self, delegate: Phase7EPublicService) -> None:
+            self.delegate = delegate
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.delegate, name)
+
+        def resolve_existing(self, prepared: Phase7EPreparedRequest) -> Phase7EPublicStatus | None:
+            if fail_readback.is_set():
+                raise SuccessorExecutionError(readback_error_code)
+            return self.delegate.resolve_existing(prepared)
+
+        def execute_prepared(self, *args: object, **kwargs: object) -> Phase7EPublicStatus:
+            entered.set()
+            assert release.wait(5)
+            return self.delegate.status(confirmed.investigation_id, args[0].request.run_id)  # type: ignore[attr-defined]
+
+    def make_public() -> tuple[Phase7EPublicService, SuccessorExecutionService]:
+        execution = _service(tmp_path, ANCHOR + timedelta(minutes=15))
+        execution.evidence_repository = SuccessorEvidenceRepository(tmp_path / "successor")
+        original_stage = execution.evidence_repository.stage
+        original_terminal = execution.publisher.publish_terminal
+
+        def stage(*args: object, **kwargs: object) -> object:
+            publications["evidence"] += 1
+            return original_stage(*args, **kwargs)
+
+        def terminal(*args: object, **kwargs: object) -> object:
+            publications["terminal"] += 1
+            return original_terminal(*args, **kwargs)
+
+        monkeypatch.setattr(execution.evidence_repository, "stage", stage)
+        monkeypatch.setattr(execution.publisher, "publish_terminal", terminal)
+        public = Phase7EPublicService(
+            RecordingSearch7ERepository(tmp_path / "legacy"),
+            SimpleNamespace(),
+            _Confirmation(),
+            None,
+            None,
+            policy,
+            classifier_policy,
+            object_policy,
+            SimpleNamespace(status=lambda *_args: (None, None)),
+            lambda: ANCHOR + timedelta(hours=1),
+            None,
+            execution,
+        )
+        return public, execution
+
+    public_a, _execution_a = make_public()
+    manager_a = Phase7EBackgroundManager(_GatedPublic(public_a))  # type: ignore[arg-type]
+    first_request = "11111111-1111-4111-8111-111111111111"
+    second_request = "22222222-2222-4222-8222-222222222222"
+    first = manager_a.start(confirmed.investigation_id, "2026-09-04T14:47:32", first_request)
+    first_job = manager_a._jobs[first_request]
+    assert first_job.future is not None
+    try:
+        assert entered.wait(2)
+        fail_readback.set()
+        release.set()
+        with pytest.raises(SuccessorExecutionError, match="successor_publication_corrupt"):
+            first_job.future.result(timeout=5)
+        assert manager_a._active_request_id is None
+        assert first_job.ownership is not None
+        assert not first_job.ownership.held
+        assert publications == {"evidence": 0, "terminal": 0}
+
+        probe_lock = LocalInvestigationLock(
+            public_a.repository.lock_path(confirmed.investigation_id)
+        )
+        assert probe_lock.try_acquire(0)
+        probe_lock.release()
+
+        public_b, execution_b = make_public()
+        manager_b = Phase7EBackgroundManager(public_b)
+        try:
+            second = manager_b.start(
+                confirmed.investigation_id, "2026-09-04T14:47:32", second_request
+            )
+            assert second.status == "ACCEPTED"
+            second_job = manager_b._jobs[second_request]
+            assert second_job.future is not None
+            second_job.future.result(timeout=10)
+            assert manager_b.status(confirmed.investigation_id, first.run_id).phase7.status == (
+                "INTERRUPTED"
+            )
+            assert (
+                manager_b.status(confirmed.investigation_id, second.run_id).phase7.status == "FOUND"
+            )
+            assert execution_b.acquisition.replay_extractor.calls > 0
+            assert publications == {"evidence": 1, "terminal": 2}
+        finally:
+            manager_b.close()
+    finally:
+        release.set()
+        manager_a.close()
+
+
+def test_successor_worker_submit_failure_closes_running_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rejected worker submission cannot strand its published RUNNING claim."""
+    confirmed = replace(_confirmed(tmp_path), jpeg_sha256=hashlib.sha256(b"baseline").hexdigest())
+    policy, classifier_policy, object_policy = approved_phase7e_policy()
+
+    class _Confirmation:
+        def load_confirmed(self, investigation_id: str) -> ConfirmedInvestigationInput:
+            assert investigation_id == confirmed.investigation_id
+            return confirmed
+
+    execution = _service(tmp_path, ANCHOR + timedelta(minutes=15))
+    public = Phase7EPublicService(
+        RecordingSearch7ERepository(tmp_path / "legacy"),
+        SimpleNamespace(),
+        _Confirmation(),
+        None,
+        None,
+        policy,
+        classifier_policy,
+        object_policy,
+        SimpleNamespace(status=lambda *_args: (None, None)),
+        lambda: ANCHOR + timedelta(hours=1),
+        None,
+        execution,
+    )
+    manager = Phase7EBackgroundManager(public)
+    request_id = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+
+    def reject_submit(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError
+
+    monkeypatch.setattr(manager._executor, "submit", reject_submit)
+    try:
+        with pytest.raises(Phase7EPublicError, match="recording_search_execution_unavailable"):
+            manager.start(confirmed.investigation_id, "2026-09-04T14:47:32", request_id)
+        run_id = "search-run-" + request_id.replace("-", "")
+        assert public.status(confirmed.investigation_id, run_id).phase7.status == "FAILED"
+        assert execution.publisher.recover_abandoned(lock_path_for=public.repository.lock_path) == 0
+    finally:
+        manager.close()
+
+
+def test_simultaneous_successor_admission_is_one_owned_worker(  # noqa: C901
+    tmp_path: Path,
+) -> None:
+    """Both managers read absent first; only one may launch the same run."""
+    confirmed = replace(_confirmed(tmp_path), jpeg_sha256=hashlib.sha256(b"baseline").hexdigest())
+    policy, classifier_policy, object_policy = approved_phase7e_policy()
+    barrier = Barrier(2)
+    release = Event()
+    entered = Event()
+    count_lock = Lock()
+    worker_count = 0
+    results: list[Phase7EStartReceipt | Phase7EPublicError] = []
+
+    class _Confirmation:
+        def load_confirmed(self, investigation_id: str) -> ConfirmedInvestigationInput:
+            assert investigation_id == confirmed.investigation_id
+            return confirmed
+
+    class _RacingPublic:
+        def __init__(self, delegate: Phase7EPublicService) -> None:
+            self.delegate = delegate
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.delegate, name)
+
+        def acquire_successor_ownership(self, prepared: object) -> object:
+            barrier.wait(5)
+            return self.delegate.acquire_successor_ownership(prepared)  # type: ignore[arg-type]
+
+        def execute_prepared(self, *args: object, **kwargs: object) -> Phase7EPublicStatus:
+            nonlocal worker_count
+            with count_lock:
+                worker_count += 1
+            entered.set()
+            assert release.wait(5)
+            return self.delegate.execute_prepared(*args, **kwargs)  # type: ignore[arg-type]
+
+    managers: list[Phase7EBackgroundManager] = []
+    for _ in range(2):
+        execution = _service(tmp_path, ANCHOR + timedelta(minutes=15))
+        execution.evidence_repository = SuccessorEvidenceRepository(tmp_path / "successor")
+        public = Phase7EPublicService(
+            RecordingSearch7ERepository(tmp_path / "legacy"),
+            SimpleNamespace(),
+            _Confirmation(),
+            None,
+            None,
+            policy,
+            classifier_policy,
+            object_policy,
+            SimpleNamespace(status=lambda *_args: (None, None)),
+            lambda: ANCHOR + timedelta(hours=1),
+            None,
+            execution,
+        )
+        managers.append(Phase7EBackgroundManager(_RacingPublic(public)))  # type: ignore[arg-type]
+
+    request_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+
+    def start(manager: Phase7EBackgroundManager) -> None:
+        try:
+            results.append(
+                manager.start(confirmed.investigation_id, "2026-09-04T14:47:32", request_id)
+            )
+        except Phase7EPublicError as error:
+            results.append(error)
+
+    threads = [Thread(target=start, args=(manager,)) for manager in managers]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(8)
+        assert all(not thread.is_alive() for thread in threads)
+        assert len(results) == 2
+        assert all(isinstance(result, Phase7EStartReceipt) for result in results)
+        assert {result.status for result in results if isinstance(result, Phase7EStartReceipt)} == {
+            "ACCEPTED",
+            "RUNNING",
+        }
+        assert entered.is_set()
+        assert worker_count == 1
+    finally:
+        release.set()
+        for manager in managers:
+            manager.close()
 
 
 @pytest.mark.parametrize(

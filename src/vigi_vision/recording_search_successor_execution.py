@@ -38,6 +38,7 @@ from vigi_vision.recording_search_7e_b4_process import (
     run_b4_in_process,
 )
 from vigi_vision.recording_search_b3_models import ClassificationPreparationError
+from vigi_vision.recording_search_lock import LocalInvestigationLock
 from vigi_vision.recording_search_successor import (
     CoarseTargetAssignment,
     MultiSegmentCoarsePlan,
@@ -360,20 +361,45 @@ class SuccessorTerminalRepository:
                 raise SuccessorExecutionError("successor_publication_readback_failed")
             return _terminal_from_record(loaded)
 
-    def recover_abandoned(self) -> int:
+    def recover_abandoned(
+        self,
+        *,
+        investigation_id: str | None = None,
+        ownership: LocalInvestigationLock | None = None,
+        lock_path_for: Callable[[str], Path] | None = None,
+    ) -> int:
+        """Interrupt only RUNNING records whose investigation OS lock is unowned."""
         recovered = 0
         if not self.root.exists():
             return 0
         inspected = 0
         for path in self.root.glob("*/*/terminal.json"):
+            candidate_investigation = path.parent.parent.name
+            if investigation_id is not None and candidate_investigation != investigation_id:
+                continue
             inspected += 1
             if inspected > _MAX_RECOVERY_RECORDS:
                 raise SuccessorExecutionError("successor_recovery_capacity_exceeded")
-            try:
-                value = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+            lock = ownership or LocalInvestigationLock(
+                lock_path_for(candidate_investigation)
+                if lock_path_for is not None
+                else self.root.parent / ".locks" / f"{candidate_investigation}.lock"
+            )
+            if ownership is not None and (
+                not ownership.held or ownership.path.name != f"{candidate_investigation}.lock"
+            ):
+                raise SuccessorExecutionError("successor_ownership_invalid")
+            if ownership is None and not lock.try_acquire(0):
                 continue
-            if isinstance(value, dict) and value.get("status") == _RUNNING:
+            try:
+                try:
+                    value = self.read(candidate_investigation, path.parent.name)
+                except SuccessorExecutionError:
+                    # Corrupt records remain fail-closed on exact reopen; they
+                    # must not prevent recovery of other independent runs.
+                    continue
+                if value is None or value.get("status") != _RUNNING:
+                    continue
                 terminal = SuccessorTerminal(
                     str(value.get("investigation_id")),
                     str(value.get("run_id")),
@@ -397,6 +423,9 @@ class SuccessorTerminalRepository:
                 )
                 self.publish_terminal(terminal)
                 recovered += 1
+            finally:
+                if ownership is None:
+                    lock.release()
         return recovered
 
     def _atomic_write(
