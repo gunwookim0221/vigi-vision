@@ -1,7 +1,7 @@
 """Focused Phase S2-1 presence-first successor tests."""
 
 # Deterministic protocol fakes intentionally keep these focused tests compact.
-# ruff: noqa: ANN001, ANN202, E501, PLR0913
+# ruff: noqa: ANN001, ANN202, PLR0913
 
 from __future__ import annotations
 
@@ -100,7 +100,9 @@ def _policy() -> ObjectPresenceDecisionPolicy:
 def _plan():
     end = ANCHOR + timedelta(minutes=10)
     request = SuccessorPlanRequest(1, ANCHOR, end, "Asia/Seoul")
-    segment = RecordingSegment(1, ANCHOR.date(), int(ANCHOR.timestamp()), int(end.timestamp()), ANCHOR, end)
+    segment = RecordingSegment(
+        1, ANCHOR.date(), int(ANCHOR.timestamp()), int(end.timestamp()), ANCHOR, end
+    )
     return build_successor_plan(request, (segment,))
 
 
@@ -126,7 +128,11 @@ def _acquisition(plan, target, payload: bytes = b"same"):
         target.sequence,
         target.requested_time_utc,
         target.segment_id,
-        RecordingWindow(1, target.requested_time_utc - timedelta(seconds=1), target.requested_time_utc + timedelta(seconds=1)),
+        RecordingWindow(
+            1,
+            target.requested_time_utc - timedelta(seconds=1),
+            target.requested_time_utc + timedelta(seconds=1),
+        ),
         SuccessorTargetStatus.FRAME_AVAILABLE,
         target.requested_time_utc,
         1.0,
@@ -150,7 +156,9 @@ class _Decoder:
 class _Classifier:
     policy_identity = "policy-s2-1"
 
-    def __init__(self, outcome: ClassificationOutcome = ClassificationOutcome.INDETERMINATE) -> None:
+    def __init__(
+        self, outcome: ClassificationOutcome = ClassificationOutcome.INDETERMINATE
+    ) -> None:
         self.outcome = outcome
         self.prepare_calls = 0
         self.classify_calls = 0
@@ -161,7 +169,11 @@ class _Classifier:
 
     def classify(self, *_args: object) -> SuccessorClassifierResult:
         self.classify_calls += 1
-        reason = "insufficient_visual_evidence" if self.outcome is ClassificationOutcome.INDETERMINATE else None
+        reason = (
+            "insufficient_visual_evidence"
+            if self.outcome is ClassificationOutcome.INDETERMINATE
+            else None
+        )
         return SuccessorClassifierResult(self.outcome, reason)
 
 
@@ -345,7 +357,9 @@ def test_fast_present_delegates_when_scene_guard_background_is_too_sparse() -> N
         baseline_support_pixel_count=len(support),
         baseline_support_coverage=0.25,
     )
-    image = DecodedRgbImage.from_rows(tuple(tuple((100, 100, 100) for _ in range(width)) for _ in range(height)))
+    image = DecodedRgbImage.from_rows(
+        tuple(tuple((100, 100, 100) for _ in range(width)) for _ in range(height))
+    )
     assert fast_present_comparison(reference, image, roi, policy) is None
 
 

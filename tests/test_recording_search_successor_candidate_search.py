@@ -62,9 +62,11 @@ def _sample(
 
 def test_strong_strong_drop_creates_one_conservative_candidate() -> None:
     result = form_disappearance_candidates(
-        [_sample(0, SearchEvidenceBand.STRONG_REFERENCE),
-         _sample(1, SearchEvidenceBand.STRONG_REFERENCE),
-         _sample(2, SearchEvidenceBand.MATERIAL_DROP)]
+        [
+            _sample(0, SearchEvidenceBand.STRONG_REFERENCE),
+            _sample(1, SearchEvidenceBand.STRONG_REFERENCE),
+            _sample(2, SearchEvidenceBand.MATERIAL_DROP),
+        ]
     )
     assert len(result.candidates) == 1
     candidate = result.candidates[0]
@@ -75,9 +77,11 @@ def test_strong_strong_drop_creates_one_conservative_candidate() -> None:
 
 def test_ambiguous_between_anchor_and_drop_does_not_move_directional_state() -> None:
     result = form_disappearance_candidates(
-        [_sample(0, SearchEvidenceBand.STRONG_REFERENCE),
-         _sample(1, SearchEvidenceBand.USABLE_AMBIGUOUS),
-         _sample(2, SearchEvidenceBand.MATERIAL_DROP)]
+        [
+            _sample(0, SearchEvidenceBand.STRONG_REFERENCE),
+            _sample(1, SearchEvidenceBand.USABLE_AMBIGUOUS),
+            _sample(2, SearchEvidenceBand.MATERIAL_DROP),
+        ]
     )
     assert len(result.candidates) == 1
     assert result.candidates[0].interval_start_utc == START
@@ -85,19 +89,23 @@ def test_ambiguous_between_anchor_and_drop_does_not_move_directional_state() -> 
 
 def test_recovery_preserves_candidate_and_repeated_drop_qualifies_same_run() -> None:
     result = form_disappearance_candidates(
-        [_sample(0, SearchEvidenceBand.STRONG_REFERENCE),
-         _sample(1, SearchEvidenceBand.MATERIAL_DROP),
-         _sample(2, SearchEvidenceBand.STRONG_REFERENCE),
-         _sample(3, SearchEvidenceBand.MATERIAL_DROP)]
+        [
+            _sample(0, SearchEvidenceBand.STRONG_REFERENCE),
+            _sample(1, SearchEvidenceBand.MATERIAL_DROP),
+            _sample(2, SearchEvidenceBand.STRONG_REFERENCE),
+            _sample(3, SearchEvidenceBand.MATERIAL_DROP),
+        ]
     )
     assert len(result.candidates) == 2
     assert result.candidates[0].provisional
     assert result.candidates[0].recovery_observation_id == "obs-2"
     assert result.candidates[1].provisional
     repeated = form_disappearance_candidates(
-        [_sample(0, SearchEvidenceBand.STRONG_REFERENCE),
-         _sample(1, SearchEvidenceBand.MATERIAL_DROP),
-         _sample(2, SearchEvidenceBand.MATERIAL_DROP)]
+        [
+            _sample(0, SearchEvidenceBand.STRONG_REFERENCE),
+            _sample(1, SearchEvidenceBand.MATERIAL_DROP),
+            _sample(2, SearchEvidenceBand.MATERIAL_DROP),
+        ]
     )
     assert len(repeated.candidates) == 1
     assert repeated.candidates[0].qualified
@@ -144,9 +152,11 @@ def test_indeterminate_with_directional_evidence_is_usable() -> None:
 
 def test_insufficient_and_gaps_preserve_uncertainty() -> None:
     result = form_disappearance_candidates(
-        [_sample(0, SearchEvidenceBand.STRONG_REFERENCE),
-         _sample(1, None, gap=True),
-         _sample(2, SearchEvidenceBand.MATERIAL_DROP)]
+        [
+            _sample(0, SearchEvidenceBand.STRONG_REFERENCE),
+            _sample(1, None, gap=True),
+            _sample(2, SearchEvidenceBand.MATERIAL_DROP),
+        ]
     )
     assert len(result.candidates) == 1
     assert result.candidates[0].coverage_incomplete
@@ -154,16 +164,18 @@ def test_insufficient_and_gaps_preserve_uncertainty() -> None:
 
 def test_operational_sample_between_bounds_marks_coverage_incomplete() -> None:
     result = form_disappearance_candidates(
-        [_sample(0, SearchEvidenceBand.STRONG_REFERENCE),
-         SuccessorSearchSample(
-             "obs-1",
-             START + timedelta(seconds=100),
-             None,
-             "REPLAY_TIMEOUT",
-             START + timedelta(seconds=100),
-             available=False,
-         ),
-         _sample(2, SearchEvidenceBand.MATERIAL_DROP)]
+        [
+            _sample(0, SearchEvidenceBand.STRONG_REFERENCE),
+            SuccessorSearchSample(
+                "obs-1",
+                START + timedelta(seconds=100),
+                None,
+                "REPLAY_TIMEOUT",
+                START + timedelta(seconds=100),
+                available=False,
+            ),
+            _sample(2, SearchEvidenceBand.MATERIAL_DROP),
+        ]
     )
     assert result.candidates[0].coverage_incomplete
     narrowed = narrow_candidate_interval(result.candidates[0], lambda _: None)
@@ -176,9 +188,11 @@ def test_candidate_overflow_is_explicit_and_ordered() -> None:
     samples: list[SuccessorSearchSample] = []
     for index in range(7):
         samples.extend(
-            [_sample(index * 3, SearchEvidenceBand.STRONG_REFERENCE),
-             _sample(index * 3 + 1, SearchEvidenceBand.MATERIAL_DROP),
-             _sample(index * 3 + 2, SearchEvidenceBand.STRONG_REFERENCE)]
+            [
+                _sample(index * 3, SearchEvidenceBand.STRONG_REFERENCE),
+                _sample(index * 3 + 1, SearchEvidenceBand.MATERIAL_DROP),
+                _sample(index * 3 + 2, SearchEvidenceBand.STRONG_REFERENCE),
+            ]
         )
     result = form_disappearance_candidates(
         samples,
@@ -192,9 +206,11 @@ def test_candidate_overflow_is_explicit_and_ordered() -> None:
 
 def test_strong_midpoint_moves_left_and_drop_midpoint_moves_right() -> None:
     candidate = form_disappearance_candidates(
-        [_sample(0, SearchEvidenceBand.STRONG_REFERENCE),
-         _sample(1, SearchEvidenceBand.MATERIAL_DROP),
-         _sample(2, SearchEvidenceBand.MATERIAL_DROP)]
+        [
+            _sample(0, SearchEvidenceBand.STRONG_REFERENCE),
+            _sample(1, SearchEvidenceBand.MATERIAL_DROP),
+            _sample(2, SearchEvidenceBand.MATERIAL_DROP),
+        ]
     ).candidates[0]
     calls = 0
 
@@ -202,9 +218,7 @@ def test_strong_midpoint_moves_left_and_drop_midpoint_moves_right() -> None:
         nonlocal calls
         calls += 1
         band = (
-            SearchEvidenceBand.STRONG_REFERENCE
-            if calls == 1
-            else SearchEvidenceBand.MATERIAL_DROP
+            SearchEvidenceBand.STRONG_REFERENCE if calls == 1 else SearchEvidenceBand.MATERIAL_DROP
         )
         actual = midpoint + timedelta(seconds=10 if calls == 1 else -10)
         return SuccessorSearchSample(f"mid-{calls}", actual, _evidence(band))
@@ -221,9 +235,11 @@ def test_strong_midpoint_moves_left_and_drop_midpoint_moves_right() -> None:
 
 def test_ambiguous_insufficient_gap_and_cancel_stop_without_false_direction() -> None:
     candidate = form_disappearance_candidates(
-        [_sample(0, SearchEvidenceBand.STRONG_REFERENCE),
-         _sample(1, SearchEvidenceBand.MATERIAL_DROP),
-         _sample(2, SearchEvidenceBand.MATERIAL_DROP)]
+        [
+            _sample(0, SearchEvidenceBand.STRONG_REFERENCE),
+            _sample(1, SearchEvidenceBand.MATERIAL_DROP),
+            _sample(2, SearchEvidenceBand.MATERIAL_DROP),
+        ]
     ).candidates[0]
     for band, completion in (
         (SearchEvidenceBand.USABLE_AMBIGUOUS, EvidenceNarrowingCompletion.AMBIGUOUS),
@@ -231,9 +247,7 @@ def test_ambiguous_insufficient_gap_and_cancel_stop_without_false_direction() ->
     ):
         result = narrow_candidate_interval(
             candidate,
-            lambda midpoint, band=band: SuccessorSearchSample(
-                "mid", midpoint, _evidence(band)
-            ),
+            lambda midpoint, band=band: SuccessorSearchSample("mid", midpoint, _evidence(band)),
         )
         assert result.completion is completion
         assert result.interval_start_utc == candidate.interval_start_utc
@@ -256,9 +270,11 @@ def test_ambiguous_insufficient_gap_and_cancel_stop_without_false_direction() ->
 
 def test_nonmonotonic_and_no_progress_are_safe() -> None:
     candidate = form_disappearance_candidates(
-        [_sample(0, SearchEvidenceBand.STRONG_REFERENCE),
-         _sample(1, SearchEvidenceBand.MATERIAL_DROP),
-         _sample(2, SearchEvidenceBand.MATERIAL_DROP)]
+        [
+            _sample(0, SearchEvidenceBand.STRONG_REFERENCE),
+            _sample(1, SearchEvidenceBand.MATERIAL_DROP),
+            _sample(2, SearchEvidenceBand.MATERIAL_DROP),
+        ]
     ).candidates[0]
     calls = 0
 
@@ -266,9 +282,7 @@ def test_nonmonotonic_and_no_progress_are_safe() -> None:
         nonlocal calls
         calls += 1
         band = (
-            SearchEvidenceBand.MATERIAL_DROP
-            if calls == 1
-            else SearchEvidenceBand.STRONG_REFERENCE
+            SearchEvidenceBand.MATERIAL_DROP if calls == 1 else SearchEvidenceBand.STRONG_REFERENCE
         )
         return SuccessorSearchSample(f"n-{calls}", midpoint, _evidence(band))
 

@@ -153,9 +153,7 @@ def predict_masks_for_images(  # noqa: PLR0913
         _fail(ClassificationPreparationReason.CLASSIFIER_EXECUTION_FAILED)
     finally:
         _emit_diagnostic(diagnostics_sink, "segmentation_calls", prediction_calls)
-        _emit_diagnostic(
-            diagnostics_sink, "baseline_segmentation_calls", baseline_prediction_calls
-        )
+        _emit_diagnostic(diagnostics_sink, "baseline_segmentation_calls", baseline_prediction_calls)
         _emit_diagnostic(
             diagnostics_sink, "candidate_segmentation_calls", candidate_prediction_calls
         )

@@ -913,16 +913,12 @@ def _decode_packed_mask(encoded_mask: object, width: int, height: int) -> Binary
         width <= 0
         or height <= 0
         or len(packed) != expected_bytes
-        or (
-            cell_count % 8
-            and packed[-1] & ~((1 << (cell_count % 8)) - 1)
-        )
+        or (cell_count % 8 and packed[-1] & ~((1 << (cell_count % 8)) - 1))
     ):
         raise ValueError
     rows = tuple(
         tuple(
-            bool(packed[(y * width + x) // 8] & (1 << ((y * width + x) % 8)))
-            for x in range(width)
+            bool(packed[(y * width + x) // 8] & (1 << ((y * width + x) % 8))) for x in range(width)
         )
         for y in range(height)
     )

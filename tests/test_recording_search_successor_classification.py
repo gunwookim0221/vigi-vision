@@ -454,9 +454,7 @@ class _ReusableClassifier:
 
 def _authority_with_reusable_mask(plan, classifier: _ReusableClassifier):
     authority = _authority(plan)
-    mask = BinaryMask.from_rows(
-        tuple(tuple(x == y for x in range(32)) for y in range(32))
-    )
+    mask = BinaryMask.from_rows(tuple(tuple(x == y for x in range(32)) for y in range(32)))
     provenance = BaselineMaskProvenance(
         authority.authority_identity,
         authority.roi_identity,

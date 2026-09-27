@@ -118,9 +118,7 @@ def prepare_fast_presence_reference(
     # S2-1 does not run a transform search. It does, however, require a
     # zero-transform scene guard over the wider ring used by v3 so that a
     # sparse or weakly supported ROI delegates instead of short-circuiting.
-    alignment_radius_x, alignment_radius_y = _alignment_radii(
-        roi.width, roi.height, policy
-    )
+    alignment_radius_x, alignment_radius_y = _alignment_radii(roi.width, roi.height, policy)
     scene_guard_radius = min(
         _STABILITY_DILATION_PIXELS + max(alignment_radius_x, alignment_radius_y),
         min(roi.width, roi.height) // 4,
@@ -128,14 +126,10 @@ def prepare_fast_presence_reference(
     scene_guard_exclusion = _dilated_exclusion_mask(clipped_baseline, scene_guard_radius)
     scene_guard_background_indices = tuple(
         index
-        for index, excluded in enumerate(
-            value for row in scene_guard_exclusion for value in row
-        )
+        for index, excluded in enumerate(value for row in scene_guard_exclusion for value in row)
         if not excluded
     )
-    scene_guard_background = tuple(
-        baseline_luma[index] for index in scene_guard_background_indices
-    )
+    scene_guard_background = tuple(baseline_luma[index] for index in scene_guard_background_indices)
     return FastPresenceReference(
         baseline_luma=baseline_luma,
         baseline_mask=clipped_baseline,

@@ -511,9 +511,8 @@ def _candidate_samples(
             unique_frames.append(item)
             continue
         previous = unique_frames[equivalent_index]
-        if (
-            (item.observation_id in ids and previous.observation_id not in ids)
-            or _sample_preferred(item, previous)
+        if (item.observation_id in ids and previous.observation_id not in ids) or _sample_preferred(
+            item, previous
         ):
             unique_frames[equivalent_index] = item
     return tuple(sorted(unique_frames, key=_sample_key))
