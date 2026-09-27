@@ -357,12 +357,18 @@ Search admission now uses the same effective start in the browser and backend:
 the later of the investigation anchor and selected baseline time; minute-level
 native `datetime-local` search-end values are accepted as whole seconds.
 The existing successor/browser chain still requires its final human real-NVR
-acceptance. S3 shadow evidence, S4 internal candidate narrowing, and S5
+acceptance. S3 successor search evidence, S4 internal candidate narrowing, and S5
 internal candidate-local verification are implemented and approved; S6's
 bounded fallback implementation is local. S7-1 adds durable internal qualified-
-candidate reopen without a public cutover. One rack controlled case is complete,
-while broader S6 validation and later S7 public/review-media integration remain
-future work.
+candidate reopen. S7-2 makes the existing successor execution the sole
+authority for new supported public runs: its atomic evidence manifest and
+Schema 8 terminal are read together on completed-request retry and public
+terminal-status reads, including same-server ledger retries and strict internal
+candidate reopen. Missing or corrupt evidence fails these reads closed;
+candidate-only evidence remains public `INCONCLUSIVE`, not ABSENT/FOUND.
+Historical Schema 5–7 reads and immutable failed terminals remain unchanged.
+One rack controlled case is complete, while broader real-NVR acceptance and
+Phase 8 review-media integration remain future work.
 Correction B adds a bounded Windows-spawn process boundary around production
 Phase 7E B4 classification; timeout/cancellation terminate and reap the child,
 and late output cannot become evidence. Valid results allow a bounded two-second

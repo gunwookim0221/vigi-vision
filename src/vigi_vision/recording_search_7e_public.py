@@ -631,7 +631,7 @@ class Phase7EPublicService:
             tuple(bundle.coarse_targets),
         )
 
-    def resolve_existing(  # noqa: C901
+    def resolve_existing(  # noqa: C901 - strict legacy/successor reopen dispatch.
         self, prepared: Phase7EPreparedRequest
     ) -> Phase7EPublicStatus | None:
         """Resolve a durable retry, interrupting only an unowned active predecessor."""
@@ -788,6 +788,8 @@ class Phase7EPublicService:
             if successor_record is not None:
                 terminal = _successor_public_status(successor_record)
                 if terminal is not None:
+                    if successor_record.get("status") in {"FOUND", "NOT_FOUND", "INCONCLUSIVE"}:
+                        self._require_committed_successor_evidence(investigation_id, run_id)
                     return terminal
         phase7 = read_phase7_status(self.repository, investigation_id, run_id)
         run: Phase7ERun | None = None
@@ -799,6 +801,18 @@ class Phase7EPublicService:
         phase8, reason = self.phase8_repository.status(run, investigation_id, run_id)
         details = None if run is None else self._terminal_details(run)
         return Phase7EPublicStatus(phase7, phase8, reason, details)
+
+    def _require_committed_successor_evidence(self, investigation_id: str, run_id: str) -> None:
+        """Apply the same strict evidence/candidate reopen to every completed public read."""
+        successor = self.successor_execution
+        if successor is None or successor.evidence_repository is None:
+            return  # Historical/test compositions without successor evidence stay readable.
+        if successor.read_evidence(investigation_id, run_id) is None:
+            raise Phase7EPublicError("search_run_corrupt")
+        try:
+            successor.read_candidates(investigation_id, run_id)
+        except SuccessorEvidenceError as error:
+            raise Phase7EPublicError("search_run_corrupt") from error
 
     def _terminal_details(self, run: Phase7ERun) -> Phase7ETerminalDetails:
         records = tuple(run.records)

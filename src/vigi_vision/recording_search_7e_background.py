@@ -21,6 +21,7 @@ from vigi_vision.recording_search_7e_public import (
 
 _UNAVAILABLE = "recording_search_execution_unavailable"
 _CONFLICT = "request_conflict"
+_CORRUPT = "search_run_corrupt"
 _ALREADY_RUNNING = "already_running"
 _DEFAULT_EXECUTION_DEADLINE_SECONDS = 60.0 * 60.0
 _LOGGER = logging.getLogger("uvicorn.error.vigi_vision.phase7e")
@@ -138,7 +139,7 @@ class Phase7EBackgroundManager:
         with self._admission_lock:
             return self._admit(investigation_id, search_end, request_id, prepared)
 
-    def _admit(
+    def _admit(  # noqa: C901 - explicit active, cached-complete, and durable admission branches.
         self,
         investigation_id: str,
         search_end: str,
@@ -146,6 +147,7 @@ class Phase7EBackgroundManager:
         prepared: Phase7EPreparedRequest,
     ) -> Phase7EStartReceipt:
         """Serialize durable retry resolution with process-local admission."""
+        completed_receipt: Phase7EStartReceipt | None = None
         with self._lock:
             if self._closed:
                 raise Phase7EPublicError(_UNAVAILABLE)
@@ -157,7 +159,19 @@ class Phase7EBackgroundManager:
                     or prior.run_id != prepared.request.run_id
                 ):
                     raise Phase7EPublicError(_CONFLICT)
-                return prior.receipt()
+                receipt = prior.receipt()
+                if receipt.status in {"ACCEPTED", "RUNNING"} or prepared.successor is None:
+                    return receipt
+                completed_receipt = receipt
+
+        if completed_receipt is not None:
+            # The process-local ledger deduplicates work but cannot certify a
+            # completed successor result. Reuse the durable restart/reopen
+            # boundary before returning its cached terminal receipt.
+            existing = self._service.resolve_existing(prepared)
+            if existing is None or existing.phase7.status != completed_receipt.status:
+                raise Phase7EPublicError(_CORRUPT)
+            return completed_receipt
 
         existing = self._service.resolve_existing(prepared)
         if existing is not None:

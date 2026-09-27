@@ -11,6 +11,7 @@ import time
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from urllib.request import Request, urlopen
 
@@ -20,6 +21,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import vigi_vision.recording_search_successor_execution as execution_module
+from test_recording_search_successor_search_evidence import (
+    _comparison,
+    _policy,
+    _rack_absent_comparison,
+)
 from vigi_vision.investigation_confirmation_api import install_investigation_confirmation_routes
 from vigi_vision.investigation_confirmation_models import (
     ConfirmationManifest,
@@ -33,7 +39,9 @@ from vigi_vision.investigation_confirmation_models import (
 )
 from vigi_vision.object_presence_values import ClassificationOutcome, DecodedRgbImage
 from vigi_vision.recording_models import RecordingSegment, RecordingWindow, ReplayRequest
+from vigi_vision.recording_search_7e_background import Phase7EBackgroundManager
 from vigi_vision.recording_search_7e_public import (
+    Phase7EPublicError,
     Phase7EPublicService,
     approved_phase7e_policy,
 )
@@ -752,6 +760,536 @@ def test_qualified_s4_candidate_persists_and_reopens_without_public_absent(
     assert public_evidence is not None
     assert public_evidence["version"] == "phase7e-successor-evidence-v1"
     assert "candidate_state" not in public_evidence
+
+
+def test_public_retry_reopens_committed_candidate_and_rejects_tampering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    execution, _proxy = _coarse_fallback_service(
+        tmp_path, material_after=ANCHOR + timedelta(minutes=3)
+    )
+    execution.evidence_repository = SuccessorEvidenceRepository(tmp_path / "successor")
+    confirmed = replace(_confirmed(tmp_path), jpeg_sha256=hashlib.sha256(b"baseline").hexdigest())
+    policy, classifier_policy, object_policy = approved_phase7e_policy()
+
+    class _Confirmation:
+        def load_confirmed(self, investigation_id: str) -> ConfirmedInvestigationInput:
+            assert investigation_id == confirmed.investigation_id
+            return confirmed
+
+    public = Phase7EPublicService(
+        RecordingSearch7ERepository(tmp_path / "legacy"),
+        SimpleNamespace(),
+        _Confirmation(),
+        None,
+        None,
+        policy,
+        classifier_policy,
+        object_policy,
+        SimpleNamespace(status=lambda *_args: (None, None)),
+        lambda: ANCHOR + timedelta(hours=1),
+        None,
+        execution,
+    )
+    original_candidate_search = execution_module._candidate_search
+
+    def wait_for_qualified_candidate(
+        prepared_execution: SuccessorPreparedExecution, coarse: object
+    ) -> SuccessorCandidateFormationResult:
+        result = original_candidate_search(prepared_execution, coarse)  # type: ignore[arg-type]
+        if result.candidates and not result.qualified_candidates:
+            return SuccessorCandidateFormationResult(())
+        return result
+
+    monkeypatch.setattr(execution_module, "_candidate_search", wait_for_qualified_candidate)
+    prepared = public.prepare_http(
+        confirmed.investigation_id,
+        "2026-09-04T14:32:32",
+        "99999999-9999-4999-8999-999999999999",
+    )
+    assert prepared.successor is not None
+    assert public.execute_prepared(prepared).phase7.status == "INCONCLUSIVE"
+    candidate = execution.read_candidates(confirmed.investigation_id, prepared.request.run_id)
+    assert len(candidate) == 1
+    assert candidate[0].qualified
+
+    reopened_execution, _ = _coarse_fallback_service(tmp_path)
+    reopened_execution.evidence_repository = SuccessorEvidenceRepository(tmp_path / "successor")
+    reopened_public = replace(public, successor_execution=reopened_execution)
+    reopened_prepared = reopened_public.prepare_http(
+        confirmed.investigation_id,
+        "2026-09-04T14:32:32",
+        "99999999-9999-4999-8999-999999999999",
+    )
+    assert reopened_public.resolve_existing(reopened_prepared).phase7.status == "INCONCLUSIVE"  # type: ignore[union-attr]
+    assert (
+        reopened_execution.read_candidates(confirmed.investigation_id, prepared.request.run_id)
+        == candidate
+    )
+
+    manifest_path = (
+        tmp_path
+        / "successor"
+        / confirmed.investigation_id
+        / prepared.request.run_id
+        / "evidence"
+        / "manifest.json"
+    )
+    assert manifest_path.is_file()
+    manifest_text = manifest_path.read_text(encoding="utf-8")
+    legacy_manifest = json.loads(manifest_text)
+    legacy_manifest["version"] = "phase7e-successor-evidence-v1"
+    legacy_manifest.pop("candidate_state")
+    manifest_path.write_text(json.dumps(legacy_manifest), encoding="utf-8")
+    assert reopened_public.resolve_existing(reopened_prepared).phase7.status == "INCONCLUSIVE"  # type: ignore[union-attr]
+    assert (
+        reopened_execution.read_candidates(confirmed.investigation_id, prepared.request.run_id)
+        == ()
+    )
+    manifest_path.write_text(manifest_text, encoding="utf-8")
+    manifest = json.loads(manifest_text)
+    manifest["candidate_state"]["candidates"][0]["interval_end_utc"] = "2026-09-04T05:32:31Z"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(Phase7EPublicError, match="search_run_corrupt"):
+        reopened_public.resolve_existing(reopened_prepared)
+    app = FastAPI()
+    install_recording_search_routes(app, None, CapacityLimiter(2), phase7e_service=reopened_public)
+    with TestClient(app) as client:
+        retry = client.post(
+            "/api/v1/recording-searches",
+            json={
+                "investigation_id": confirmed.investigation_id,
+                "search_end": "2026-09-04T14:32:32",
+                "request_id": "99999999-9999-4999-8999-999999999999",
+            },
+        )
+        evidence = client.get(
+            f"/api/v1/recording-searches/{confirmed.investigation_id}/"
+            f"{prepared.request.run_id}/evidence"
+        )
+    assert retry.status_code >= 400
+    assert evidence.status_code != 200
+    manifest_path.unlink()  # Only the test-owned disposable repository is removed.
+    with pytest.raises(Phase7EPublicError, match="search_run_corrupt"):
+        reopened_public.resolve_existing(reopened_prepared)
+
+
+@pytest.mark.parametrize("evidence_state", ["valid", "missing", "tampered"])
+def test_completed_same_manager_http_retry_and_status_require_committed_evidence(  # noqa: C901, PLR0915
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, evidence_state: str
+) -> None:
+    confirmed = replace(_confirmed(tmp_path), jpeg_sha256=hashlib.sha256(b"baseline").hexdigest())
+    execution = _service(tmp_path, ANCHOR + timedelta(minutes=15))
+    evidence_repository = SuccessorEvidenceRepository(tmp_path / "successor")
+    execution.evidence_repository = evidence_repository
+    extractor = execution.acquisition.replay_extractor
+    publications = {"evidence": 0, "terminal": 0, "reopen": 0}
+    original_stage = evidence_repository.stage
+    original_terminal = execution.publisher.publish_terminal
+
+    def stage(*args: object, **kwargs: object) -> object:
+        publications["evidence"] += 1
+        return original_stage(*args, **kwargs)  # type: ignore[arg-type]
+
+    def publish_terminal(*args: object, **kwargs: object) -> object:
+        publications["terminal"] += 1
+        return original_terminal(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(evidence_repository, "stage", stage)
+    monkeypatch.setattr(execution.publisher, "publish_terminal", publish_terminal)
+
+    class _Confirmation:
+        def load_confirmed(self, investigation_id: str) -> ConfirmedInvestigationInput:
+            assert investigation_id == confirmed.investigation_id
+            return confirmed
+
+    policy, classifier_policy, object_policy = approved_phase7e_policy()
+    public = Phase7EPublicService(
+        RecordingSearch7ERepository(tmp_path / "legacy"),
+        SimpleNamespace(),
+        _Confirmation(),
+        None,
+        None,
+        policy,
+        classifier_policy,
+        object_policy,
+        SimpleNamespace(status=lambda *_args: (None, None)),
+        lambda: ANCHOR + timedelta(hours=1),
+        None,
+        execution,
+    )
+    original_resolve = Phase7EPublicService.resolve_existing
+
+    def resolve_existing(service: Phase7EPublicService, prepared: object) -> object:
+        publications["reopen"] += 1
+        return original_resolve(service, prepared)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Phase7EPublicService, "resolve_existing", resolve_existing)
+    app = FastAPI()
+    install_recording_search_routes(app, None, CapacityLimiter(2), phase7e_service=public)
+    body = {
+        "investigation_id": confirmed.investigation_id,
+        "search_end": "2026-09-04T14:47:32",
+        "request_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    }
+    run_id = "search-run-bbbbbbbbbbbb4bbb8bbbbbbbbbbbbbbb"
+    terminal_path = tmp_path / "successor" / confirmed.investigation_id / run_id / "terminal.json"
+    manifest_path = (
+        tmp_path / "successor" / confirmed.investigation_id / run_id / "evidence" / "manifest.json"
+    )
+    with TestClient(app) as client:
+        accepted = client.post("/api/v1/recording-searches", json=body)
+        assert accepted.status_code == 202
+        assert accepted.json()["run_id"] == run_id
+        route = accepted.json()["status_url"]
+        for _ in range(500):
+            result = client.get(route)
+            if result.json()["status"] not in {"ACCEPTED", "RUNNING"}:
+                break
+            time.sleep(0.01)
+        assert result.json()["status"] == "FOUND"
+        # Durable publication can precede the worker's process-local ledger
+        # update; wait until the cached receipt itself is completed.
+        for _ in range(500):
+            settled = client.post("/api/v1/recording-searches", json=body)
+            if settled.json()["status"] == "FOUND":
+                break
+            time.sleep(0.01)
+        assert settled.json()["status"] == "FOUND"
+        assert manifest_path.is_file()
+        terminal_before = terminal_path.read_bytes()
+        calls_before = extractor.calls
+        publications_before = publications.copy()
+        assert publications_before["evidence"] == 1
+        assert publications_before["terminal"] == 1
+        if evidence_state == "missing":
+            manifest_path.unlink()  # Only this test-owned temporary evidence is removed.
+        elif evidence_state == "tampered":
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["plan_id"] = "successor-plan-v1-tampered"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        evidence_before_retry = manifest_path.read_bytes() if manifest_path.exists() else None
+        retry = client.post("/api/v1/recording-searches", json=body)
+        status = client.get(route)
+
+    assert publications["reopen"] == publications_before["reopen"] + 1
+    assert extractor.calls == calls_before
+    assert publications["evidence"] == publications_before["evidence"]
+    assert publications["terminal"] == publications_before["terminal"]
+    assert terminal_path.read_bytes() == terminal_before
+    assert (manifest_path.read_bytes() if manifest_path.exists() else None) == evidence_before_retry
+    if evidence_state == "valid":
+        assert retry.status_code == 202
+        assert retry.json()["status"] == "FOUND"
+        assert status.status_code == 200
+        assert status.json()["status"] == "FOUND"
+    else:
+        assert retry.status_code == 500
+        assert retry.json()["error"]["code"] == "search_run_corrupt"
+        assert status.status_code == 500
+        assert status.json()["error"]["code"] == "search_run_corrupt"
+
+
+def test_active_successor_duplicate_does_not_require_uncommitted_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = Event()
+    release = Event()
+
+    class _BlockingExtractor(_Extractor):
+        def extract(self, request: ReplayRequest) -> ReplayClip:
+            started.set()
+            if not release.wait(5):
+                raise ReplayTimeoutError
+            return super().extract(request)
+
+    confirmed = replace(_confirmed(tmp_path), jpeg_sha256=hashlib.sha256(b"baseline").hexdigest())
+    execution = _service(tmp_path, ANCHOR + timedelta(minutes=15))
+    extraction = _BlockingExtractor(tmp_path, ANCHOR + timedelta(minutes=15))
+    execution.acquisition.replay_extractor = extraction
+    execution.evidence_repository = SuccessorEvidenceRepository(tmp_path / "successor")
+    calls = 0
+    original_execute = SuccessorExecutionService.execute
+
+    def execute(service: SuccessorExecutionService, *args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        return original_execute(service, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(SuccessorExecutionService, "execute", execute)
+
+    class _Confirmation:
+        def load_confirmed(self, investigation_id: str) -> ConfirmedInvestigationInput:
+            assert investigation_id == confirmed.investigation_id
+            return confirmed
+
+    policy, classifier_policy, object_policy = approved_phase7e_policy()
+    public = Phase7EPublicService(
+        RecordingSearch7ERepository(tmp_path / "legacy"),
+        SimpleNamespace(),
+        _Confirmation(),
+        None,
+        None,
+        policy,
+        classifier_policy,
+        object_policy,
+        SimpleNamespace(status=lambda *_args: (None, None)),
+        lambda: ANCHOR + timedelta(hours=1),
+        None,
+        execution,
+    )
+    manager = Phase7EBackgroundManager(public)
+    try:
+        first = manager.start(
+            confirmed.investigation_id,
+            "2026-09-04T14:47:32",
+            "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        )
+        assert started.wait(2)
+        duplicate = manager.start(
+            confirmed.investigation_id,
+            "2026-09-04T14:47:32",
+            "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        )
+        assert duplicate.run_id == first.run_id
+        assert duplicate.status in {"ACCEPTED", "RUNNING"}
+        assert calls == 1
+        release.set()
+        for _ in range(500):
+            status = manager.status(confirmed.investigation_id, first.run_id)
+            if status.phase7.status not in {"ACCEPTED", "RUNNING"}:
+                break
+            time.sleep(0.01)
+        assert status.phase7.status == "FOUND"
+        assert calls == 1
+    finally:
+        release.set()
+        manager.close()
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_candidate_count"),
+    [
+        ("rack", 1),
+        ("camera_motion", 0),
+        ("occluded", 0),
+        ("replacement", 0),
+        ("present", 0),
+    ],
+)
+def test_s7_public_lifecycle_uses_real_s3_evidence_without_public_promotion(  # noqa: PLR0915
+    tmp_path: Path, case: str, expected_candidate_count: int
+) -> None:
+    """Exercise S3 -> S4 -> durable evidence -> public reopen without NVR."""
+
+    target_comparisons = {
+        "rack": _rack_absent_comparison(),
+        "camera_motion": _comparison(
+            similarity=0.65,
+            ncc=0.05,
+            edge=0.80,
+            change=0.80,
+            foreground=0.55,
+            background_change=0.25,
+            roi_ncc=0.18,
+            alignment_state="ambiguous",
+            alignment_dx=8,
+            alignment_dy=6,
+            alignment_rotation=5,
+            alignment_overlap=0.98,
+            alignment_score=0.62,
+            alignment_margin=0.001,
+            present_gate=False,
+            occlusion_evidence=True,
+            decision_path="indeterminate",
+            decision_reason="unstable_scene",
+        ),
+        "occluded": _comparison(
+            similarity=0.758071,
+            ncc=0.068171,
+            edge=0.903155,
+            change=0.699227,
+            foreground=0.596733,
+            background_change=0.577731,
+            scene_stable=False,
+            scene_veto="global_scene_change",
+            present_gate=False,
+            occlusion_evidence=True,
+            decision_path="indeterminate",
+            decision_reason="unstable_scene",
+        ),
+        "replacement": _comparison(
+            similarity=0.522460,
+            ncc=0.135319,
+            edge=0.882568,
+            change=0.854659,
+            foreground=0.808227,
+            background_change=0.969883,
+            scene_stable=False,
+            scene_veto="global_scene_change",
+            present_gate=False,
+            replacement_evidence=True,
+            decision_path="indeterminate",
+            decision_reason="unstable_scene",
+        ),
+        "present": _comparison(),
+    }
+
+    class _CaseClassifier:
+        policy_identity = "s7-e2e-classifier-v1"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def classify(
+            self,
+            _baseline: object,
+            probe: DecodedRgbImage,
+            _width: int,
+            _height: int,
+            _roi: object,
+            _correlation_id: str,
+        ) -> SuccessorClassifierResult:
+            self.calls += 1
+            if probe.pixels[0][0][0] == 0 or case == "present":
+                return SuccessorClassifierResult(
+                    ClassificationOutcome.PRESENT, comparison=_comparison()
+                )
+            return SuccessorClassifierResult(
+                ClassificationOutcome.INDETERMINATE,
+                "insufficient_visual_evidence",
+                target_comparisons[case],
+            )
+
+    planner = _Planner(_segment(ANCHOR + timedelta(minutes=30, seconds=1)))
+    acquisition = SuccessorTargetAcquisitionService(
+        planner,
+        _Extractor(tmp_path, ANCHOR + timedelta(minutes=3)),
+        _FrameDecoder(),
+        temporary_directory=tmp_path / "temporary",
+    )
+    classifier = _CaseClassifier()
+    classification = SuccessorCoarseClassificationService(
+        classifier, _MediaDecoder(), search_evidence_policy=_policy()
+    )
+    execution = SuccessorExecutionService(
+        SuccessorPlanService(planner),
+        acquisition,
+        classification,
+        SuccessorBinaryNarrowingService(acquisition, classification),
+        _MediaDecoder(),
+        SuccessorTerminalRepository(tmp_path / "successor"),
+        SuccessorEvidenceRepository(tmp_path / "successor"),
+    )
+    confirmed = replace(_confirmed(tmp_path), jpeg_sha256=hashlib.sha256(b"baseline").hexdigest())
+    policy, classifier_policy, object_policy = approved_phase7e_policy()
+
+    class _Confirmation:
+        def load_confirmed(self, investigation_id: str) -> ConfirmedInvestigationInput:
+            assert investigation_id == confirmed.investigation_id
+            return confirmed
+
+    public = Phase7EPublicService(
+        RecordingSearch7ERepository(tmp_path / "legacy"),
+        SimpleNamespace(),
+        _Confirmation(),
+        None,
+        None,
+        policy,
+        classifier_policy,
+        object_policy,
+        SimpleNamespace(status=lambda *_args: (None, None)),
+        lambda: ANCHOR + timedelta(hours=1),
+        None,
+        execution,
+    )
+    prepared = public.prepare_http(
+        confirmed.investigation_id,
+        "2026-09-04T14:47:32",
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab",
+    )
+    assert prepared.successor is not None
+    app = FastAPI()
+    install_recording_search_routes(app, None, CapacityLimiter(2), phase7e_service=public)
+    with TestClient(app) as client:
+        accepted = client.post(
+            "/api/v1/recording-searches",
+            json={
+                "investigation_id": confirmed.investigation_id,
+                "search_end": "2026-09-04T14:47:32",
+                "request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab",
+            },
+        )
+        assert accepted.status_code == 202
+        route = accepted.json()["status_url"]
+        for _ in range(500):
+            status_response = client.get(route)
+            if status_response.json()["status"] not in {"ACCEPTED", "RUNNING"}:
+                break
+            time.sleep(0.01)
+        assert status_response.json()["status"] not in {"ACCEPTED", "RUNNING"}
+        calls_at_terminal = classifier.calls
+        duplicate = client.post(
+            "/api/v1/recording-searches",
+            json={
+                "investigation_id": confirmed.investigation_id,
+                "search_end": "2026-09-04T14:47:32",
+                "request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab",
+            },
+        )
+        assert duplicate.status_code == 202
+        assert duplicate.json()["status"] == status_response.json()["status"]
+        assert classifier.calls == calls_at_terminal
+        evidence_response = client.get(f"{route}/evidence")
+    public_status = public.status(confirmed.investigation_id, prepared.request.run_id)
+    candidates = execution.read_candidates(confirmed.investigation_id, prepared.request.run_id)
+    public_evidence = execution.read_evidence(confirmed.investigation_id, prepared.request.run_id)
+    assert len(candidates) == expected_candidate_count
+    assert public_status.phase7.schema_version == 8
+    assert public_status.phase7.status in {"INCONCLUSIVE", "NOT_FOUND"}
+    assert public_status.terminal_details is not None
+    assert public_status.terminal_details.first_absent_time_utc is None
+    assert public_evidence is not None
+    assert "candidate_state" not in public_evidence
+    assert status_response.status_code == 200
+    assert status_response.json()["status"] == public_status.phase7.status
+    assert evidence_response.status_code == 200
+    assert "candidate_state" not in evidence_response.json()
+    assert (
+        SuccessorTerminalRepository(tmp_path / "successor").read(
+            confirmed.investigation_id, prepared.request.run_id
+        )["status"]
+        == public_status.phase7.status
+    )  # type: ignore[index]
+    assert (
+        SuccessorEvidenceRepository(tmp_path / "successor").read_candidates(
+            confirmed.investigation_id, prepared.request.run_id
+        )
+        == candidates
+    )
+    calls_after_execution = classifier.calls
+    assert calls_after_execution > 0
+    reopened_public = replace(
+        public,
+        successor_execution=replace(
+            execution,
+            publisher=SuccessorTerminalRepository(tmp_path / "successor"),
+            evidence_repository=SuccessorEvidenceRepository(tmp_path / "successor"),
+        ),
+    )
+    reopened = reopened_public.resolve_existing(
+        reopened_public.prepare_http(
+            confirmed.investigation_id,
+            "2026-09-04T14:47:32",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab",
+        )
+    )
+    assert reopened is not None
+    assert reopened.phase7.status == public_status.phase7.status
+    assert classifier.calls == calls_after_execution
+    if case == "rack":
+        assert candidates[0].interval_start_utc <= ANCHOR + timedelta(minutes=3)
+        assert candidates[0].interval_end_utc >= ANCHOR + timedelta(minutes=3)
 
 
 def test_narrowing_coverage_gap_prevents_candidate_persistence_and_public_promotion(

@@ -235,6 +235,8 @@ def install_recording_search_routes(  # noqa: C901, PLR0915 - explicit legacy/Ph
                         "The recording-search run was not found.",
                     ).response()
                 return JSONResponse(status_code=status.HTTP_200_OK, content=projected.as_dict())
+            except Phase7EPublicError as error:
+                return _phase7e_error_response(error)
             except Exception:  # noqa: BLE001 - HTTP boundary redacts unexpected failures.
                 return ReferenceFrameApiError(
                     status.HTTP_500_INTERNAL_SERVER_ERROR,

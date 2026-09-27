@@ -694,7 +694,16 @@ authoritative.
 - S7-1 is implemented: qualified S4 candidates and their minimum S3 proof are
   durably bound to successor evidence v2 with atomic publication, strict reopen,
   deterministic ordering, v1 compatibility, and fail-closed corruption checks;
-- cut over coarse search and narrowing only after review of S3-S6 evidence;
+- S7-2 is implemented for new supported public runs: the successor executor
+  alone owns evaluation, internal candidate qualification, evidence commit,
+  and Schema 8 terminal publication. Completed-request retry (including a
+  process-local cached receipt) and completed public status both strictly
+  reopen committed evidence/candidates before returning the immutable terminal;
+  missing or corrupt evidence fails closed rather than recomputing. The public
+  evidence API continues to project v1 without internal candidate fields. Candidate-only
+  results remain `INCONCLUSIVE`; no Phase 8 handoff is created;
+- require further fresh real-NVR review before any stronger public candidate
+  semantics or review-media handoff;
 - implement any approved versioned evidence/terminal/Phase 8 boundary;
 - verify strict reopen, publication, review-clip generation, browser projection,
   cancellation, restart, compatibility, and regression coverage;
@@ -783,9 +792,10 @@ candidate recall.
 
 ## 16. Open design questions for later phases
 
-The approved architecture now exercises S3 in shadow mode, S4 in an
-unpublished candidate path, S5 in an unpublished verification path, and S7-1
-durable reopen for qualified internal candidates. Later phase reviews must
+The approved architecture now exercises S3 in the successor search path, S4
+in an internal candidate path, S5 in an internal verification path, S7-1
+durable candidate persistence, and S7-2 public execution/reopen cutover without
+candidate promotion. Later phase reviews must
 decide or constrain:
 
 1. whether the proposed conjunction for material reference drop is the right
