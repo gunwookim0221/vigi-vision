@@ -75,6 +75,7 @@ from vigi_vision.recording_search_successor_evidence import (
     SuccessorEvidenceRepository,
 )
 from vigi_vision.recording_search_successor_execution import (
+    SuccessorAdmission,
     SuccessorB4Classifier,
     SuccessorExecutionError,
     SuccessorExecutionService,
@@ -377,6 +378,7 @@ class Phase7EPreparedRequest:
     base_records: tuple[StrictIdentityEnvelope, ...]
     coarse_targets: tuple[StrictIdentityEnvelope, ...]
     successor: SuccessorPreparedExecution | None = None
+    successor_admission: SuccessorAdmission | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -505,6 +507,18 @@ class Phase7EPublicService:
             run_id=f"search-run-{request_id.replace('-', '')}",
         )
 
+    def prepare_http_admission(
+        self, investigation_id: str, search_end: str, request_id: str
+    ) -> Phase7EPreparedRequest:
+        """Validate HTTP facts without successor discovery or classifier startup."""
+        return self.prepare(
+            investigation_id,
+            search_end,
+            None,
+            run_id=f"search-run-{request_id.replace('-', '')}",
+            defer_successor=True,
+        )
+
     def prepare(  # noqa: C901, PLR0912, PLR0915 - strict boundary validation is intentionally explicit.
         self,
         investigation_id: str,
@@ -512,6 +526,7 @@ class Phase7EPublicService:
         source_timezone: str | None,
         *,
         run_id: str,
+        defer_successor: bool = False,
     ) -> Phase7EPreparedRequest:
         """Strictly reopen Phase 6 and build the deterministic Phase 7E plan."""
         try:
@@ -565,6 +580,23 @@ class Phase7EPublicService:
                 raise Phase7EPublicError("invalid_request") from error
             if self.successor_execution is None:
                 raise Phase7EPublicError("successor_unavailable")
+            if defer_successor:
+                request = SuccessorRequest(
+                    investigation_id,
+                    run_id,
+                    confirmed.channel_id,
+                    effective_start,
+                    successor_request.search_end_utc,
+                    confirmed.source_timezone,
+                )
+                return Phase7EPreparedRequest(
+                    request,
+                    None,
+                    (),
+                    (),
+                    None,
+                    SuccessorAdmission(request, confirmed, search_end_time_text, successor_now_utc),
+                )
             try:
                 successor = self.successor_execution.prepare(
                     confirmed,
@@ -636,7 +668,7 @@ class Phase7EPublicService:
         self, prepared: Phase7EPreparedRequest
     ) -> LocalInvestigationLock | None:
         """Acquire the existing investigation OS lock before successor admission."""
-        if prepared.successor is None:
+        if prepared.successor is None and prepared.successor_admission is None:
             raise Phase7EPublicError("invalid_request")
         try:
             lock = LocalInvestigationLock(
@@ -665,12 +697,37 @@ class Phase7EPublicService:
     ) -> None:
         """Make the active run identity visible before returning ACCEPTED."""
         self._require_successor_owner(prepared, ownership)
-        if self.successor_execution is None or prepared.successor is None:
+        if self.successor_execution is None:
             raise Phase7EPublicError("recording_search_execution_unavailable")
         try:
-            self.successor_execution.publisher.publish_running(prepared.successor)
+            if prepared.successor_admission is not None:
+                self.successor_execution.publisher.publish_admitted(prepared.request)
+            elif prepared.successor is not None:
+                self.successor_execution.publisher.publish_running(prepared.successor)
+            else:
+                raise Phase7EPublicError("invalid_request")
         except SuccessorExecutionError as error:
             raise Phase7EPublicError("search_run_corrupt") from error
+
+    def complete_successor_admission(
+        self, prepared: Phase7EPreparedRequest
+    ) -> Phase7EPreparedRequest:
+        """Compute NVR plan and baseline authority inside the owned worker."""
+        admission = prepared.successor_admission
+        if admission is None or self.successor_execution is None:
+            return prepared
+        try:
+            successor = self.successor_execution.prepare(
+                admission.confirmed,
+                search_end_time_text=admission.search_end_time_text,
+                run_id=admission.request.run_id,
+                now_utc=admission.now_utc,
+            )
+        except Exception as error:
+            raise Phase7EPublicError("recording_search_execution_unavailable") from error
+        if successor.request != admission.request:
+            raise Phase7EPublicError("request_conflict")
+        return Phase7EPreparedRequest(prepared.request, None, (), (), successor)
 
     def _require_successor_owner(
         self, prepared: Phase7EPreparedRequest, ownership: LocalInvestigationLock
@@ -680,26 +737,41 @@ class Phase7EPublicService:
         ):
             raise Phase7EPublicError("recording_search_execution_unavailable")
 
-    def resolve_existing(  # noqa: C901 - strict legacy/successor reopen dispatch.
+    def resolve_existing(  # noqa: C901, PLR0912 - strict legacy/successor reopen dispatch.
         self, prepared: Phase7EPreparedRequest
     ) -> Phase7EPublicStatus | None:
         """Resolve a durable retry, interrupting only an unowned active predecessor."""
-        if prepared.successor is not None:
+        if prepared.successor is not None or prepared.successor_admission is not None:
             if self.successor_execution is None:
                 raise Phase7EPublicError("recording_search_execution_unavailable")
             existing = self.successor_execution.publisher.read(
-                prepared.successor.request.investigation_id,
-                prepared.successor.request.run_id,
+                prepared.request.investigation_id,
+                prepared.request.run_id,
             )
             if existing is None:
                 return None
-            if existing.get("plan_id") != prepared.successor.plan.plan_id:
+            anchor_text = prepared.request.anchor_time_utc.isoformat(timespec="seconds").replace(
+                "+00:00", "Z"
+            )
+            end_text = prepared.request.end_utc.isoformat(timespec="seconds").replace("+00:00", "Z")
+            if (
+                existing.get("anchor_time_utc") not in (None, anchor_text)
+                or existing.get("request_end_utc") not in (None, end_text)
+                or existing.get("requested_end_time_utc") not in (None, end_text)
+                or existing.get("source_timezone") != prepared.request.source_timezone
+                or existing.get("channel_id") not in (None, prepared.request.channel_id)
+            ):
+                raise Phase7EPublicError("request_conflict")
+            if prepared.successor is not None and existing.get("plan_id") not in (
+                None,
+                prepared.successor.plan.plan_id,
+            ):
                 raise Phase7EPublicError("request_conflict")
             if existing.get("status") == "RUNNING":
                 raise Phase7EPublicError("already_running")
             return self.status(
-                prepared.successor.request.investigation_id,
-                prepared.successor.request.run_id,
+                prepared.request.investigation_id,
+                prepared.request.run_id,
             )
         request = prepared.request
         try:
@@ -836,14 +908,21 @@ class Phase7EPublicService:
         reason_code: str,
     ) -> Phase7EPublicStatus:
         """Close a worker/watchdog failure through the durable successor boundary."""
-        if prepared.successor is not None:
+        if prepared.successor is not None or prepared.successor_admission is not None:
             if self.successor_execution is None:
                 raise Phase7EPublicError("recording_search_execution_unavailable")
-            self.successor_execution.publish_safety_terminal(
-                prepared.successor,
-                status=status,
-                reason_code=reason_code,
-            )
+            if prepared.successor is not None:
+                self.successor_execution.publish_safety_terminal(
+                    prepared.successor,
+                    status=status,
+                    reason_code=reason_code,
+                )
+            else:
+                self.successor_execution.publisher.publish_admission_terminal(
+                    prepared.request,
+                    status=status,
+                    reason_code=reason_code,
+                )
         return self.status(prepared.request.investigation_id, prepared.request.run_id)
 
     def status(self, investigation_id: str, run_id: str) -> Phase7EPublicStatus:

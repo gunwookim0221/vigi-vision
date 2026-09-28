@@ -220,12 +220,22 @@ class SuccessorPreparedExecution:
 
 
 @dataclass(frozen=True, slots=True)
+class SuccessorAdmission:
+    """Validated immutable request facts available before recording discovery."""
+
+    request: SuccessorRequest
+    confirmed: ConfirmedInvestigationInput = field(repr=False, compare=False)
+    search_end_time_text: str
+    now_utc: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class SuccessorTerminal:
     """Published successor outcome and safe timing projection."""
 
     investigation_id: str
     run_id: str
-    plan_id: str
+    plan_id: str | None
     status: str
     reason_code: str
     terminal_result_id: str | None
@@ -305,7 +315,9 @@ class SuccessorTerminalRepository:
                 raise SuccessorExecutionError("successor_publication_corrupt")
             if value.get("status") not in {_RUNNING, *_TERMINAL}:
                 raise SuccessorExecutionError("successor_publication_corrupt")
-            if value.get("status") in _TERMINAL:
+            if value.get("status") == _RUNNING:
+                _validate_running_record(value)
+            else:
                 _validate_terminal_record(value)
             return value
 
@@ -313,7 +325,11 @@ class SuccessorTerminalRepository:
         with self._lock:
             existing = self.read(prepared.request.investigation_id, prepared.request.run_id)
             if existing is not None:
-                if existing.get("plan_id") != prepared.plan.plan_id:
+                if existing.get("plan_id") not in (None, prepared.plan.plan_id):
+                    raise SuccessorExecutionError("successor_request_conflict")
+                if existing.get("status") == _RUNNING and not _running_matches_request(
+                    existing, prepared.request
+                ):
                     raise SuccessorExecutionError("successor_request_conflict")
                 if existing.get("status") in _TERMINAL:
                     return
@@ -346,10 +362,33 @@ class SuccessorTerminalRepository:
             }
             self._atomic_write(prepared.request.investigation_id, prepared.request.run_id, payload)
 
+    def publish_admitted(self, request: SuccessorRequest) -> None:
+        """Commit a pollable RUNNING claim before an NVR-dependent plan exists."""
+        with self._lock:
+            existing = self.read(request.investigation_id, request.run_id)
+            if existing is not None:
+                raise SuccessorExecutionError("successor_request_conflict")
+            self._atomic_write(
+                request.investigation_id,
+                request.run_id,
+                {
+                    "record_version": SUCCESSOR_RECORD_VERSION,
+                    "schema_version": SUCCESSOR_SCHEMA_VERSION,
+                    "investigation_id": request.investigation_id,
+                    "run_id": request.run_id,
+                    "channel_id": request.channel_id,
+                    "plan_id": None,
+                    "status": _RUNNING,
+                    "request_end_utc": _timestamp(request.end_utc),
+                    "anchor_time_utc": _timestamp(request.anchor_time_utc),
+                    "source_timezone": request.source_timezone,
+                },
+            )
+
     def publish_terminal(self, terminal: SuccessorTerminal) -> SuccessorTerminal:
         with self._lock:
             existing = self.read(terminal.investigation_id, terminal.run_id)
-            if existing is not None and existing.get("plan_id") != terminal.plan_id:
+            if existing is not None and existing.get("plan_id") not in (None, terminal.plan_id):
                 raise SuccessorExecutionError("successor_request_conflict")
             if existing is not None and existing.get("status") in _TERMINAL:
                 if _terminal_identity(existing) != terminal.terminal_result_id:
@@ -360,6 +399,42 @@ class SuccessorTerminalRepository:
             if loaded is None or _terminal_identity(loaded) != terminal.terminal_result_id:
                 raise SuccessorExecutionError("successor_publication_readback_failed")
             return _terminal_from_record(loaded)
+
+    def publish_admission_terminal(
+        self, request: SuccessorRequest, *, status: str, reason_code: str
+    ) -> SuccessorTerminal:
+        """Close an admitted run when planning never produced a plan."""
+        if (status, reason_code) not in _SAFE_FALLBACK_TERMINALS:
+            raise SuccessorExecutionError("successor_publication_corrupt")
+        with self._lock:
+            existing = self.read(request.investigation_id, request.run_id)
+            if (
+                existing is not None
+                and existing.get("status") == _RUNNING
+                and not _running_matches_request(existing, request)
+            ):
+                raise SuccessorExecutionError("successor_request_conflict")
+            plan_id = existing.get("plan_id") if existing is not None else None
+            if plan_id is not None and not isinstance(plan_id, str):
+                raise SuccessorExecutionError("successor_publication_corrupt")
+            terminal = SuccessorTerminal(
+                request.investigation_id,
+                request.run_id,
+                plan_id,
+                status,
+                reason_code,
+                None,
+                _timestamp(request.anchor_time_utc),
+                _timestamp(request.end_utc),
+                None,
+                None,
+                False,
+                request.source_timezone,
+                None,
+                requested_end_time_utc=_timestamp(request.end_utc),
+            )
+            terminal = replace(terminal, terminal_result_id=_digest_terminal(terminal.as_record()))
+            return self.publish_terminal(terminal)
 
     def recover_abandoned(
         self,
@@ -403,7 +478,7 @@ class SuccessorTerminalRepository:
                 terminal = SuccessorTerminal(
                     str(value.get("investigation_id")),
                     str(value.get("run_id")),
-                    str(value.get("plan_id")),
+                    value.get("plan_id"),
                     "INTERRUPTED",
                     "abandoned_after_restart",
                     _digest_terminal(
@@ -1293,7 +1368,7 @@ class SuccessorExecutionService:
             prepared.request.investigation_id,
             prepared.request.run_id,
         )
-        if existing is not None and existing.get("plan_id") != prepared.plan.plan_id:
+        if existing is not None and existing.get("plan_id") not in (None, prepared.plan.plan_id):
             raise SuccessorExecutionError("successor_request_conflict")
         if existing is not None and existing.get("status") in _TERMINAL:
             return _terminal_from_record(existing)
@@ -2055,7 +2130,7 @@ def _terminal_from_record(value: Mapping[str, object]) -> SuccessorTerminal:
     return SuccessorTerminal(
         str(value["investigation_id"]),
         str(value["run_id"]),
-        str(value["plan_id"]),
+        value["plan_id"] if isinstance(value["plan_id"], str) else None,
         str(value["status"]),
         str(value["reason_code"]),
         _terminal_identity(value),
@@ -2107,6 +2182,41 @@ def _strings(value: object) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _validate_running_record(value: Mapping[str, object]) -> None:
+    """Strictly reopen both admitted and planned RUNNING records."""
+    if value.get("record_version") != SUCCESSOR_RECORD_VERSION:
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    for key in ("investigation_id", "run_id", "source_timezone"):
+        if not isinstance(value.get(key), str) or not value[key]:
+            raise SuccessorExecutionError("successor_publication_corrupt")
+    anchor = _strict_utc_timestamp(value.get("anchor_time_utc"))
+    end = _strict_utc_timestamp(value.get("request_end_utc"))
+    if end <= anchor:
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    channel_id = value.get("channel_id")
+    if channel_id is not None and (type(channel_id) is not int or channel_id <= 0):
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    plan_id = value.get("plan_id")
+    if plan_id is None and channel_id is None:
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    if plan_id is not None and (
+        not isinstance(plan_id, str) or not plan_id.startswith("successor-plan-v1-")
+    ):
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    if plan_id is not None:
+        _validate_list_field(value, "coverage", _validate_coverage_item)
+        _validate_list_field(value, "gaps", _validate_gap_item)
+
+
+def _running_matches_request(value: Mapping[str, object], request: SuccessorRequest) -> bool:
+    return (
+        value.get("anchor_time_utc") == _timestamp(request.anchor_time_utc)
+        and value.get("request_end_utc") == _timestamp(request.end_utc)
+        and value.get("source_timezone") == request.source_timezone
+        and value.get("channel_id") in (None, request.channel_id)
+    )
+
+
 def _validate_terminal_record(value: Mapping[str, object]) -> None:
     """Strictly validate one persisted Schema 8 terminal projection."""
     _validate_terminal_core(value)
@@ -2140,11 +2250,14 @@ def _validate_terminal_core(value: Mapping[str, object]) -> None:
         or value["schema_version"] != SUCCESSOR_SCHEMA_VERSION
     ):
         raise SuccessorExecutionError("successor_publication_corrupt")
-    for key in ("investigation_id", "run_id", "plan_id", "source_timezone"):
+    for key in ("investigation_id", "run_id", "source_timezone"):
         if not isinstance(value.get(key), str) or not value[key]:
             raise SuccessorExecutionError("successor_publication_corrupt")
-    plan_id = cast("str", value["plan_id"])
-    if not plan_id.startswith("successor-plan-v1-"):
+    plan_id = value["plan_id"]
+    if plan_id is None:
+        if value.get("status") not in {"FAILED", "INTERRUPTED"}:
+            raise SuccessorExecutionError("successor_publication_corrupt")
+    elif not isinstance(plan_id, str) or not plan_id.startswith("successor-plan-v1-"):
         raise SuccessorExecutionError("successor_publication_corrupt")
 
 

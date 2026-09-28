@@ -1570,6 +1570,14 @@ For new successor work, the existing per-investigation OS-backed lock is the
 shared execution owner across independent managers using one artifact root.
 Admission acquires it, rechecks durable state, and publishes RUNNING before
 returning `ACCEPTED`; the worker retains it through terminalization and cleanup.
+The HTTP thread strictly validates the confirmation and request window, then
+publishes a request-bound RUNNING record before submitting the worker. Its
+`plan_id` is null until the worker completes NVR segment discovery. Planning,
+baseline decoding, and reference-mask preparation occur after HTTP 202, and
+the worker binds the computed plan to the same RUNNING record before search.
+If preparation fails before a plan exists, the same run closes as a safe
+`FAILED/internal_error` terminal with null `plan_id`; completed successful
+searches still require a real plan identity and strict evidence reopen.
 An identical active retry resolves the same run without another worker, while
 a different run is `already_running`. Terminal retries strictly reopen without
 execution. Process death releases the OS lock; startup recovery interrupts only

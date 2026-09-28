@@ -1488,6 +1488,29 @@ test("a timed-out status request is aborted, retried, and reaches terminal", asy
   assert.equal(harness.pendingTimerCount(), 0);
 });
 
+test("an unacknowledged start still aborts after 15 seconds with a safe error", async () => {
+  let rejectStart;
+  let startOptions;
+  const pending = new Promise((_resolve, reject) => { rejectStart = reject; });
+  const harness = createHarness((_url, options) => {
+    startOptions = options;
+    return pending;
+  }, undefined, { confirmation: true, search: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  assert.equal(harness.timerDelays.at(-1), 15_000);
+  harness.runTimers();
+  assert.equal(startOptions.signal.aborted, true);
+  rejectStart(Object.assign(new Error("native private URL"), { name: "AbortError" }));
+  await settle();
+  assert.match(harness.recordingSearchStatus.textContent, /녹화 기록 검색을 사용할 수 없습니다/);
+  assert.doesNotMatch(harness.recordingSearchStatus.textContent, /native|URL/);
+  assert.equal(harness.window.vigiVisionRecordingSearch.getState().polling, false);
+});
+
 test("overall client deadline bounds an in-flight status request", async () => {
   const baseNow = Date.now();
   let now = baseNow;

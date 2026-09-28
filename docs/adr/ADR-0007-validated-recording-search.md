@@ -12,6 +12,10 @@ orchestration, and 7E-2 CLI/projection/retention boundaries are implemented.
 The first browser slice adds a strict HTTP `202` start and read-only polling
 surface over that same public service; it introduces no new search schema or
 repository.
+Successor HTTP admission commits a request-bound RUNNING record while holding
+the investigation OS lock, before NVR discovery determines a plan identity.
+The worker computes and binds that plan under the same ownership; preparation
+failure before plan binding closes the run safely without inventing a plan ID.
 Phase 7E-2 Correction B now runs production B4 computation behind a bounded
 Windows-spawn child-process boundary: the parent retains authority, timeout,
 cancellation, reaping, and evidence admission, while late child output is

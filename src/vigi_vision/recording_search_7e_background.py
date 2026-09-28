@@ -43,6 +43,14 @@ class Phase7EBackgroundService(Protocol):
         request_id: str,
     ) -> Phase7EPreparedRequest: ...
 
+    def prepare_http_admission(
+        self, investigation_id: str, search_end: str, request_id: str
+    ) -> Phase7EPreparedRequest: ...
+
+    def complete_successor_admission(
+        self, prepared: Phase7EPreparedRequest
+    ) -> Phase7EPreparedRequest: ...
+
     def resolve_existing(self, prepared: Phase7EPreparedRequest) -> Phase7EPublicStatus | None: ...
 
     def execute_prepared(
@@ -152,7 +160,14 @@ class Phase7EBackgroundManager:
         request_id: str,
     ) -> Phase7EStartReceipt:
         """Validate synchronously, deduplicate, then admit one bounded worker."""
-        prepared = self._service.prepare_http(investigation_id, search_end, request_id)
+        lightweight = getattr(self._service, "prepare_http_admission", None)
+        prepared = (
+            cast("Callable[[str, str, str], Phase7EPreparedRequest]", lightweight)(
+                investigation_id, search_end, request_id
+            )
+            if callable(lightweight)
+            else self._service.prepare_http(investigation_id, search_end, request_id)
+        )
         with self._admission_lock:
             return self._admit(investigation_id, search_end, request_id, prepared)
 
@@ -164,7 +179,10 @@ class Phase7EBackgroundManager:
         prepared: Phase7EPreparedRequest,
     ) -> Phase7EStartReceipt:
         """Serialize durable retry resolution with process-local admission."""
-        is_successor = getattr(prepared, "successor", None) is not None
+        is_successor = (
+            getattr(prepared, "successor", None) is not None
+            or getattr(prepared, "successor_admission", None) is not None
+        )
         completed_receipt: Phase7EStartReceipt | None = None
         with self._lock:
             if self._closed:
@@ -379,10 +397,12 @@ class Phase7EBackgroundManager:
         """Apply bounded durable interruption recovery before serving requests."""
         _ = self._service.recover_abandoned()
 
-    def _run(self, job: _Job) -> None:  # noqa: C901, PLR0912 - lifecycle branches stay explicit.
+    def _run(self, job: _Job) -> None:  # noqa: C901, PLR0912, PLR0915 - lifecycle branches stay explicit.
         with self._lock:
             job.status = "RUNNING"
         try:
+            if getattr(job.prepared, "successor_admission", None) is not None:
+                job.prepared = self._service.complete_successor_admission(job.prepared)
             if job.ownership is None:
                 result = self._service.execute_prepared(
                     job.prepared,
@@ -540,11 +560,14 @@ class Phase7EBackgroundManager:
             )
             return
         publisher = cast("Callable[..., Phase7EPublicStatus]", publisher)
+        awaiting_plan = getattr(job.prepared, "successor_admission", None) is not None
+        terminal_status = "FAILED" if awaiting_plan else "INCONCLUSIVE"
+        terminal_reason = "internal_error" if awaiting_plan else "execution_deadline_exhausted"
         try:
             result = publisher(
                 job.prepared,
-                status="INCONCLUSIVE",
-                reason_code="execution_deadline_exhausted",
+                status=terminal_status,
+                reason_code=terminal_reason,
             )
         except Exception:  # noqa: BLE001 - the worker will perform final cleanup.
             self._record_failure(

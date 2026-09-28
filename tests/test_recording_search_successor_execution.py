@@ -11,7 +11,7 @@ import time
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from threading import Barrier, Event, Lock, Thread
+from threading import Barrier, Event, Lock, Thread, current_thread
 from types import SimpleNamespace
 from urllib.request import Request, urlopen
 
@@ -76,6 +76,7 @@ from vigi_vision.recording_search_successor_execution import (
     SuccessorExecutionError,
     SuccessorExecutionService,
     SuccessorPreparedExecution,
+    SuccessorRequest,
     SuccessorTerminal,
     SuccessorTerminalRepository,
 )
@@ -2761,6 +2762,48 @@ def test_successor_durable_running_state_recovers_as_interrupted(tmp_path: Path)
     assert recovered["status"] == "INTERRUPTED"
 
 
+def test_ownerless_preplan_running_recovers_without_inventing_plan(tmp_path: Path) -> None:
+    repository = SuccessorTerminalRepository(tmp_path / "successor")
+    request = SuccessorRequest(
+        "object-disappearance-v3-ch1-20260904T051732Z",
+        "search-run-cccccccccccccccccccccccccccccccc",
+        1,
+        ANCHOR,
+        ANCHOR + timedelta(minutes=30),
+        "Asia/Seoul",
+    )
+    repository.publish_admitted(request)
+    running = repository.read(request.investigation_id, request.run_id)
+    assert running is not None
+    assert running["status"] == "RUNNING"
+    assert running["plan_id"] is None
+    assert repository.recover_abandoned() == 1
+    recovered = repository.read(request.investigation_id, request.run_id)
+    assert recovered is not None
+    assert recovered["status"] == "INTERRUPTED"
+    assert recovered["plan_id"] is None
+    assert repository.recover_abandoned() == 0
+
+
+@pytest.mark.parametrize("changed_key", ["channel_id", "request_end_utc"])
+def test_preplan_request_tamper_cannot_bind_a_worker_plan(tmp_path: Path, changed_key: str) -> None:
+    execution = _service(tmp_path, ANCHOR + timedelta(minutes=15))
+    prepared = execution.prepare(
+        _confirmed(tmp_path),
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-cccccccccccccccccccccccccccccccc",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    repository = execution.publisher
+    repository.publish_admitted(prepared.request)
+    path = repository._path(prepared.request.investigation_id, prepared.request.run_id)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record[changed_key] = 2 if changed_key == "channel_id" else "2026-09-04T05:37:32Z"
+    path.write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(SuccessorExecutionError, match="successor_request_conflict"):
+        repository.publish_running(prepared)
+
+
 def test_successor_terminal_is_not_reactivated_by_late_worker(tmp_path: Path) -> None:
     service = _service(tmp_path, ANCHOR + timedelta(minutes=15))
     confirmed = _confirmed(tmp_path)
@@ -2941,6 +2984,199 @@ def test_successor_runs_through_http_background_and_restart_status(tmp_path: Pat
         restored = client.get(status_url)
     assert restored.status_code == 200
     assert restored.json()["status"] == "FOUND"
+
+
+@pytest.mark.parametrize("blocked_stage", ["discovery", "baseline_decode", "reference"])
+def test_successor_http_ack_precedes_expensive_preparation(  # noqa: C901, PLR0915
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocked_stage: str
+) -> None:
+    """The actual HTTP receipt is independent of each expensive successor stage."""
+    confirmed = _confirmed(tmp_path)
+    execution = _service(tmp_path, ANCHOR + timedelta(minutes=15))
+    entered, release, returned = Event(), Event(), Event()
+    calls = {"discovery": 0, "baseline_decode": 0, "reference": 0}
+    stage_threads: list[str] = []
+
+    def gate(stage: str) -> None:
+        stage_threads.append(current_thread().name)
+        calls[stage] += 1
+        if blocked_stage == stage:
+            entered.set()
+            assert release.wait(5)
+
+    original_plan = SuccessorPlanService.plan
+    original_decode = _MediaDecoder.decode
+    original_reference = SuccessorCoarseClassificationService.prepare_reference
+
+    def plan(self: SuccessorPlanService, request: object) -> object:
+        gate("discovery")
+        return original_plan(self, request)  # type: ignore[arg-type]
+
+    def decode(self: _MediaDecoder, payload: bytes, width: int, height: int) -> DecodedMedia:
+        if payload == b"baseline":
+            gate("baseline_decode")
+        return original_decode(self, payload, width, height)
+
+    def reference(self: SuccessorCoarseClassificationService, authority: object) -> object:
+        gate("reference")
+        return original_reference(self, authority)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(SuccessorPlanService, "plan", plan)
+    monkeypatch.setattr(_MediaDecoder, "decode", decode)
+    monkeypatch.setattr(SuccessorCoarseClassificationService, "prepare_reference", reference)
+
+    class _Confirmation:
+        def load_confirmed(self, investigation_id: str) -> ConfirmedInvestigationInput:
+            assert investigation_id == confirmed.investigation_id
+            return confirmed
+
+    policy, classifier_policy, object_policy = approved_phase7e_policy()
+    service = Phase7EPublicService(
+        RecordingSearch7ERepository(tmp_path / "legacy"),
+        SimpleNamespace(),
+        _Confirmation(),
+        None,
+        None,
+        policy,
+        classifier_policy,
+        object_policy,
+        SimpleNamespace(status=lambda *_args: (None, None)),
+        lambda: ANCHOR + timedelta(hours=3),
+        None,
+        execution,
+    )
+    app = FastAPI()
+    install_recording_search_routes(app, None, CapacityLimiter(2), phase7e_service=service)
+    request_id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    body = {
+        "investigation_id": confirmed.investigation_id,
+        "search_end": "2026-09-04T14:47:32",
+        "request_id": request_id,
+    }
+    received: dict[str, object] = {}
+    with TestClient(app) as client:
+
+        def post() -> None:
+            received["response"] = client.post("/api/v1/recording-searches", json=body)
+            returned.set()
+
+        starter = Thread(target=post)
+        starter.start()
+        try:
+            assert entered.wait(3)
+            assert returned.wait(1), "HTTP 202 waited for worker preparation"
+            response = received["response"]
+            assert response.status_code == 202  # type: ignore[attr-defined]
+            payload = response.json()  # type: ignore[attr-defined]
+            assert payload["run_id"] == "search-run-" + request_id.replace("-", "")
+            status = client.get(payload["status_url"])
+            assert status.status_code == 200
+            assert status.json()["status"] == "RUNNING"
+            duplicate = client.post("/api/v1/recording-searches", json=body)
+            assert duplicate.status_code == 202
+            assert duplicate.json()["run_id"] == payload["run_id"]
+            assert calls["discovery"] <= 1
+        finally:
+            release.set()
+            starter.join(timeout=5)
+        for _ in range(100):
+            status = client.get(payload["status_url"])
+            if status.json()["status"] not in {"ACCEPTED", "RUNNING"}:
+                break
+            time.sleep(0.01)
+        assert status.json()["status"] == "FOUND"
+        assert calls["discovery"] == 1
+        assert calls["baseline_decode"] == 1
+        assert calls["reference"] == 1
+        assert all(name.startswith("phase7e-browser") for name in stage_threads)
+
+
+@pytest.mark.parametrize("failed_stage", ["discovery", "baseline_decode", "reference", "deadline"])
+def test_successor_worker_preparation_failure_closes_admitted_run(  # noqa: C901, PLR0915
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_stage: str
+) -> None:
+    """A post-ACK preparation error publishes one safe terminal and releases ownership."""
+    confirmed = _confirmed(tmp_path)
+    execution = _service(tmp_path, ANCHOR + timedelta(minutes=15))
+    original_plan = SuccessorPlanService.plan
+    original_decode = _MediaDecoder.decode
+    original_reference = SuccessorCoarseClassificationService.prepare_reference
+    release = Event()
+
+    def plan(self: SuccessorPlanService, request: object) -> object:
+        if failed_stage == "discovery":
+            raise RuntimeError
+        if failed_stage == "deadline":
+            assert release.wait(5)
+        return original_plan(self, request)  # type: ignore[arg-type]
+
+    def decode(self: _MediaDecoder, payload: bytes, width: int, height: int) -> DecodedMedia:
+        if failed_stage == "baseline_decode" and payload == b"baseline":
+            raise RuntimeError
+        return original_decode(self, payload, width, height)
+
+    def reference(self: SuccessorCoarseClassificationService, authority: object) -> object:
+        if failed_stage == "reference":
+            raise RuntimeError
+        return original_reference(self, authority)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(SuccessorPlanService, "plan", plan)
+    monkeypatch.setattr(_MediaDecoder, "decode", decode)
+    monkeypatch.setattr(SuccessorCoarseClassificationService, "prepare_reference", reference)
+
+    class _Confirmation:
+        def load_confirmed(self, investigation_id: str) -> ConfirmedInvestigationInput:
+            assert investigation_id == confirmed.investigation_id
+            return confirmed
+
+    policy, classifier_policy, object_policy = approved_phase7e_policy()
+    public = Phase7EPublicService(
+        RecordingSearch7ERepository(tmp_path / "legacy"),
+        SimpleNamespace(),
+        _Confirmation(),
+        None,
+        None,
+        policy,
+        classifier_policy,
+        object_policy,
+        SimpleNamespace(status=lambda *_args: (None, None)),
+        lambda: ANCHOR + timedelta(hours=3),
+        None,
+        execution,
+    )
+    manager = Phase7EBackgroundManager(
+        public, execution_deadline_seconds=0.05 if failed_stage == "deadline" else 60
+    )
+    request_id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    try:
+        receipt = manager.start(confirmed.investigation_id, "2026-09-04T14:47:32", request_id)
+        assert receipt.status == "ACCEPTED"
+        if failed_stage == "deadline":
+            current_status = manager.status(confirmed.investigation_id, receipt.run_id)
+            for _ in range(100):
+                if current_status.phase7.status == "FAILED":
+                    break
+                time.sleep(0.01)
+                current_status = manager.status(confirmed.investigation_id, receipt.run_id)
+            assert current_status.phase7.status == "FAILED"
+            release.set()
+        future = manager._jobs[request_id].future
+        assert future is not None
+        future.result(timeout=5)
+        status = manager.status(confirmed.investigation_id, receipt.run_id)
+        assert status.phase7.status == "FAILED"
+        assert status.phase7.reason_code == "internal_error"
+        persisted = execution.publisher.read(confirmed.investigation_id, receipt.run_id)
+        assert persisted is not None
+        assert persisted["status"] == "FAILED"
+        assert persisted["plan_id"] is None
+        assert not manager._jobs[request_id].ownership.held  # type: ignore[union-attr]
+        retry = manager.start(confirmed.investigation_id, "2026-09-04T14:47:32", request_id)
+        assert retry.run_id == receipt.run_id
+        assert retry.status == "FAILED"
+    finally:
+        release.set()
+        manager.close()
 
 
 def test_successor_browser_surface_runs_through_uvicorn_http_and_reload(  # noqa: PLR0915

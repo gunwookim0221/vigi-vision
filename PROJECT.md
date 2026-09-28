@@ -373,6 +373,9 @@ independent managers sharing the artifact root cannot execute a second active
 run. An identical active retry reuses its run identity; a different run receives
 `already_running`. Completed retries still strictly reopen, and startup
 recovery interrupts only RUNNING records without a live lock owner.
+The browser HTTP 202 boundary now durably admits the request before NVR segment
+discovery, baseline decode, and B4 reference preparation; those stages run under
+the same retained owner in the background worker.
 One rack controlled case is complete, while broader real-NVR acceptance and
 Phase 8 review-media integration remain future work.
 Correction B adds a bounded Windows-spawn process boundary around production
