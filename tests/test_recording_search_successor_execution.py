@@ -37,7 +37,13 @@ from vigi_vision.investigation_confirmation_models import (
     RoiProvenance,
     artifact_relative_path,
 )
-from vigi_vision.object_presence_values import ClassificationOutcome, DecodedRgbImage
+from vigi_vision.object_presence_evidence import RawComparison
+from vigi_vision.object_presence_values import (
+    ClassificationOutcome,
+    DecodedRgbImage,
+    VisualReason,
+    VisualStatus,
+)
 from vigi_vision.recording_models import RecordingSegment, RecordingWindow, ReplayRequest
 from vigi_vision.recording_search_7e_background import (
     Phase7EBackgroundManager,
@@ -385,6 +391,83 @@ class _IndeterminateClassifier(_Classifier):
         )
 
 
+class _CoarseOcclusionClassifier(_Classifier):
+    def __init__(self, *, later_clean_absent: bool) -> None:
+        self.calls = 0
+        self.later_clean_absent = later_clean_absent
+
+    def classify(
+        self,
+        _baseline: object,
+        _probe: DecodedRgbImage,
+        _width: int,
+        _height: int,
+        _roi: object,
+        _correlation_id: str,
+    ) -> SuccessorClassifierResult:
+        self.calls += 1
+        outcome = (
+            ClassificationOutcome.PRESENT
+            if self.calls <= 2
+            else (
+                ClassificationOutcome.ABSENT
+                if self.calls == 4 and self.later_clean_absent
+                else ClassificationOutcome.INDETERMINATE
+            )
+        )
+        return SuccessorClassifierResult(
+            outcome,
+            "insufficient_visual_evidence"
+            if outcome is ClassificationOutcome.INDETERMINATE
+            else None,
+            _comparison(
+                present_gate=False,
+                decision_path="indeterminate",
+                decision_reason="insufficient_visual_evidence",
+            )
+            if outcome is ClassificationOutcome.INDETERMINATE
+            else _comparison(),
+        )
+
+
+class _CoarseUnusableClassifier(_Classifier):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def classify(
+        self,
+        _baseline: object,
+        _probe: DecodedRgbImage,
+        _width: int,
+        _height: int,
+        _roi: object,
+        _correlation_id: str,
+    ) -> SuccessorClassifierResult:
+        self.calls += 1
+        if self.calls <= 2:
+            return SuccessorClassifierResult(ClassificationOutcome.PRESENT, None, _comparison())
+        if self.calls == 3:
+            return SuccessorClassifierResult(
+                ClassificationOutcome.INDETERMINATE,
+                VisualReason.INVALID_MASK.value,
+                RawComparison(
+                    baseline_mask_pixel_count=None,
+                    probe_mask_pixel_count=None,
+                    roi_pixel_count=16,
+                    mask_intersection_pixel_count=None,
+                    mask_union_pixel_count=None,
+                    baseline_mask_coverage=None,
+                    probe_mask_coverage=None,
+                    mask_iou=None,
+                    effective_comparison_area=None,
+                    roi_luma_ncc=None,
+                    visual_status=VisualStatus.UNUSABLE,
+                    unusable_reason=VisualReason.INVALID_MASK,
+                ),
+            )
+        return SuccessorClassifierResult(ClassificationOutcome.ABSENT, None, _comparison())
+
+
 class _AnchorIndeterminateThenPresentClassifier(_Classifier):
     """Model an uncertain anchor followed by a usable final target."""
 
@@ -650,6 +733,81 @@ def test_successor_complete_present_publishes_not_found(tmp_path: Path) -> None:
     result = service.execute(prepared)
     assert result.status == "NOT_FOUND"
     assert result.reason_code == "complete_present_coverage"
+
+
+def test_coarse_occlusion_then_clean_absent_brackets_only_clean_frame(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    classifier = _CoarseOcclusionClassifier(later_clean_absent=True)
+    service = _service(tmp_path, ANCHOR + timedelta(hours=2), classifier)
+    prepared = service.prepare(
+        _confirmed(tmp_path),
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-occlusionclean00000000000000000",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    seen_brackets: list[tuple[str, str]] = []
+    original = SuccessorBinaryNarrowingService.narrow
+
+    def capture(self, plan, coarse_result, authority, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        bracket = coarse_result.candidate_bracket
+        assert bracket is not None
+        seen_brackets.append((bracket.present_observation_id, bracket.absent_observation_id))
+        return original(self, plan, coarse_result, authority, **kwargs)
+
+    monkeypatch.setattr(SuccessorBinaryNarrowingService, "narrow", capture)
+    result = service.execute(prepared)
+    assert seen_brackets
+    observations = result.coarse_observations
+    assert any(item["state"] == "INDETERMINATE" for item in observations)
+    assert seen_brackets[0][1] == next(
+        item["observation_id"] for item in observations if item["state"] == "ABSENT"
+    )
+    assert result.status == "INCONCLUSIVE"
+
+
+def test_coarse_occlusion_without_clean_absent_remains_inconclusive(tmp_path: Path) -> None:
+    classifier = _CoarseOcclusionClassifier(later_clean_absent=False)
+    service = _service(tmp_path, ANCHOR + timedelta(hours=2), classifier)
+    prepared = service.prepare(
+        _confirmed(tmp_path),
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-occlusiononly000000000000000000",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    result = service.execute(prepared)
+    assert result.status == "INCONCLUSIVE"
+    assert result.first_absent_time_utc is None
+    assert all(item["state"] != "ABSENT" for item in result.coarse_observations)
+
+
+def test_unusable_coarse_observation_does_not_start_early_narrowing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    classifier = _CoarseUnusableClassifier()
+    service = _service(tmp_path, ANCHOR + timedelta(hours=2), classifier)
+    prepared = service.prepare(
+        _confirmed(tmp_path),
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-invalidmask0000000000000000000",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    narrowing_calls: list[str] = []
+    original = SuccessorBinaryNarrowingService.narrow
+
+    def capture(self, plan, coarse_result, authority, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        bracket = coarse_result.candidate_bracket
+        assert bracket is not None
+        narrowing_calls.append(bracket.absent_observation_id)
+        return original(self, plan, coarse_result, authority, **kwargs)
+
+    monkeypatch.setattr(SuccessorBinaryNarrowingService, "narrow", capture)
+
+    result = service.execute(prepared)
+
+    assert classifier.calls >= 4
+    assert not narrowing_calls
+    assert result.status == "INCONCLUSIVE"
 
 
 def test_ambiguous_endpoint_uses_bounded_coarse_fallback_and_forms_candidate(

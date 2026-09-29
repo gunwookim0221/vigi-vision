@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import statistics
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from time import perf_counter
@@ -619,6 +620,13 @@ def _compare_with_baseline_support(  # noqa: PLR0915 - explicit evidence-gate as
     alignment_background_probe = tuple(probe_luma[index] for index in alignment_background_indices)
     fixed_background_baseline = tuple(baseline_luma[index] for index in fixed_background_indices)
     fixed_background_probe = tuple(probe_luma[index] for index in fixed_background_indices)
+    clear_background_ratio = _clear_background_ratio(
+        values.baseline_image,
+        values.probe_image,
+        values.roi,
+        support_indices,
+        fixed_background_indices,
+    )
     support_baseline = tuple(baseline_luma[index] for index in support_indices)
     support_probe = tuple(probe_luma[index] for index in support_indices)
     fixed_support_ncc_raw = mean_centered_ncc(support_baseline, support_probe)
@@ -784,6 +792,7 @@ def _compare_with_baseline_support(  # noqa: PLR0915 - explicit evidence-gate as
         baseline_support_change_ratio=change_ratio,
         baseline_support_foreground_retention=foreground_retention,
         baseline_support_background_change_ratio=background_change_ratio,
+        baseline_support_clear_background_ratio=clear_background_ratio,
         baseline_support_alignment_dx=alignment_fields[0],
         baseline_support_alignment_dy=alignment_fields[1],
         baseline_support_alignment_rotation_degrees=alignment_fields[2],
@@ -806,6 +815,66 @@ def _compare_with_baseline_support(  # noqa: PLR0915 - explicit evidence-gate as
         baseline_support_alignment_state=alignment_state,
         baseline_support_scene_stable=fixed_stability.scene_stable,
         baseline_support_scene_stability_veto_reason=fixed_stability.veto_reason,
+    )
+
+
+def _clear_background_ratio(
+    baseline_image: DecodedRgbImage,
+    probe_image: DecodedRgbImage,
+    roi: ConfirmationRoi,
+    support_indices: tuple[int, ...],
+    background_indices: tuple[int, ...],
+) -> float | None:
+    """Compare exposed support color with the independently sampled ROI background.
+
+    Luma retention cannot identify a different colored surface with similar
+    brightness. The fixed background ring is outside the baseline object and
+    its sample count is checked separately by the absence policy.
+    """
+    if not support_indices or not background_indices:
+        return None
+    baseline_pixels = tuple(
+        baseline_image.pixels[roi.y + y][roi.x + x]
+        for y in range(roi.height)
+        for x in range(roi.width)
+    )
+    probe_pixels = tuple(
+        probe_image.pixels[roi.y + y][roi.x + x]
+        for y in range(roi.height)
+        for x in range(roi.width)
+    )
+    background = tuple(baseline_pixels[index] for index in background_indices)
+    centers = tuple(
+        statistics.median(pixel[channel] for pixel in background) for channel in range(3)
+    )
+    tolerances = tuple(
+        max(
+            _SUPPORT_CHANGE_THRESHOLD,
+            min(
+                48,
+                3
+                * statistics.median(abs(pixel[channel] - centers[channel]) for pixel in background),
+            ),
+        )
+        for channel in range(3)
+    )
+    matching_support = sum(
+        all(
+            abs(probe_pixels[index][channel] - centers[channel]) <= tolerances[channel]
+            for channel in range(3)
+        )
+        for index in support_indices
+    )
+    matching_ring = sum(
+        all(
+            abs(probe_pixels[index][channel] - baseline_pixels[index][channel])
+            <= tolerances[channel]
+            for channel in range(3)
+        )
+        for index in background_indices
+    )
+    return quantize_metric(
+        min(matching_support / len(support_indices), matching_ring / len(background_indices))
     )
 
 

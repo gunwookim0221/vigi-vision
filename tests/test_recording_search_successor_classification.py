@@ -160,7 +160,7 @@ def _acquisition(plan, target, *, status=SuccessorTargetStatus.FRAME_AVAILABLE, 
         1.0,
         float(frame_shift),
         payload,
-        "b" * 64,
+        hashlib.sha256(payload).hexdigest(),
         len(payload),
         32,
         32,
@@ -221,6 +221,138 @@ def test_visual_states_and_candidate_bracket_use_actual_frame_time() -> None:
     assert result.observations[0].frame_utc != result.observations[0].requested_time_utc
     assert result.candidate_bracket is not None
     assert result.candidate_bracket.present_observation_id == result.observations[0].observation_id
+
+
+def test_comparable_coarse_uncertainty_can_bridge_to_later_clean_absent() -> None:
+    plan = _plan()
+    acquisitions = tuple(_acquisition(plan, target) for target in plan.targets)
+    present = _present_result()
+    service = SuccessorCoarseClassificationService(
+        _ResultClassifier(
+            [
+                present,
+                _comparable_indeterminate_result(),
+                SuccessorClassifierResult(ClassificationOutcome.ABSENT, None, present.comparison),
+            ]
+        ),
+        _Decoder(),
+    )
+    result = service.classify_plan(plan, acquisitions, _authority(plan))
+    assert result.observations[1].state is SuccessorObservationState.INDETERMINATE
+    assert result.candidate_bracket is not None
+    assert result.candidate_bracket.present_observation_id == result.observations[0].observation_id
+    assert result.candidate_bracket.absent_observation_id == result.observations[2].observation_id
+
+
+def test_occluded_coarse_frame_without_later_clean_absent_has_no_bracket() -> None:
+    plan = _plan()
+    acquisitions = tuple(_acquisition(plan, target) for target in plan.targets)
+    service, _ = _service(
+        [
+            ClassificationOutcome.PRESENT,
+            ClassificationOutcome.INDETERMINATE,
+            ClassificationOutcome.INDETERMINATE,
+        ]
+    )
+    result = service.classify_plan(plan, acquisitions, _authority(plan))
+    assert result.candidate_bracket is None
+
+
+@pytest.mark.parametrize(
+    "unusable_reason",
+    [VisualReason.INVALID_MASK, VisualReason.INSUFFICIENT_MASK_OVERLAP],
+)
+def test_unusable_visual_evidence_is_a_hard_coarse_bracket_barrier(
+    unusable_reason: VisualReason,
+) -> None:
+    plan = _plan()
+    acquisitions = tuple(_acquisition(plan, target) for target in plan.targets)
+    service = SuccessorCoarseClassificationService(
+        _ResultClassifier(
+            [
+                _present_result(),
+                _unusable_result(unusable_reason),
+                SuccessorClassifierResult(
+                    ClassificationOutcome.ABSENT, None, _present_result().comparison
+                ),
+            ]
+        ),
+        _Decoder(),
+    )
+
+    result = service.classify_plan(plan, acquisitions, _authority(plan))
+
+    unusable = result.observations[1]
+    assert unusable.state is SuccessorObservationState.INDETERMINATE
+    assert unusable.observability == "OCCLUDED"
+    assert unusable.comparison is not None
+    assert unusable.comparison["visual_status"] == VisualStatus.UNUSABLE.value
+    assert unusable.comparison["unusable_reason"] == unusable_reason.value
+    assert result.candidate_bracket is None
+
+
+def test_comparable_visual_indeterminate_remains_bridgeable() -> None:
+    plan = _plan()
+    acquisitions = tuple(_acquisition(plan, target) for target in plan.targets)
+    service = SuccessorCoarseClassificationService(
+        _ResultClassifier(
+            [
+                _present_result(),
+                _comparable_indeterminate_result(),
+                SuccessorClassifierResult(
+                    ClassificationOutcome.ABSENT, None, _present_result().comparison
+                ),
+            ]
+        ),
+        _Decoder(),
+    )
+
+    result = service.classify_plan(plan, acquisitions, _authority(plan))
+
+    assert result.observations[1].comparison is not None
+    assert result.observations[1].comparison["visual_status"] == VisualStatus.COMPARABLE.value
+    assert result.candidate_bracket is not None
+    assert result.candidate_bracket.present_observation_id == result.observations[0].observation_id
+    assert result.candidate_bracket.absent_observation_id == result.observations[2].observation_id
+
+
+def test_comparable_occluded_observation_remains_bridgeable() -> None:
+    plan = _plan()
+    acquisitions = tuple(_acquisition(plan, target) for target in plan.targets)
+    service = SuccessorCoarseClassificationService(
+        _ResultClassifier(
+            [
+                _present_result(),
+                _comparable_indeterminate_result(),
+                SuccessorClassifierResult(
+                    ClassificationOutcome.ABSENT, None, _present_result().comparison
+                ),
+            ]
+        ),
+        _Decoder(),
+    )
+    classified = service.classify_plan(plan, acquisitions, _authority(plan))
+    occluded = classification_module.reidentify_observation(
+        replace(classified.observations[1], observability="OCCLUDED"), sequence=2, ordinal=2
+    )
+
+    bracket = classification_module._candidate_bracket(
+        (classified.observations[0], occluded, classified.observations[2])
+    )
+
+    assert bracket is not None
+    assert bracket.absent_observation_id == classified.observations[2].observation_id
+
+
+def test_decode_unavailable_between_present_and_absent_cannot_form_bracket() -> None:
+    plan = _plan()
+    acquisitions = tuple(_acquisition(plan, target) for target in plan.targets)
+    classifier = _Classifier([ClassificationOutcome.PRESENT, ClassificationOutcome.ABSENT])
+    service = SuccessorCoarseClassificationService(classifier, _SelectiveDecoder({2}))
+    result = service.classify_plan(plan, acquisitions, _authority(plan))
+    assert result.observations[1].state is SuccessorObservationState.INDETERMINATE
+    assert result.observations[1].observability == "DECODE_UNAVAILABLE"
+    assert result.candidate_bracket is None
 
 
 @pytest.mark.parametrize(
@@ -378,24 +510,42 @@ def test_resolution_mismatch_is_indeterminate_without_classifier_call() -> None:
     assert len(classifier.calls) == 2
 
 
-def _unusable_result() -> SuccessorClassifierResult:
-    comparison = RawComparison(
-        baseline_mask_pixel_count=100,
-        probe_mask_pixel_count=20,
-        roi_pixel_count=256,
-        mask_intersection_pixel_count=0,
-        mask_union_pixel_count=120,
-        baseline_mask_coverage=0.390625,
-        probe_mask_coverage=0.078125,
-        mask_iou=0.0,
-        effective_comparison_area=None,
-        roi_luma_ncc=None,
-        visual_status=VisualStatus.UNUSABLE,
-        unusable_reason=VisualReason.INSUFFICIENT_MASK_OVERLAP,
-    )
+def _unusable_result(
+    reason: VisualReason = VisualReason.INSUFFICIENT_MASK_OVERLAP,
+) -> SuccessorClassifierResult:
+    if reason is VisualReason.INVALID_MASK:
+        comparison = RawComparison(
+            baseline_mask_pixel_count=None,
+            probe_mask_pixel_count=None,
+            roi_pixel_count=256,
+            mask_intersection_pixel_count=None,
+            mask_union_pixel_count=None,
+            baseline_mask_coverage=None,
+            probe_mask_coverage=None,
+            mask_iou=None,
+            effective_comparison_area=None,
+            roi_luma_ncc=None,
+            visual_status=VisualStatus.UNUSABLE,
+            unusable_reason=reason,
+        )
+    else:
+        comparison = RawComparison(
+            baseline_mask_pixel_count=100,
+            probe_mask_pixel_count=20,
+            roi_pixel_count=256,
+            mask_intersection_pixel_count=0,
+            mask_union_pixel_count=120,
+            baseline_mask_coverage=0.390625,
+            probe_mask_coverage=0.078125,
+            mask_iou=0.0,
+            effective_comparison_area=None,
+            roi_luma_ncc=None,
+            visual_status=VisualStatus.UNUSABLE,
+            unusable_reason=reason,
+        )
     return SuccessorClassifierResult(
         ClassificationOutcome.INDETERMINATE,
-        "insufficient_mask_overlap",
+        reason.value,
         comparison,
     )
 
@@ -416,6 +566,14 @@ def _present_result() -> SuccessorClassifierResult:
         unusable_reason=None,
     )
     return SuccessorClassifierResult(ClassificationOutcome.PRESENT, None, comparison)
+
+
+def _comparable_indeterminate_result() -> SuccessorClassifierResult:
+    return SuccessorClassifierResult(
+        ClassificationOutcome.INDETERMINATE,
+        VisualReason.INSUFFICIENT_VISUAL_EVIDENCE.value,
+        _present_result().comparison,
+    )
 
 
 class _ResultClassifier:

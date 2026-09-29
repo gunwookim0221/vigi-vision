@@ -54,6 +54,7 @@ class RawComparison(BaseModel):
     baseline_support_change_ratio: StrictFloat | None = None
     baseline_support_foreground_retention: StrictFloat | None = None
     baseline_support_background_change_ratio: StrictFloat | None = None
+    baseline_support_clear_background_ratio: StrictFloat | None = None
     baseline_support_alignment_dx: StrictInt | None = None
     baseline_support_alignment_dy: StrictInt | None = None
     baseline_support_alignment_rotation_degrees: StrictInt | None = None
@@ -194,6 +195,7 @@ def _validate_metric_ranges(comparison: RawComparison) -> None:
         comparison.baseline_support_change_ratio,
         comparison.baseline_support_foreground_retention,
         comparison.baseline_support_background_change_ratio,
+        comparison.baseline_support_clear_background_ratio,
         comparison.baseline_support_alignment_overlap,
         comparison.baseline_support_alignment_score,
         comparison.baseline_support_alignment_margin,
@@ -215,6 +217,7 @@ def _validate_metric_ranges(comparison: RawComparison) -> None:
         comparison.baseline_support_change_ratio,
         comparison.baseline_support_foreground_retention,
         comparison.baseline_support_background_change_ratio,
+        comparison.baseline_support_clear_background_ratio,
         comparison.baseline_support_alignment_overlap,
         comparison.baseline_support_alignment_margin,
     ):

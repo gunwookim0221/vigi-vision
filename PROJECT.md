@@ -378,6 +378,9 @@ discovery, baseline decode, and B4 reference preparation; those stages run under
 the same retained owner in the background worker.
 One rack controlled case is complete, while broader real-NVR acceptance and
 Phase 8 review-media integration remain future work.
+The Phase 7 successor empty-background decision now requires independently
+sampled, sufficiently supported clear-ROI evidence; foreign foreground and
+transient occlusion cannot provide first-absence proof.
 Correction B adds a bounded Windows-spawn process boundary around production
 Phase 7E B4 classification; timeout/cancellation terminate and reap the child,
 and late output cannot become evidence. Valid results allow a bounded two-second

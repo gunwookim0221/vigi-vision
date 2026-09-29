@@ -31,6 +31,7 @@ from vigi_vision.recording_search_successor_classification import (
     SuccessorCoarseClassificationService,
     SuccessorObservation,
     SuccessorObservationState,
+    is_bridgeable_visual_uncertainty,
 )
 
 if TYPE_CHECKING:
@@ -384,6 +385,16 @@ class SuccessorBinaryNarrowingService:
         ):
             completion = SuccessorNarrowingCompletion.ITERATION_LIMIT
             reason_code = "iteration_limit"
+        if completion is SuccessorNarrowingCompletion.NARROWED and any(
+            item.state is SuccessorObservationState.INDETERMINATE
+            and item.frame_utc is not None
+            and left.frame_utc is not None
+            and right.frame_utc is not None
+            and left.frame_utc < item.frame_utc < right.frame_utc
+            for item in coarse_result.observations
+        ):
+            completion = SuccessorNarrowingCompletion.INDETERMINATE_OBSERVATION
+            reason_code = "midpoint_indeterminate"
         if iterations > self.policy.maximum_iterations:
             raise SuccessorNarrowingContractError
         _safe_progress_log(
@@ -445,7 +456,8 @@ class SuccessorBinaryNarrowingService:
             or not _is_utc(left.frame_utc)
             or not _is_utc(right.frame_utc)
             or left.frame_utc >= right.frame_utc
-            or right.sequence != left.sequence + 1
+            or right.sequence <= left.sequence
+            or not _only_visual_uncertainty_between(coarse_result.observations, left, right)
             or bracket.present_frame_utc != left.frame_utc
             or bracket.absent_frame_utc != right.frame_utc
             or any(
@@ -460,6 +472,21 @@ class SuccessorBinaryNarrowingService:
             )
         ):
             raise SuccessorNarrowingContractError
+
+
+def _only_visual_uncertainty_between(
+    observations: tuple[SuccessorObservation, ...],
+    left: SuccessorObservation,
+    right: SuccessorObservation,
+) -> bool:
+    intervening = tuple(
+        item for item in observations if left.sequence < item.sequence < right.sequence
+    )
+    return len(intervening) == right.sequence - left.sequence - 1 and all(
+        item.sequence == left.sequence + index
+        and is_bridgeable_visual_uncertainty(item, reference=left)
+        for index, item in enumerate(intervening, 1)
+    )
 
 
 def _result(

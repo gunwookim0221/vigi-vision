@@ -270,14 +270,25 @@ search evidence rather than `ABSENT` or `FOUND`.
 The successor classifier exposes an additive asymmetric decision trace in each
 comparable observation. `PRESENT` requires confident identity alignment plus
 stable support appearance. `ABSENT` instead requires independent support loss,
-empty fixed-background evidence, and a stable scene; an ambiguous alignment is
-not an absence veto. `replacement_candidate`, `roi_occluded`,
+empty fixed-background evidence with at least 64 valid background pixels and
+a clear RGB match across the former object support, and a stable scene; an
+ambiguous alignment is not an absence veto. `replacement_candidate`, `roi_occluded`,
 `unstable_scene`, `conflicting_visual_evidence`, and
 `insufficient_visual_evidence` remain fail-closed indeterminate reasons. The
 persisted `baseline_support_*_gate_passed` booleans, `baseline_support_decision_path`,
 and `baseline_support_decision_reason` are closed, optional Schema 8 evidence
 for diagnostics and browser projection. Legacy Schema 5–7 rows and older
 successor rows without these fields remain readable.
+Transient visual occlusion cannot serve as the first `ABSENT` proof. Coarse
+search may retain the last valid `PRESENT` across visual uncertainty only when
+the intermediate observation has a decoded frame, valid frame/observation
+identity, and a strictly valid comparable `RawComparison`. An `UNUSABLE`,
+missing, or malformed comparison is a hard barrier even when the high-level
+observability label is `OCCLUDED`. A later clean `ABSENT` may then serve as the
+provisional upper bound. Acquisition gaps and operational failures also break
+that chain. Narrowing applies the same comparability and identity rule and
+cannot publish `FOUND` while known visual uncertainty remains inside its final
+interval; without a clean `ABSENT`, the terminal remains `INCONCLUSIVE`.
 
 Slice 2 separates the semantic observation horizon from its replay transport
 window. Each normalized coverage item retains its raw assigned segment bounds;

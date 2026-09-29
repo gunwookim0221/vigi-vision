@@ -33,6 +33,8 @@ _ABSENCE_ALIGNMENT_MAX_TRANSLATION_PIXELS: Final = 2
 _ABSENCE_ALIGNMENT_MAX_ROTATION_DEGREES: Final = 5
 _ABSENCE_ALIGNMENT_NO_CANDIDATE_SCORE_MAXIMUM: Final = 0.40
 _REGISTRATION_STABILITY_MIN_OVERLAP: Final = 0.95
+_MIN_STABILITY_BACKGROUND_PIXELS: Final = 64
+_MIN_CLEAR_BACKGROUND_RATIO: Final = 0.80
 
 
 class ObjectPresenceDecisionPolicy(BaseModel):
@@ -445,10 +447,20 @@ def _empty_background_evidence(  # noqa: PLR0913 - explicit gate inputs keep the
 ) -> bool:
     """Combine support loss, reveal change, stable area, and scene safety."""
     valid_area = comparison.baseline_support_stability_valid_pixel_count
+    clear_background = comparison.baseline_support_clear_background_ratio
+    required_area = (
+        1
+        if comparison.comparison_mode == "baseline_support_v1"
+        else max(_MIN_STABILITY_BACKGROUND_PIXELS, policy.minimum_comparison_area)
+    )
     return (
         scene_stable
         and valid_area is not None
-        and valid_area > 0
+        and valid_area >= required_area
+        and (
+            comparison.comparison_mode == "baseline_support_v1"
+            or (clear_background is not None and clear_background >= _MIN_CLEAR_BACKGROUND_RATIO)
+        )
         and ncc <= policy.baseline_support_absent_ncc_maximum
         and foreground <= policy.baseline_support_absent_foreground_maximum
         and change >= policy.baseline_support_present_change_maximum

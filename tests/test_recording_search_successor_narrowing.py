@@ -10,10 +10,16 @@ from pathlib import Path
 
 import pytest
 
+from test_recording_search_successor_search_evidence import _comparison
 from vigi_vision.investigation_confirmation_integrity import JpegIntegrity
 from vigi_vision.investigation_confirmation_models import ConfirmationRoi, RoiProvenance
+from vigi_vision.object_presence_evidence import RawComparison
 from vigi_vision.object_presence_models import DecodedRgbImage
-from vigi_vision.object_presence_values import ClassificationOutcome
+from vigi_vision.object_presence_values import (
+    ClassificationOutcome,
+    VisualReason,
+    VisualStatus,
+)
 from vigi_vision.recording_models import RecordingSegment, RecordingWindow, ReplayRequest
 from vigi_vision.recording_search_b3_media import DecodedMedia
 from vigi_vision.recording_search_successor import (
@@ -108,6 +114,8 @@ def _observation(
     acquisition_id: str | None = None,
     status: SuccessorTargetStatus = SuccessorTargetStatus.FRAME_AVAILABLE,
     sequence: int = 1,
+    comparison: dict[str, object] | None = None,
+    observability: str = "USABLE",
 ) -> SuccessorObservation:
     actual = requested if frame is None and state.is_visual else frame
     if (
@@ -121,10 +129,17 @@ def _observation(
         raise AssertionError
     target_id = target_id or f"coarse-target-{requested.timestamp()}"
     acquisition_id = acquisition_id or f"coarse-acquisition-{requested.timestamp()}"
+    frame_bytes = b"narrowing-fixture-frame" if actual is not None else None
     payload = "|".join(
         (plan.plan_id, target_id, acquisition_id, requested.isoformat(), str(actual), state.value)
     )
     observation_id = "successor-observation-v1-" + hashlib.sha256(payload.encode()).hexdigest()
+    if comparison is None and state is SuccessorObservationState.INDETERMINATE:
+        comparison = _comparison(
+            present_gate=False,
+            decision_path="indeterminate",
+            decision_reason="insufficient_visual_evidence",
+        ).model_dump(mode="json")
     return SuccessorObservation(
         plan.plan_id,
         target_id,
@@ -140,11 +155,31 @@ def _observation(
         "classifier-policy-test",
         status,
         state,
-        None
-        if state.is_visual and state is not SuccessorObservationState.INDETERMINATE
-        else "insufficient_visual_evidence",
+        (
+            None
+            if state.is_visual and state is not SuccessorObservationState.INDETERMINATE
+            else str(comparison["unusable_reason"])
+            if comparison is not None
+            and comparison.get("visual_status") == VisualStatus.UNUSABLE.value
+            else "insufficient_visual_evidence"
+        ),
         1,
         observation_id,
+        frame_sha256=(hashlib.sha256(frame_bytes).hexdigest() if frame_bytes is not None else None),
+        frame_bytes=frame_bytes,
+        frame_width=32 if actual is not None else None,
+        frame_height=32 if actual is not None else None,
+        comparison=comparison,
+        classifier_stage=(
+            "completed"
+            if state is SuccessorObservationState.INDETERMINATE
+            else "failed"
+            if state is SuccessorObservationState.CLASSIFIER_FAILED
+            else "timeout"
+            if state is SuccessorObservationState.CLASSIFIER_TIMEOUT
+            else None
+        ),
+        observability=observability,
     )
 
 
@@ -258,6 +293,57 @@ def _coarse(plan, authority, *, left: datetime, right: datetime):
     )
 
 
+def _unusable_comparison(reason: VisualReason) -> dict[str, object]:
+    if reason is VisualReason.INVALID_MASK:
+        comparison = RawComparison(
+            baseline_mask_pixel_count=None,
+            probe_mask_pixel_count=None,
+            roi_pixel_count=256,
+            mask_intersection_pixel_count=None,
+            mask_union_pixel_count=None,
+            baseline_mask_coverage=None,
+            probe_mask_coverage=None,
+            mask_iou=None,
+            effective_comparison_area=None,
+            roi_luma_ncc=None,
+            visual_status=VisualStatus.UNUSABLE,
+            unusable_reason=reason,
+        )
+    else:
+        comparison = RawComparison(
+            baseline_mask_pixel_count=100,
+            probe_mask_pixel_count=20,
+            roi_pixel_count=256,
+            mask_intersection_pixel_count=0,
+            mask_union_pixel_count=120,
+            baseline_mask_coverage=0.390625,
+            probe_mask_coverage=0.078125,
+            mask_iou=0.0,
+            effective_comparison_area=None,
+            roi_luma_ncc=None,
+            visual_status=VisualStatus.UNUSABLE,
+            unusable_reason=reason,
+        )
+    return comparison.model_dump(mode="json")
+
+
+def _coarse_with_intermediate(plan, authority, middle: SuccessorObservation):
+    left = _observation(plan, authority, ANCHOR, SuccessorObservationState.PRESENT, sequence=1)
+    right_time = ANCHOR + timedelta(seconds=30)
+    right = _observation(plan, authority, right_time, SuccessorObservationState.ABSENT, sequence=3)
+    return SuccessorCoarseClassificationResult(
+        plan.plan_id,
+        authority.authority_identity,
+        (left, middle, right),
+        SuccessorCandidateBracket(
+            left.observation_id,
+            right.observation_id,
+            left.frame_utc,
+            right.frame_utc,
+        ),
+    )
+
+
 def _service(
     plan, authority, coarse, outcomes=None, *, policy=None, offsets=None, statuses=None, cancel=None
 ):
@@ -307,6 +393,75 @@ def test_bracket_already_within_width_does_not_acquire() -> None:
 
     assert result.completion is SuccessorNarrowingCompletion.NARROWED
     assert result.iterations == 0
+    assert not acquisition.calls
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [VisualReason.INVALID_MASK, VisualReason.INSUFFICIENT_MASK_OVERLAP],
+)
+def test_narrowing_rejects_unusable_intermediate_evidence(reason: VisualReason) -> None:
+    plan = _plan()
+    authority = _authority(plan)
+    middle_time = ANCHOR + timedelta(seconds=15)
+    middle = _observation(
+        plan,
+        authority,
+        middle_time,
+        SuccessorObservationState.INDETERMINATE,
+        sequence=2,
+        comparison=_unusable_comparison(reason),
+        observability="OCCLUDED",
+    )
+    coarse = _coarse_with_intermediate(plan, authority, middle)
+    service, acquisition, _ = _service(plan, authority, coarse)
+
+    with pytest.raises(SuccessorNarrowingContractError):
+        service.narrow(plan, coarse, authority)
+
+    assert not acquisition.calls
+
+
+def test_narrowing_rejects_malformed_intermediate_comparison() -> None:
+    plan = _plan()
+    authority = _authority(plan)
+    middle_time = ANCHOR + timedelta(seconds=15)
+    middle = _observation(
+        plan,
+        authority,
+        middle_time,
+        SuccessorObservationState.INDETERMINATE,
+        sequence=2,
+        comparison={"visual_status": VisualStatus.COMPARABLE.value, "unusable_reason": None},
+        observability="OCCLUDED",
+    )
+    coarse = _coarse_with_intermediate(plan, authority, middle)
+    service, acquisition, _ = _service(plan, authority, coarse)
+
+    with pytest.raises(SuccessorNarrowingContractError):
+        service.narrow(plan, coarse, authority)
+
+    assert not acquisition.calls
+
+
+def test_narrowing_accepts_comparable_occlusion_but_keeps_fail_closed_guard() -> None:
+    plan = _plan()
+    authority = _authority(plan)
+    middle_time = ANCHOR + timedelta(seconds=15)
+    middle = _observation(
+        plan,
+        authority,
+        middle_time,
+        SuccessorObservationState.INDETERMINATE,
+        sequence=2,
+        observability="OCCLUDED",
+    )
+    coarse = _coarse_with_intermediate(plan, authority, middle)
+    service, acquisition, _ = _service(plan, authority, coarse)
+
+    result = service.narrow(plan, coarse, authority)
+
+    assert result.completion is SuccessorNarrowingCompletion.INDETERMINATE_OBSERVATION
     assert not acquisition.calls
 
 

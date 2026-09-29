@@ -9,7 +9,7 @@ foreign record family.
 # The orchestration is an explicit contract boundary; keep its state machine
 # readable while suppressing only diagnostics for protocol-shaped adapters.
 # pyright: reportAny=false, reportArgumentType=false, reportAttributeAccessIssue=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnannotatedClassAttribute=false, reportPrivateUsage=false, reportUnusedImport=false, reportUnusedCallResult=false, reportUnusedParameter=false, reportUnknownVariableType=false, reportDeprecated=false
-# ruff: noqa: C901, D102, D107, E501, EM101, FBT001, FBT003, PLR0911, PLR0912, PLR0913, PLR0915, PLC0415, PTH105, PTH108, RUF007, SIM105, TC001, TC003
+# ruff: noqa: C901, D102, D107, E501, EM101, FBT001, FBT003, PLR0911, PLR0912, PLR0913, PLR0915, PTH105, PTH108, SIM105, TC001, TC003
 
 from __future__ import annotations
 
@@ -76,6 +76,7 @@ from vigi_vision.recording_search_successor_classification import (
     SuccessorCoarseClassificationService,
     SuccessorObservation,
     SuccessorObservationState,
+    _candidate_bracket,
     reidentify_observation,
 )
 from vigi_vision.recording_search_successor_diagnostics import (
@@ -1823,28 +1824,9 @@ def _with_anchor_observation(
         for item in coarse.observations
     )
     observations = (baseline, anchor, *shifted)
-    bracket = None
-    for left, right in zip(observations, observations[1:], strict=False):
-        if (
-            left.state is SuccessorObservationState.PRESENT
-            and right.state is SuccessorObservationState.ABSENT
-            and left.frame_utc is not None
-            and right.frame_utc is not None
-        ):
-            bracket = _bracket(left, right)
-            break
+    bracket = _candidate_bracket(observations)
     return SuccessorCoarseClassificationResult(
         coarse.plan_id, coarse.authority_identity, observations, bracket
-    )
-
-
-def _bracket(left: SuccessorObservation, right: SuccessorObservation) -> object:
-    from vigi_vision.recording_search_successor_classification import SuccessorCandidateBracket
-
-    if left.frame_utc is None or right.frame_utc is None:
-        raise SuccessorExecutionError("internal_error")
-    return SuccessorCandidateBracket(
-        left.observation_id, right.observation_id, left.frame_utc, right.frame_utc
     )
 
 

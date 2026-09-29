@@ -807,6 +807,25 @@ def test_v3_numeric_alignment_states_reopen_with_numeric_facts(tmp_path, alignme
     )
 
 
+def test_v3_clear_background_signal_persists_and_strictly_reopens(tmp_path):
+    comparison = _v3_comparison("aligned", [2, -1, 5, 0.95, 0.87, 0.12])
+    comparison["baseline_support_clear_background_ratio"] = 0.875
+    manifest = _publish_v3(tmp_path, comparison)
+    repository = SuccessorEvidenceRepository(tmp_path / ".successor")
+    reopened = repository.read(
+        "object-disappearance-v3-ch1-20260912T050000Z", "search-run-" + "a" * 32
+    )
+    assert reopened == manifest
+    assert reopened["entries"][-1]["comparison"]["baseline_support_clear_background_ratio"] == 0.875
+
+
+def test_v3_clear_background_signal_rejects_out_of_range_value(tmp_path):
+    comparison = _v3_comparison("aligned", [2, -1, 5, 0.95, 0.87, 0.12])
+    comparison["baseline_support_clear_background_ratio"] = 1.1
+    with pytest.raises(SuccessorEvidenceError, match="evidence_corrupt"):
+        _publish_v3(tmp_path, comparison)
+
+
 @pytest.mark.parametrize("alignment_state", ["aligned", "ambiguous"])
 def test_v3_numeric_alignment_states_with_null_fact_is_rejected(tmp_path, alignment_state):
     comparison = _v3_comparison(alignment_state, [2, -1, 5, 0.95, 0.87, None])

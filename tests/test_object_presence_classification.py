@@ -442,6 +442,32 @@ def test_baseline_support_v3_reclassifies_removed_shoe_as_absent() -> None:
     assert result.comparison.baseline_support_empty_background_evidence is True
 
 
+def test_v3_low_retention_foreign_foreground_cannot_prove_empty_background() -> None:
+    classifier = _support_classifier(
+        classifier_policy_version="test-baseline-support-v3",
+        classifier_preprocessing_version="test-baseline-support-v3",
+        baseline_support_alignment_mode=True,
+    )
+    rows = [list(row) for row in _support_scene(shoe=False).pixels]
+    for y in range(7, 15):
+        for x in range(7, 15):
+            rows[y][x] = (240 - (x % 3), 145 + ((x + y) % 5), 240 - (y % 3))
+    garment = DecodedRgbImage.from_rows(tuple(tuple(row) for row in rows))
+    result = classifier.classify(_support_input(garment))
+    assert result.comparison.baseline_support_luma_ncc is not None
+    assert result.comparison.baseline_support_luma_ncc <= 0.20
+    assert result.comparison.baseline_support_foreground_retention is not None
+    assert result.comparison.baseline_support_foreground_retention <= 0.30
+    assert result.comparison.baseline_support_change_ratio is not None
+    assert result.comparison.baseline_support_change_ratio >= 0.30
+    assert result.comparison.baseline_support_edge_similarity is not None
+    assert result.comparison.baseline_support_edge_similarity >= 0.60
+    assert result.comparison.baseline_support_clear_background_ratio is not None
+    assert result.comparison.baseline_support_clear_background_ratio < 0.80
+    assert result.outcome is not ClassificationOutcome.ABSENT
+    assert result.comparison.baseline_support_empty_background_evidence is False
+
+
 def test_baseline_support_v3_handles_empty_alignment_background_for_tight_roi() -> None:
     """A tight source ROI may have fixed stability pixels but no alignment ring."""
     width, height = 66, 125
@@ -504,7 +530,16 @@ def test_preserved_run_b_absence_does_not_require_alignment_success() -> None:
         minimum_roi_pixels=1,
         minimum_clipped_mask_pixels=1,
     )
-    result = policy.decide(_run_b_ambiguous_absent_comparison())
+    # Metric-only historical projections cannot establish exposed background.
+    assert (
+        policy.decide(_run_b_ambiguous_absent_comparison()).outcome
+        is ClassificationOutcome.INDETERMINATE
+    )
+    result = policy.decide(
+        _run_b_ambiguous_absent_comparison().model_copy(
+            update={"baseline_support_clear_background_ratio": 1.0}
+        )
+    )
     assert result.outcome is ClassificationOutcome.ABSENT
     assert result.comparison.baseline_support_alignment_state == "ambiguous"
     assert result.comparison.baseline_support_present_gate_passed is False
@@ -512,6 +547,35 @@ def test_preserved_run_b_absence_does_not_require_alignment_success() -> None:
     assert result.comparison.baseline_support_empty_background_evidence is True
     assert result.comparison.baseline_support_decision_path == "absent"
     assert result.comparison.baseline_support_decision_reason == "absent_empty_background"
+
+
+def test_v3_tiny_stability_sample_cannot_prove_empty_background() -> None:
+    classifier = _support_classifier(baseline_support_alignment_mode=True)
+    clean = classifier.compare(_support_input(_support_scene(shoe=False)))
+    assert clean.baseline_support_stability_valid_pixel_count is not None
+    assert clean.baseline_support_stability_valid_pixel_count >= 64
+    assert classifier.policy.decide(clean).outcome is ClassificationOutcome.ABSENT
+    tiny = clean.model_copy(
+        update={
+            "baseline_support_stability_valid_pixel_count": 3,
+            "baseline_support_stability_excluded_pixel_count": clean.roi_pixel_count - 3,
+        }
+    )
+    result = classifier.policy.decide(tiny)
+    assert result.outcome is ClassificationOutcome.INDETERMINATE
+    assert result.comparison.baseline_support_empty_background_evidence is False
+
+
+def test_v3_present_object_partially_covered_by_garment_is_not_absent() -> None:
+    classifier = _support_classifier(baseline_support_alignment_mode=True)
+    rows = [list(row) for row in _support_scene().pixels]
+    for y in range(7, 12):
+        for x in range(7, 15):
+            rows[y][x] = (240 - (x % 3), 145 + ((x + y) % 5), 240 - (y % 3))
+    covered = DecodedRgbImage.from_rows(tuple(tuple(row) for row in rows))
+    result = classifier.classify(_support_input(covered))
+    assert result.outcome is ClassificationOutcome.INDETERMINATE
+    assert result.comparison.baseline_support_empty_background_evidence is False
 
 
 def test_baseline_support_v3_accepts_bounded_object_rotation() -> None:

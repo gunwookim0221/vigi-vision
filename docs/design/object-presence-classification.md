@@ -263,6 +263,7 @@ RawComparison
   baseline_support_change_ratio: finite decimal | null
   baseline_support_foreground_retention: finite decimal | null
   baseline_support_background_change_ratio: finite decimal | null
+  baseline_support_clear_background_ratio: finite decimal | null
   baseline_support_alignment_dx: bounded integer | null
   baseline_support_alignment_dy: bounded integer | null
   baseline_support_alignment_rotation_degrees: bounded integer | null
@@ -317,8 +318,14 @@ checks: local changes remain stable while coherent broad changes veto the visual
 decision. `PRESENT` requires the positive support similarity, NCC, edge,
 low-change, foreground-retention, stable-scene, and confident-alignment gates
 together. `ABSENT` uses an independent support-disappearance path: low support
-NCC, low local-background foreground retention, sufficient valid fixed-background
-area, and a stable scene. In v2/v3, alignment confidence is deliberately not
+NCC, low local-background foreground retention, at least 64 valid fixed-background
+pixels (or the configured comparison-area minimum, whichever is greater), a
+stable scene, and a clear-background color match across at least 80% of the
+former object support. The match compares probe RGB channels with the median
+of the fixed background ring using a bounded robust per-channel tolerance.
+Foreign foreground, including a different-colored surface with background-like
+luma, vetoes empty-background `ABSENT`. Missing color evidence fails closed.
+In v2/v3, alignment confidence is deliberately not
 an absence prerequisite; ambiguous or unavailable registration cannot by itself
 veto strong empty-background evidence. Similarity and pixel-change remain
 diagnostic because exposed flooring can preserve their aggregate values. Any
@@ -349,8 +356,8 @@ The deterministic fixture matrix fixes the successor gates at support
 similarity `>= 0.70`, support NCC `>= 0.50`, edge similarity `>= 0.60`,
 foreground retention `>= 0.70`, and change ratio `<= 0.30` for `PRESENT`.
 `ABSENT` v2/v3 requires support NCC `<= 0.20`, local-background foreground
-retention `<= 0.30`, stable valid background support, and sufficient support
-change; it does not require successful alignment.
+retention `<= 0.30`, stable valid background support, clear-background color
+match, and sufficient support change; it does not require successful alignment.
 support similarity and change ratio remain recorded diagnostics. Edge similarity is
 retained as diagnostic evidence because a stationary background can preserve
 edge energy after the target is removed. In v3, the explicit

@@ -14,7 +14,6 @@ delegated to the existing process-isolated B4 EfficientSAM boundary.
 from __future__ import annotations
 
 import hashlib
-import itertools
 import json
 import logging
 import math
@@ -37,7 +36,11 @@ from vigi_vision.object_presence_comparator import (
 )
 from vigi_vision.object_presence_evidence import ClassificationResult, RawComparison
 from vigi_vision.object_presence_models import BinaryMask
-from vigi_vision.object_presence_values import ClassificationOutcome, VisualStatus
+from vigi_vision.object_presence_values import (
+    ClassificationOutcome,
+    VisualReason,
+    VisualStatus,
+)
 from vigi_vision.recording_search_7e_b4_process import (
     B4ProcessCancelled,
     B4ProcessError,
@@ -749,7 +752,7 @@ class SuccessorObservation:
 
 @dataclass(frozen=True, slots=True)
 class SuccessorCandidateBracket:
-    """A provisional adjacent PRESENT → ABSENT coarse pair."""
+    """A provisional PRESENT → clean ABSENT pair across visual uncertainty only."""
 
     present_observation_id: str
     absent_observation_id: str
@@ -1723,21 +1726,94 @@ def reidentify_observation(
 def _candidate_bracket(
     observations: tuple[SuccessorObservation, ...],
 ) -> SuccessorCandidateBracket | None:
-    for previous, current in itertools.pairwise(observations):
-        if (
-            previous.state is SuccessorObservationState.PRESENT
-            and current.state is SuccessorObservationState.ABSENT
-            and current.sequence == previous.sequence + 1
-            and previous.frame_utc is not None
+    last_present: SuccessorObservation | None = None
+    previous: SuccessorObservation | None = None
+    for current in observations:
+        if previous is not None and current.sequence != previous.sequence + 1:
+            last_present = None
+        if current.state is SuccessorObservationState.PRESENT and current.frame_utc is not None:
+            last_present = current
+        elif (
+            current.state is SuccessorObservationState.ABSENT
             and current.frame_utc is not None
+            and last_present is not None
+            and last_present.frame_utc is not None
+            and last_present.frame_utc < current.frame_utc
         ):
             return SuccessorCandidateBracket(
-                previous.observation_id,
+                last_present.observation_id,
                 current.observation_id,
-                previous.frame_utc,
+                last_present.frame_utc,
                 current.frame_utc,
             )
+        elif (
+            current.state is not SuccessorObservationState.INDETERMINATE
+            or not is_bridgeable_visual_uncertainty(current, reference=last_present)
+        ):
+            last_present = None
+        previous = current
     return None
+
+
+def is_bridgeable_visual_uncertainty(
+    observation: SuccessorObservation,
+    *,
+    reference: SuccessorObservation | None = None,
+) -> bool:
+    """Accept only identity-bound, decoded, comparable visual indeterminacy."""
+    identity_prefix = "successor-observation-v1-"
+    if (
+        not isinstance(observation, SuccessorObservation)
+        or observation.state is not SuccessorObservationState.INDETERMINATE
+        or observation.reason_code != VisualReason.INSUFFICIENT_VISUAL_EVIDENCE.value
+        or observation.frame_utc is None
+        or not _is_utc(observation.frame_utc)
+        or observation.acquisition_status is not SuccessorTargetStatus.FRAME_AVAILABLE
+        or observation.frame_sha256 is None
+        or _SHA256.fullmatch(observation.frame_sha256) is None
+        or not isinstance(observation.frame_bytes, bytes)
+        or not observation.frame_bytes
+        or hashlib.sha256(observation.frame_bytes).hexdigest() != observation.frame_sha256
+        or observation.frame_width is None
+        or observation.frame_height is None
+        or observation.classifier_stage != "completed"
+        or observation.observability not in {"USABLE", "OCCLUDED"}
+        or not observation.observation_id.startswith(identity_prefix)
+        or _SHA256.fullmatch(observation.observation_id[len(identity_prefix) :]) is None
+        or not observation.plan_id
+        or not observation.target_id
+        or not observation.acquisition_id
+        or not observation.authority_identity
+        or not observation.reference_frame_resource_id
+        or not observation.roi_identity
+        or not observation.classifier_policy_identity
+    ):
+        return False
+    if reference is not None and (
+        observation.plan_id != reference.plan_id
+        or observation.authority_identity != reference.authority_identity
+        or observation.reference_frame_resource_id != reference.reference_frame_resource_id
+        or observation.roi_identity != reference.roi_identity
+        or observation.classifier_policy_identity != reference.classifier_policy_identity
+    ):
+        return False
+    if not isinstance(observation.comparison, dict):
+        return False
+    try:
+        comparison = RawComparison.model_validate_json(
+            json.dumps(observation.comparison, allow_nan=False)
+        )
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return False
+    return (
+        comparison.visual_status is VisualStatus.COMPARABLE
+        and comparison.unusable_reason is None
+        and (
+            comparison.comparison_mode
+            not in {"baseline_support_v1", "baseline_support_v2", "baseline_support_v3"}
+            or comparison.baseline_support_decision_path == "indeterminate"
+        )
+    )
 
 
 def _roi_valid(roi: ConfirmationRoi, width: int, height: int) -> bool:
@@ -1937,6 +2013,7 @@ def _safe_comparison(comparison: object) -> dict[str, object] | None:
         "baseline_support_change_ratio",
         "baseline_support_foreground_retention",
         "baseline_support_background_change_ratio",
+        "baseline_support_clear_background_ratio",
         "baseline_support_alignment_dx",
         "baseline_support_alignment_dy",
         "baseline_support_alignment_rotation_degrees",

@@ -208,6 +208,7 @@ _COMPARISON_KEYS = frozenset(
         "baseline_support_change_ratio",
         "baseline_support_foreground_retention",
         "baseline_support_background_change_ratio",
+        "baseline_support_clear_background_ratio",
         "baseline_support_alignment_dx",
         "baseline_support_alignment_dy",
         "baseline_support_alignment_rotation_degrees",
@@ -1436,6 +1437,13 @@ def _valid_comparison(value: object) -> bool:  # noqa: PLR0911
     if not isinstance(value, dict):
         return False
     payload = value
+    clear_background = payload.get("baseline_support_clear_background_ratio")
+    if clear_background is not None and (
+        type(clear_background) not in {int, float}
+        or not math.isfinite(clear_background)
+        or not 0.0 <= clear_background <= 1.0
+    ):
+        return False
     visual_status = payload.get("visual_status")
     unusable_reason = payload.get("unusable_reason")
     comparison_mode = payload.get("comparison_mode")
