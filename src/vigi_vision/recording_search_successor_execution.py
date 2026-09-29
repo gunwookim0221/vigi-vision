@@ -37,7 +37,10 @@ from vigi_vision.recording_search_7e_b4_process import (
     StaticMaskWorkerSpec,
     run_b4_in_process,
 )
-from vigi_vision.recording_search_b3_models import ClassificationPreparationError
+from vigi_vision.recording_search_b3_models import (
+    ClassificationPreparationError,
+    ClassificationPreparationReason,
+)
 from vigi_vision.recording_search_lock import LocalInvestigationLock
 from vigi_vision.recording_search_successor import (
     CoarseTargetAssignment,
@@ -74,6 +77,10 @@ from vigi_vision.recording_search_successor_classification import (
     SuccessorObservation,
     SuccessorObservationState,
     reidentify_observation,
+)
+from vigi_vision.recording_search_successor_diagnostics import (
+    SuccessorDiagnosticRepository,
+    diagnostic_scope,
 )
 from vigi_vision.recording_search_successor_evidence import (
     LEGACY_EVIDENCE_VERSION,
@@ -660,6 +667,7 @@ class SuccessorB4Classifier:
         cancellation: Callable[[], bool] | None,
     ) -> SuccessorClassifierResult:
         started = perf_counter()
+        timing_events: list[dict[str, object]] = []
         try:
             result = run_b4_in_process(
                 baseline_image=baseline_image,
@@ -674,13 +682,45 @@ class SuccessorB4Classifier:
                 startup_timeout_seconds=self.startup_timeout_seconds,
                 cancellation=cancellation,
                 baseline_mask=baseline_mask,
+                timing_sink=timing_events.append,
             )
         except B4ProcessTimeout as error:
-            raise SuccessorClassificationError("classifier_timeout") from error
+            diagnostic: dict[str, object] = (
+                dict(timing_events[-1]) if timing_events else {"error_code": error.code}
+            )
+            diagnostic.setdefault("timeout_stage", error.stage)
+            diagnostic.setdefault(
+                "failure_phase", "startup" if error.stage == "startup" else "probe_inference"
+            )
+            raise SuccessorClassificationError(
+                "classifier_timeout", diagnostic=diagnostic
+            ) from error
         except B4ProcessCancelled as error:
             raise SuccessorClassificationCancelledError from error
-        except (B4ProcessError, ClassificationPreparationError) as error:
-            raise SuccessorClassificationError("classifier_failed") from error
+        except B4ProcessError as error:
+            diagnostic = dict(timing_events[-1]) if timing_events else {"error_code": error.code}
+            if not timing_events and error.code == "worker_start_failed":
+                diagnostic.update(
+                    {"failure_phase": "startup", "child_started": False, "result_received": False}
+                )
+            raise SuccessorClassificationError(
+                "classifier_failed", diagnostic=diagnostic
+            ) from error
+        except ClassificationPreparationError as error:
+            safe_code = (
+                error.reason.value
+                if error.reason
+                in {
+                    ClassificationPreparationReason.CLASSIFIER_UNAVAILABLE,
+                    ClassificationPreparationReason.CLASSIFIER_EXECUTION_FAILED,
+                    ClassificationPreparationReason.INVALID_CLASSIFIER_OUTPUT,
+                }
+                else "classifier_failed"
+            )
+            raise SuccessorClassificationError(
+                "classifier_failed",
+                diagnostic={"failure_phase": "startup", "error_code": safe_code},
+            ) from error
         outcome = getattr(result, "outcome", None)
         if not isinstance(outcome, ClassificationOutcome):
             raise SuccessorClassificationContractError
@@ -829,6 +869,19 @@ class SuccessorExecutionService:
         return self.evidence_repository.read_candidates(investigation_id, run_id)
 
     def execute(
+        self,
+        prepared: SuccessorPreparedExecution,
+        *,
+        cancellation: Callable[[], bool] | None = None,
+    ) -> SuccessorTerminal:
+        with diagnostic_scope(
+            SuccessorDiagnosticRepository(self.publisher.root),
+            prepared.request.investigation_id,
+            prepared.request.run_id,
+        ):
+            return self._execute(prepared, cancellation=cancellation)
+
+    def _execute(
         self,
         prepared: SuccessorPreparedExecution,
         *,

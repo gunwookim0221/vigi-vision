@@ -56,6 +56,7 @@ from vigi_vision.recording_search_successor_acquisition import (
     successor_midpoint_target_id,
     successor_target_id,
 )
+from vigi_vision.recording_search_successor_diagnostics import persist_failure
 from vigi_vision.recording_search_successor_search_evidence import (
     SearchEvidence,
     SearchEvidenceBand,
@@ -86,6 +87,7 @@ _TIMING_PRECISION_CODES = frozenset(
 _AUTHORITY_VERSION = "phase7e-successor-authority-v1"
 _CLASSIFICATION_VERSION = "phase7e-successor-coarse-classification-v1"
 _SEARCH_EVIDENCE_RESULT_INDEX = 3
+_DIAGNOSTIC_RESULT_INDEX = 3
 _SAFE_REASON_CODES = frozenset(
     {
         "invalid_mask",
@@ -125,11 +127,12 @@ class SuccessorClassificationContractError(ValueError):
 class SuccessorClassificationError(RuntimeError):
     """Safe target-local classifier failure."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, *, diagnostic: dict[str, object] | None = None) -> None:
         if reason not in {"classifier_timeout", "classifier_failed"}:
             raise ValueError
         super().__init__(reason)
         self.reason: str = reason
+        self.diagnostic: dict[str, object] | None = diagnostic
 
 
 class SuccessorClassificationCancelledError(RuntimeError):
@@ -1072,7 +1075,7 @@ class SuccessorCoarseClassificationService:
                         False,
                     )
                 )
-                return _observation(
+                observation = _observation(
                     plan,
                     target,
                     acquisition,
@@ -1096,6 +1099,23 @@ class SuccessorCoarseClassificationService:
                     else "failed",
                     classifier_elapsed_ms=classifier_elapsed_ms,
                 )
+                persist_failure(
+                    plan_id=plan.plan_id,
+                    target_id=observation.target_id,
+                    observation_id=observation.observation_id,
+                    requested_time_utc=observation.requested_time_utc.astimezone(timezone.utc)
+                    .isoformat(timespec="seconds")
+                    .replace("+00:00", "Z"),
+                    total_elapsed_ms=classifier_elapsed_ms,
+                    public_reason=error_reason,
+                    event=(
+                        cast("dict[str, object]", evaluation[_DIAGNOSTIC_RESULT_INDEX])
+                        if len(evaluation) > _DIAGNOSTIC_RESULT_INDEX
+                        and isinstance(evaluation[_DIAGNOSTIC_RESULT_INDEX], dict)
+                        else None
+                    ),
+                )
+                return observation
             classified = evaluation[1]
             if not isinstance(classified, SuccessorClassifierResult):
                 raise SuccessorClassificationContractError
@@ -1306,6 +1326,7 @@ class SuccessorCoarseClassificationService:
                 "classifier_error",
                 error.reason,
                 max(0, round((perf_counter() - classifier_started) * 1000)),
+                error.diagnostic,
             )
         if not isinstance(classified, SuccessorClassifierResult):
             raise SuccessorClassificationContractError

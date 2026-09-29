@@ -205,7 +205,15 @@ Target-local unavailable and visual-indeterminate reasons remain distinct in
 terminal evidence; the executor continues through the remaining configured
 coarse targets after such uncertainty so terminal evidence can retain the
 latest available observation. Final human real-NVR acceptance remains
-unimplemented:
+unimplemented.
+
+Operational B4 failures also write an optional, bounded, create-once diagnostic
+sidecar at `.successor/{investigation_id}/{run_id}/diagnostics/{observation_id}.json`.
+It contains only closed stage/error, known process/result/cleanup facts, timing,
+and target identity. The sidecar is not part of Schema 8 terminal or evidence
+identity, strict reopen, candidate qualification, or public status; its absence
+or write failure never changes `CLASSIFIER_FAILED`/`CLASSIFIER_TIMEOUT` or the
+terminal decision. Historical runs need no migration.
 
 Successor classification uses the additive
 `efficient-sam-ti-baseline-support-v3` policy. Each probe is compared against

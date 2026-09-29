@@ -158,6 +158,20 @@ def _eof_worker_entry(connection: object, _encoded: bytes) -> None:
     connection.close()
 
 
+def _ready_then_failure_worker_entry(connection: object, encoded: bytes) -> None:
+    request = json.loads(encoded)
+    for kind, extra in (
+        ("ready", {"timings_ms": {"child_started_ms": 1}}),
+        ("failure", {"code": "worker_execution_failed"}),
+    ):
+        connection.send_bytes(
+            json.dumps(
+                {"version": 1, "correlation_id": request["correlation_id"], "kind": kind, **extra}
+            ).encode()
+        )
+    connection.close()
+
+
 def _delayed_ready_worker_entry(connection: object, encoded: bytes) -> None:
     sleep(0.15)
     b4_process._worker_entry(connection, encoded)
@@ -290,6 +304,9 @@ def test_invalid_classifier_output_is_reaped_immediately() -> None:
     assert raised.value.cleanup_failed is False
     assert len(pids) == 1
     assert events[-1]["error_code"] == "invalid_classifier_output"
+    assert events[-1]["failure_phase"] == "result_validation"
+    assert events[-1]["child_started"] is True
+    assert events[-1]["result_received"] is False
     _assert_reaped(pids)
 
 
@@ -310,6 +327,7 @@ def test_protocol_failure_from_spawned_worker_is_reaped(
     baseline, probe, baseline_mask, probe_mask, roi, policy = _values()
     monkeypatch.setattr(b4_process, "_worker_entry", worker)
     pids: list[int] = []
+    events: list[dict[str, object]] = []
     with pytest.raises(B4ProcessError) as raised:
         run_b4_in_process(
             baseline_image=baseline,
@@ -322,10 +340,13 @@ def test_protocol_failure_from_spawned_worker_is_reaped(
             correlation_id="protocol",
             timeout_seconds=3.0,
             pid_observer=pids.append,
+            timing_sink=events.append,
         )
     assert raised.value.code == expected
     assert raised.value.cleanup_failed is False
     assert len(pids) == 1
+    assert events[-1]["failure_phase"] == "result_validation"
+    assert events[-1]["error_code"] == "malformed_worker_protocol"
     _assert_reaped(pids)
 
 
@@ -333,6 +354,7 @@ def test_eof_without_result_is_reaped_immediately(monkeypatch: pytest.MonkeyPatc
     baseline, probe, baseline_mask, probe_mask, roi, policy = _values()
     monkeypatch.setattr(b4_process, "_worker_entry", _eof_worker_entry)
     pids: list[int] = []
+    events: list[dict[str, object]] = []
     with pytest.raises(B4ProcessError) as raised:
         run_b4_in_process(
             baseline_image=baseline,
@@ -345,11 +367,74 @@ def test_eof_without_result_is_reaped_immediately(monkeypatch: pytest.MonkeyPatc
             correlation_id="eof",
             timeout_seconds=3.0,
             pid_observer=pids.append,
+            timing_sink=events.append,
         )
     assert raised.value.code == "worker_abnormal_exit"
     assert raised.value.cleanup_failed is False
     assert len(pids) == 1
+    assert events[-1]["failure_phase"] == "process_exit"
+    assert events[-1]["result_received"] is False
+    assert isinstance(events[-1]["child_exit_code"], int)
     _assert_reaped(pids)
+
+
+def test_child_failure_after_ready_is_probe_inference_not_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline, probe, baseline_mask, probe_mask, roi, policy = _values()
+    monkeypatch.setattr(b4_process, "_worker_entry", _ready_then_failure_worker_entry)
+    events: list[dict[str, object]] = []
+    with pytest.raises(B4ProcessError) as raised:
+        run_b4_in_process(
+            baseline_image=baseline,
+            probe_image=probe,
+            source_width=32,
+            source_height=32,
+            roi=roi,
+            policy=policy,
+            worker_spec=StaticMaskWorkerSpec(baseline_mask, probe_mask),
+            correlation_id="ready-then-failure",
+            timeout_seconds=3.0,
+            timing_sink=events.append,
+        )
+    assert raised.value.code == "worker_execution_failed"
+    assert events[-1]["failure_phase"] == "probe_inference"
+    assert events[-1]["child_started"] is True
+    assert events[-1]["result_received"] is False
+    assert not _active_classifier_children()
+
+
+def test_post_result_cleanup_failure_is_diagnostic_only_until_existing_error_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline, probe, baseline_mask, probe_mask, roi, policy = _values()
+    original = b4_process._cleanup_process_boundary
+    events: list[dict[str, object]] = []
+
+    def cleanup_then_report_failure(*args: object, **kwargs: object) -> tuple[bool, int | None]:
+        _failed, exit_code = original(*args, **kwargs)
+        return True, exit_code
+
+    monkeypatch.setattr(b4_process, "_cleanup_process_boundary", cleanup_then_report_failure)
+    with pytest.raises(B4ProcessError) as raised:
+        run_b4_in_process(
+            baseline_image=baseline,
+            probe_image=probe,
+            source_width=32,
+            source_height=32,
+            roi=roi,
+            policy=policy,
+            worker_spec=StaticMaskWorkerSpec(baseline_mask, probe_mask),
+            correlation_id="post-result-cleanup",
+            timeout_seconds=3.0,
+            timing_sink=events.append,
+        )
+    assert raised.value.code == "worker_execution_failed"
+    assert events[-1]["stage"] == "failure"
+    assert events[-1]["failure_phase"] == "cleanup"
+    assert events[-1]["result_received"] is True
+    assert events[-1]["cleanup_status"] == "failed"
+    assert not _active_classifier_children()
 
 
 def test_parent_decode_exception_is_reaped_and_safe(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -570,6 +655,11 @@ def test_inference_timeout_reports_stage_and_safe_timing() -> None:
         "stage",
         "timeout_stage",
         "error_code",
+        "failure_phase",
+        "child_started",
+        "child_exit_code",
+        "result_received",
+        "cleanup_status",
         "cleanup_ms",
         "startup_ms",
         "ipc_result_ms",

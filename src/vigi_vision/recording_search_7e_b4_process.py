@@ -168,7 +168,7 @@ class StaticMaskWorkerSpec:
 
 
 WorkerSpec = EfficientSamWorkerSpec | StaticMaskWorkerSpec
-TimingSink = Callable[[dict[str, int | str]], None]
+TimingSink = Callable[[dict[str, int | str | bool]], None]
 
 
 class B4ProcessError(RuntimeError):
@@ -265,6 +265,7 @@ def run_b4_in_process(
     result_received_at: float | None = None
     ready_received_at: float | None = None
     child_timings: dict[str, int | str] = {}
+    failure_phase = "startup"
     try:
         parent, child = context.Pipe(duplex=False)
         process = context.Process(
@@ -302,11 +303,13 @@ def run_b4_in_process(
             try:
                 available = parent.poll(min(0.05, remaining))
             except (OSError, EOFError) as error:
+                failure_phase = "ipc_receive"
                 raise B4ProcessError("worker_execution_failed") from error
             if available:
                 try:
                     raw = parent.recv_bytes(MAX_RESULT_BYTES + 1)
                 except (OSError, EOFError, ValueError) as error:
+                    failure_phase = "ipc_receive"
                     raise B4ProcessError("worker_execution_failed") from error
                 # Cancellation and deadline win over a result that became
                 # available concurrently with the authority check.
@@ -314,13 +317,21 @@ def run_b4_in_process(
                     raise B4ProcessCancelled()
                 if monotonic() >= deadline:
                     raise B4ProcessTimeout(stage="startup" if not ready else "inference")
+                failure_phase = "result_validation"
                 message_kind = _message_kind(raw)
+                if message_kind == "failure":
+                    failure_phase = "startup" if not ready else "probe_inference"
                 if message_kind == "reference":
                     if not reference_only:
+                        failure_phase = "result_validation"
                         raise B4ProcessError("malformed_worker_protocol")
-                    result = _decode_reference_mask(
-                        raw, correlation_id, source_width, source_height
-                    )
+                    try:
+                        result = _decode_reference_mask(
+                            raw, correlation_id, source_width, source_height
+                        )
+                    except B4ProcessError:
+                        failure_phase = "result_validation"
+                        raise
                     result_received_at = monotonic()
                     if inference_deadline is None or result_received_at >= inference_deadline:
                         raise B4ProcessTimeout(stage="inference")
@@ -328,18 +339,26 @@ def run_b4_in_process(
                 if message_kind in {"ready", "timing", "inference"}:
                     if message_kind == "inference":
                         child_timings.update(_decode_timing(raw, correlation_id, "inference"))
+                        failure_phase = "probe_inference"
                         inference_started_at = monotonic()
                         inference_deadline = inference_started_at + float(timeout_seconds)
                         continue
                     if ready:
                         child_timings.update(_decode_timing(raw, correlation_id, "timing"))
+                        failure_phase = "reference_prepare" if reference_only else "probe_inference"
                         continue
                     child_timings = _decode_timing(raw, correlation_id, "ready")
                     ready = True
+                    failure_phase = "reference_prepare" if reference_only else "probe_inference"
                     ready_received_at = monotonic()
                     inference_deadline = monotonic() + float(startup_timeout)
                     continue
-                result = _decode_result(raw, correlation_id)
+                try:
+                    result = _decode_result(raw, correlation_id)
+                except B4ProcessError as error:
+                    if error.code in {"malformed_worker_protocol", "invalid_classifier_output"}:
+                        failure_phase = "result_validation"
+                    raise
                 result_received_at = monotonic()
                 if _is_cancelled(cancellation):
                     raise B4ProcessCancelled()
@@ -356,13 +375,21 @@ def run_b4_in_process(
                 try:
                     if parent.poll(0):
                         raw = parent.recv_bytes(MAX_RESULT_BYTES + 1)
+                        failure_phase = "result_validation"
                         message_kind = _message_kind(raw)
+                        if message_kind == "failure":
+                            failure_phase = "startup" if not ready else "probe_inference"
                         if message_kind == "reference":
                             if not reference_only:
+                                failure_phase = "result_validation"
                                 raise B4ProcessError("malformed_worker_protocol")
-                            result = _decode_reference_mask(
-                                raw, correlation_id, source_width, source_height
-                            )
+                            try:
+                                result = _decode_reference_mask(
+                                    raw, correlation_id, source_width, source_height
+                                )
+                            except B4ProcessError:
+                                failure_phase = "result_validation"
+                                raise
                             result_received_at = monotonic()
                             if (
                                 inference_deadline is None
@@ -375,18 +402,33 @@ def run_b4_in_process(
                                 child_timings.update(
                                     _decode_timing(raw, correlation_id, "inference")
                                 )
+                                failure_phase = "probe_inference"
                                 inference_started_at = monotonic()
                                 inference_deadline = inference_started_at + float(timeout_seconds)
                                 continue
                             if ready:
                                 child_timings.update(_decode_timing(raw, correlation_id, "timing"))
+                                failure_phase = (
+                                    "reference_prepare" if reference_only else "probe_inference"
+                                )
                                 continue
                             child_timings = _decode_timing(raw, correlation_id, "ready")
                             ready = True
+                            failure_phase = (
+                                "reference_prepare" if reference_only else "probe_inference"
+                            )
                             ready_received_at = monotonic()
                             inference_deadline = monotonic() + float(startup_timeout)
                             continue
-                        result = _decode_result(raw, correlation_id)
+                        try:
+                            result = _decode_result(raw, correlation_id)
+                        except B4ProcessError as error:
+                            if error.code in {
+                                "malformed_worker_protocol",
+                                "invalid_classifier_output",
+                            }:
+                                failure_phase = "result_validation"
+                            raise
                         result_received_at = monotonic()
                         if _is_cancelled(cancellation):
                             raise B4ProcessCancelled()
@@ -397,6 +439,7 @@ def run_b4_in_process(
                     raise
                 except (OSError, EOFError, ValueError):
                     pass
+                failure_phase = "process_exit"
                 raise B4ProcessError("worker_abnormal_exit")
     except (KeyboardInterrupt, SystemExit) as error:
         primary_error = B4ProcessInterrupted()
@@ -424,24 +467,50 @@ def run_b4_in_process(
             # The cleanup owner is defensive by itself, but a patched or
             # platform-specific failure must never mask the primary outcome.
             cleanup_failed = True
-        event: dict[str, int | str] = {
+        post_result_error: B4ProcessError | None = None
+        if primary_error is None and result is not None:
+            if exitcode != 0:
+                post_result_error = B4ProcessError(
+                    "worker_abnormal_exit", cleanup_failed=cleanup_failed
+                )
+                failure_phase = "process_exit"
+            elif cleanup_failed:
+                post_result_error = B4ProcessError("worker_execution_failed", cleanup_failed=True)
+                failure_phase = "cleanup"
+        recorded_error = primary_error or post_result_error
+        event: dict[str, int | str | bool] = {
             "event": "phase7e.classifier_timing",
             "stage": (
                 "timeout"
-                if isinstance(primary_error, B4ProcessTimeout)
+                if isinstance(recorded_error, B4ProcessTimeout)
                 else "failure"
-                if primary_error is not None
+                if recorded_error is not None
                 else "completed"
             ),
             "cleanup_ms": _elapsed_ms(cleanup_started_at),
+            "child_started": started,
+            "result_received": result is not None,
+            "cleanup_status": "failed" if cleanup_failed else "completed",
         }
-        if isinstance(primary_error, B4ProcessTimeout):
-            event["timeout_stage"] = primary_error.stage
-        if isinstance(primary_error, B4ProcessError):
-            event["error_code"] = primary_error.code
+        if recorded_error is not None:
+            event["failure_phase"] = (
+                "startup"
+                if isinstance(recorded_error, B4ProcessTimeout) and not ready
+                else "probe_inference"
+                if isinstance(recorded_error, B4ProcessTimeout)
+                else failure_phase
+            )
+        if isinstance(recorded_error, B4ProcessTimeout):
+            event["timeout_stage"] = recorded_error.stage
+        if isinstance(recorded_error, B4ProcessError):
+            event["error_code"] = recorded_error.code
+        if exitcode is not None:
+            event["child_exit_code"] = exitcode
         if process_started_at is not None:
             if ready and ready_received_at is not None:
                 event["startup_ms"] = _elapsed_ms(process_started_at, ready_received_at)
+            elif recorded_error is not None:
+                event["startup_ms"] = _elapsed_ms(process_started_at)
             if result_received_at is not None:
                 event["ipc_result_ms"] = _elapsed_ms(process_started_at, result_received_at)
             if inference_started_at is not None:
@@ -450,11 +519,8 @@ def run_b4_in_process(
         _emit_timing(event, timing_sink)
         if primary_error is not None:
             primary_error.cleanup_failed = primary_error.cleanup_failed or cleanup_failed
-        elif result is not None:
-            if exitcode != 0:
-                raise B4ProcessError("worker_abnormal_exit", cleanup_failed=cleanup_failed)
-            if cleanup_failed:
-                raise B4ProcessError("worker_execution_failed", cleanup_failed=True)
+        elif post_result_error is not None:
+            raise post_result_error
 
 
 def _valid_timeout(value: object) -> bool:
@@ -508,7 +574,7 @@ def _decode_timing(
     return result
 
 
-def _emit_timing(event: dict[str, int | str], sink: TimingSink | None) -> None:
+def _emit_timing(event: dict[str, int | str | bool], sink: TimingSink | None) -> None:
     """Emit only fixed, non-sensitive classifier stage facts."""
     if sink is not None:
         try:
