@@ -19,16 +19,24 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
+
+from vigi_vision.object_presence_retention_diagnostics import (
+    FOREGROUND_RETENTION_FACT_FIELDS,
+    ForegroundRetentionFacts,
+)
 
 _LOGGER = logging.getLogger("uvicorn.error.vigi_vision.phase7e")
 _INVESTIGATION_ID = re.compile(r"object-disappearance-v3-ch[1-9][0-9]*-[0-9]{8}T[0-9]{6}Z\Z")
 _RUN_ID = re.compile(r"search-run-[0-9a-f]{32}\Z")
 _OBSERVATION_ID = re.compile(r"successor-observation-v1-[0-9a-f]{64}\Z")
 _SAFE_ID = re.compile(r"[a-z0-9-]{1,160}\Z")
+_RESOURCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,191}\Z")
 _UTC_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
 _MAX_BYTES = 4096
 _VERSION = "phase7e-b4-failure-diagnostic-v1"
+_RETENTION_VERSION = "phase7e-foreground-retention-v1"
+_RETENTION_KIND = "foreground_retention"
 _STAGES = frozenset(
     {
         "startup",
@@ -79,6 +87,25 @@ _FIELDS = frozenset(
         "cleanup_status",
     }
 )
+_RETENTION_FIELDS = (
+    frozenset(
+        {
+            "version",
+            "diagnostic_kind",
+            "investigation_id",
+            "run_id",
+            "plan_id",
+            "target_id",
+            "observation_id",
+            "requested_time_utc",
+            "reference_identity",
+            "reference_frame_resource_id",
+            "roi_identity",
+            "classifier_policy_identity",
+        }
+    )
+    | FOREGROUND_RETENTION_FACT_FIELDS
+)
 
 
 class SuccessorDiagnosticError(ValueError):
@@ -110,6 +137,23 @@ class SuccessorDiagnosticRepository:
     ) -> dict[str, object] | None:
         """Strictly reopen one optional sidecar; absence is not corruption."""
         path = self._path(investigation_id, run_id, observation_id)
+        return self._read_at(
+            path,
+            lambda value: _valid_record(value, investigation_id, run_id, observation_id),
+        )
+
+    def read_retention(
+        self, investigation_id: str, run_id: str, observation_id: str
+    ) -> dict[str, object] | None:
+        """Strictly reopen one optional foreground-retention sidecar."""
+        path = self._retention_path(investigation_id, run_id, observation_id)
+        return self._read_at(
+            path,
+            lambda value: _valid_retention_record(value, investigation_id, run_id, observation_id),
+        )
+
+    @staticmethod
+    def _read_at(path: Path, validator: Callable[[object], bool]) -> dict[str, object] | None:
         if not path.exists():
             return None
         if path.is_symlink() or not path.is_file() or path.stat().st_size > _MAX_BYTES:
@@ -118,7 +162,7 @@ class SuccessorDiagnosticRepository:
             value = cast("object", json.loads(path.read_bytes()))
         except (OSError, ValueError) as error:
             raise SuccessorDiagnosticError("diagnostic_corrupt") from error
-        if not _valid_record(value, investigation_id, run_id, observation_id):
+        if not validator(value):
             raise SuccessorDiagnosticError("diagnostic_corrupt")
         return cast("dict[str, object]", value)
 
@@ -133,18 +177,61 @@ class SuccessorDiagnosticRepository:
         run_id = cast("str", run_id)
         observation_id = cast("str", observation_id)
         path = self._path(investigation_id, run_id, observation_id)
-        if not _valid_record(record, investigation_id, run_id, observation_id):
+        self._publish_at(
+            path,
+            record,
+            lambda value: _valid_record(value, investigation_id, run_id, observation_id),
+            lambda: self.read(investigation_id, run_id, observation_id),
+            ".b4-",
+        )
+
+    def publish_retention(self, record: dict[str, object]) -> None:
+        """Create one immutable, bounded foreground-retention sidecar."""
+        investigation_id = record.get("investigation_id")
+        run_id = record.get("run_id")
+        observation_id = record.get("observation_id")
+        if not all(type(value) is str for value in (investigation_id, run_id, observation_id)):
+            raise SuccessorDiagnosticError("invalid_identity")
+        investigation_id = cast("str", investigation_id)
+        run_id = cast("str", run_id)
+        observation_id = cast("str", observation_id)
+        path = self._retention_path(investigation_id, run_id, observation_id)
+        self._publish_at(
+            path,
+            record,
+            lambda value: _valid_retention_record(value, investigation_id, run_id, observation_id),
+            lambda: self.read_retention(investigation_id, run_id, observation_id),
+            ".retention-",
+        )
+
+    def _retention_path(self, investigation_id: str, run_id: str, observation_id: str) -> Path:
+        b4_path = self._path(investigation_id, run_id, observation_id)
+        path = b4_path.parent / "foreground-retention-v1" / f"{observation_id}.json"
+        for component in (path.parent, path):
+            if component.exists() and _is_reparse(component):
+                raise SuccessorDiagnosticError("diagnostic_unsafe_path")
+        return path
+
+    @staticmethod
+    def _publish_at(
+        path: Path,
+        record: dict[str, object],
+        validator: Callable[[object], bool],
+        read_existing: Callable[[], dict[str, object] | None],
+        temporary_prefix: str,
+    ) -> None:
+        if not validator(record):
             raise SuccessorDiagnosticError("diagnostic_corrupt")
         encoded = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("ascii")
         if len(encoded) > _MAX_BYTES:
             raise SuccessorDiagnosticError("diagnostic_too_large")
         path.parent.mkdir(parents=True, exist_ok=True)
-        existing = self.read(investigation_id, run_id, observation_id)
+        existing = read_existing()
         if existing is not None:
             if existing != record:
                 raise SuccessorDiagnosticError("diagnostic_conflict")
             return
-        fd, temporary = tempfile.mkstemp(prefix=".b4-", suffix=".tmp", dir=path.parent)
+        fd, temporary = tempfile.mkstemp(prefix=temporary_prefix, suffix=".tmp", dir=path.parent)
         try:
             with os.fdopen(fd, "wb") as handle:
                 _ = handle.write(encoded)
@@ -153,7 +240,7 @@ class SuccessorDiagnosticRepository:
             try:
                 _ = os.link(temporary, path)
             except FileExistsError:
-                existing = self.read(investigation_id, run_id, observation_id)
+                existing = read_existing()
                 if existing != record:
                     raise SuccessorDiagnosticError("diagnostic_conflict") from None
         finally:
@@ -195,6 +282,32 @@ def _valid_record(value: object, investigation_id: str, run_id: str, observation
             return False
     exit_code = record["child_exit_code"]
     return exit_code is None or type(exit_code) is int
+
+
+def _valid_retention_record(
+    value: object, investigation_id: str, run_id: str, observation_id: str
+) -> bool:
+    if not isinstance(value, dict):
+        return False
+    record = cast("dict[str, object]", value)
+    if (
+        frozenset(record) != _RETENTION_FIELDS
+        or record.get("version") != _RETENTION_VERSION
+        or record.get("diagnostic_kind") != _RETENTION_KIND
+        or record.get("investigation_id") != investigation_id
+        or record.get("run_id") != run_id
+        or record.get("observation_id") != observation_id
+        or not _safe_text(record.get("plan_id"), _SAFE_ID)
+        or not _safe_text(record.get("target_id"), _SAFE_ID)
+        or not _safe_text(record.get("requested_time_utc"), _UTC_TIME)
+        or not _safe_text(record.get("reference_identity"), _SAFE_ID)
+        or not _safe_text(record.get("reference_frame_resource_id"), _RESOURCE_ID)
+        or not _safe_text(record.get("roi_identity"), _SAFE_ID)
+        or not _safe_text(record.get("classifier_policy_identity"), _SAFE_ID)
+    ):
+        return False
+    facts = {key: record[key] for key in FOREGROUND_RETENTION_FACT_FIELDS}
+    return ForegroundRetentionFacts.from_payload(facts) is not None
 
 
 def _safe_text(value: object, allowed: re.Pattern[str] | frozenset[str]) -> bool:
@@ -290,6 +403,49 @@ def persist_failure(
             _LOGGER.warning(
                 "%s %s",
                 "phase7e.classifier_diagnostic",
+                "stage=persist_failed error_code=diagnostic_unavailable",
+            )
+
+
+def persist_foreground_retention(
+    *,
+    plan_id: str,
+    target_id: str,
+    observation_id: str,
+    requested_time_utc: str,
+    reference_identity: str,
+    reference_frame_resource_id: str,
+    roi_identity: str,
+    classifier_policy_identity: str,
+    facts: ForegroundRetentionFacts | None,
+) -> None:
+    """Best-effort sidecar publication; never changes the classified result."""
+    scope = _ACTIVE.get()
+    if scope is None or facts is None:
+        return
+    try:
+        repository, investigation_id, run_id = scope
+        record: dict[str, object] = {
+            "version": _RETENTION_VERSION,
+            "diagnostic_kind": _RETENTION_KIND,
+            "investigation_id": investigation_id,
+            "run_id": run_id,
+            "plan_id": plan_id,
+            "target_id": target_id,
+            "observation_id": observation_id,
+            "requested_time_utc": requested_time_utc,
+            "reference_identity": reference_identity,
+            "reference_frame_resource_id": reference_frame_resource_id,
+            "roi_identity": roi_identity,
+            "classifier_policy_identity": classifier_policy_identity,
+            **facts.to_payload(),
+        }
+        repository.publish_retention(record)
+    except Exception:
+        with suppress(Exception):
+            _LOGGER.warning(
+                "%s %s",
+                "phase7e.foreground_retention_diagnostic",
                 "stage=persist_failed error_code=diagnostic_unavailable",
             )
 

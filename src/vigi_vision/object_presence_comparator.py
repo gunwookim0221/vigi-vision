@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from time import perf_counter
 from typing import TYPE_CHECKING, Final, cast
@@ -34,6 +35,7 @@ from vigi_vision.object_presence_models import (
     VisualStatus,
     quantize_metric,
 )
+from vigi_vision.object_presence_retention_diagnostics import ForegroundRetentionFacts
 
 if TYPE_CHECKING:
     from vigi_vision.investigation_confirmation_models import ConfirmationRoi
@@ -319,6 +321,8 @@ def fast_present_comparison(
 
 _SUPPORT_CHANGE_THRESHOLD: Final[float] = 32.0
 _FOREGROUND_CONTRAST_THRESHOLD: Final[float] = 40.0
+_LUMA_MAXIMUM: Final[float] = 255.0
+_RETENTION_HISTOGRAM_LIMITS: Final[tuple[float, ...]] = (30.0, 40.0, 50.0, 80.0)
 _STABILITY_DILATION_PIXELS: Final[int] = 4
 # EfficientSAM's point-prompt support can stop just inside a real object's
 # edge.  Keep one bounded source-pixel margin outside the scale-derived ring
@@ -348,12 +352,16 @@ class ObjectPresenceClassifier:
         values: ClassifierInput,
         *,
         diagnostics_sink: Callable[[str, int], None] | None = None,
+        retention_sink: Callable[[ForegroundRetentionFacts], None] | None = None,
     ) -> RawComparison:
         """Return one validated raw comparison without performing I/O."""
         _validate_input(values)
         if self.policy.baseline_support_mode:
             return _compare_with_baseline_support(
-                values, self.policy, diagnostics_sink=diagnostics_sink
+                values,
+                self.policy,
+                diagnostics_sink=diagnostics_sink,
+                retention_sink=retention_sink,
             )
         roi_pixels = values.roi.width * values.roi.height
         baseline_mask, probe_mask = clipped_masks(
@@ -392,9 +400,16 @@ class ObjectPresenceClassifier:
         values: ClassifierInput,
         *,
         diagnostics_sink: Callable[[str, int], None] | None = None,
+        retention_sink: Callable[[ForegroundRetentionFacts], None] | None = None,
     ) -> ClassificationResult:
         """Return the conservative three-state result for one in-memory input."""
-        return self.policy.decide(self.compare(values, diagnostics_sink=diagnostics_sink))
+        return self.policy.decide(
+            self.compare(
+                values,
+                diagnostics_sink=diagnostics_sink,
+                retention_sink=retention_sink,
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -424,6 +439,7 @@ class _AlignmentResolution:
     generated: int
     evaluated: int
     valid: int
+    normalization: _LumaNormalization | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -540,11 +556,12 @@ def _measure_masks(
     return measurements, terminal
 
 
-def _compare_with_baseline_support(  # noqa: PLR0915 - explicit evidence-gate assembly
+def _compare_with_baseline_support(  # noqa: C901, PLR0912, PLR0915 - explicit evidence gates
     values: ClassifierInput,
     policy: ObjectPresenceDecisionPolicy,
     *,
     diagnostics_sink: Callable[[str, int], None] | None = None,
+    retention_sink: Callable[[ForegroundRetentionFacts], None] | None = None,
 ) -> RawComparison:
     """Compare probe pixels against the immutable baseline mask support.
 
@@ -644,6 +661,7 @@ def _compare_with_baseline_support(  # noqa: PLR0915 - explicit evidence-gate as
         values.roi.height,
         roi_pixels,
     )
+    fixed_retention_facts: list[ForegroundRetentionFacts] = []
     (
         fixed_similarity,
         fixed_change,
@@ -656,8 +674,12 @@ def _compare_with_baseline_support(  # noqa: PLR0915 - explicit evidence-gate as
         fixed_background_baseline,
         fixed_background_probe,
         (fixed_background_indices, values.roi.width),
+        retention_sink=(fixed_retention_facts.append if retention_sink is not None else None),
+        baseline_support_pixel_count=baseline_count,
+        present_foreground_retention_threshold=policy.baseline_support_present_foreground_minimum,
     )
     alignment: _AlignmentResolution | None = None
+    selected_aligned = False
     if policy.baseline_support_alignment_mode:
         alignment = _aligned_support_choice(
             baseline_luma,
@@ -678,6 +700,7 @@ def _compare_with_baseline_support(  # noqa: PLR0915 - explicit evidence-gate as
             and alignment.choice.margin >= policy.baseline_support_alignment_margin_minimum
         )
         if alignment_is_confident:
+            selected_aligned = True
             support_luma_similarity = alignment.choice.similarity
             support_luma_ncc = alignment.choice.ncc
             edge_similarity = alignment.choice.edge
@@ -743,6 +766,40 @@ def _compare_with_baseline_support(  # noqa: PLR0915 - explicit evidence-gate as
         )
         alignment_fields = (None, None, None, None, None, None)
         alignment_state = "not_required"
+    if retention_sink is not None:
+        retention_facts = (
+            fixed_retention_facts[0] if not selected_aligned and fixed_retention_facts else None
+        )
+        if selected_aligned and alignment is not None and alignment.normalization is not None:
+            transformed = _transformed_support(
+                probe_luma,
+                support_indices,
+                values.roi.width,
+                values.roi.height,
+                alignment.choice.dx,
+                alignment.choice.dy,
+                alignment.choice.rotation_degrees,
+            )
+            if transformed is not None:
+                mapped_indices, raw_probe_support, _ = transformed
+                if len(alignment.choice.normalized_probe) == len(mapped_indices):
+                    aligned_baseline_support = tuple(
+                        baseline_luma[index] for index in mapped_indices
+                    )
+                    with suppress(Exception):
+                        retention_facts = _make_foreground_retention_facts(
+                            aligned_baseline_support,
+                            raw_probe_support,
+                            alignment.choice.normalized_probe,
+                            alignment.normalization,
+                            baseline_count,
+                            len(alignment_background_baseline),
+                            len(alignment_background_probe),
+                            policy.baseline_support_present_foreground_minimum,
+                        )
+        if retention_facts is not None:
+            with suppress(Exception):
+                retention_sink(retention_facts)
     roi_ncc_raw = mean_centered_ncc(baseline_luma, probe_luma)
     roi_ncc = None if roi_ncc_raw is None else quantize_metric(roi_ncc_raw)
     if (
@@ -885,6 +942,10 @@ def _support_luma_metrics(  # noqa: PLR0913 - explicit support/background inputs
     probe_background: tuple[float, ...],
     stability: tuple[tuple[int, ...], int],
     normalization: _LumaNormalization | None = None,
+    *,
+    retention_sink: Callable[[ForegroundRetentionFacts], None] | None = None,
+    baseline_support_pixel_count: int | None = None,
+    present_foreground_retention_threshold: float = 0.70,
 ) -> tuple[float | None, float | None, float | None, float | None, tuple[float, ...]]:
     if (
         not baseline
@@ -940,6 +1001,26 @@ def _support_luma_metrics(  # noqa: PLR0913 - explicit support/background inputs
             )
             / len(baseline_foreground)
         )
+    if retention_sink is not None:
+        context = normalization or _build_luma_normalization(baseline_background, probe_background)
+        if context is not None:
+            with suppress(Exception):
+                facts = _make_foreground_retention_facts(
+                    baseline,
+                    probe,
+                    normalized,
+                    context,
+                    (
+                        len(baseline)
+                        if baseline_support_pixel_count is None
+                        else baseline_support_pixel_count
+                    ),
+                    len(baseline_background),
+                    len(probe_background),
+                    present_foreground_retention_threshold,
+                )
+                if facts is not None:
+                    retention_sink(facts)
     return (
         similarity,
         quantize_metric(changed / len(baseline)),
@@ -947,6 +1028,103 @@ def _support_luma_metrics(  # noqa: PLR0913 - explicit support/background inputs
         background_changed,
         normalized,
     )
+
+
+def _make_foreground_retention_facts(  # noqa: PLR0913 - explicit support facts
+    baseline: tuple[float, ...],
+    raw_probe: tuple[float, ...],
+    normalized_probe: tuple[float, ...],
+    normalization: _LumaNormalization,
+    baseline_support_pixel_count: int,
+    baseline_background_pixel_count: int,
+    probe_background_pixel_count: int,
+    present_foreground_retention_threshold: float,
+) -> ForegroundRetentionFacts | None:
+    """Summarize the exact support population without retaining pixel values."""
+    if not baseline or len(baseline) != len(raw_probe) or len(baseline) != len(normalized_probe):
+        return None
+    baseline_contrast = tuple(value - normalization.baseline_location for value in baseline)
+    probe_contrast = tuple(value - normalization.baseline_location for value in normalized_probe)
+    if not all(math.isfinite(value) for value in (*baseline_contrast, *probe_contrast)):
+        return None
+    eligible = tuple(
+        index
+        for index, value in enumerate(baseline_contrast)
+        if abs(value) >= _FOREGROUND_CONTRAST_THRESHOLD
+    )
+    retained_count = sum(
+        1
+        for index in eligible
+        if abs(probe_contrast[index]) >= _FOREGROUND_CONTRAST_THRESHOLD
+        and abs(probe_contrast[index]) >= abs(baseline_contrast[index]) * 0.25
+    )
+    absolute_floor_rejection_count = sum(
+        1 for index in eligible if abs(probe_contrast[index]) < _FOREGROUND_CONTRAST_THRESHOLD
+    )
+    relative_retention_rejection_count = sum(
+        1
+        for index in eligible
+        if abs(probe_contrast[index]) >= _FOREGROUND_CONTRAST_THRESHOLD
+        and abs(probe_contrast[index]) < abs(baseline_contrast[index]) * 0.25
+    )
+    baseline_histogram = _contrast_histogram(baseline_contrast)
+    probe_histogram = _contrast_histogram(probe_contrast)
+    offset = normalization.baseline_location - normalization.probe_location * normalization.scale
+    clipped_low = sum(
+        1
+        for value in raw_probe
+        if (value - normalization.probe_location) * normalization.scale
+        + normalization.baseline_location
+        < 0.0
+    )
+    clipped_high = sum(
+        1
+        for value in raw_probe
+        if (value - normalization.probe_location) * normalization.scale
+        + normalization.baseline_location
+        > _LUMA_MAXIMUM
+    )
+    payload: dict[str, object] = {
+        "baseline_support_pixel_count": baseline_support_pixel_count,
+        "retention_support_population_pixel_count": len(baseline),
+        "eligible_baseline_foreground_pixel_count": len(eligible),
+        "retained_foreground_pixel_count": retained_count,
+        "absolute_floor_rejection_count": absolute_floor_rejection_count,
+        "relative_retention_rejection_count": relative_retention_rejection_count,
+        "baseline_contrast_histogram": list(baseline_histogram),
+        "probe_contrast_histogram": list(probe_histogram),
+        "baseline_background_pixel_count": baseline_background_pixel_count,
+        "probe_background_pixel_count": probe_background_pixel_count,
+        "baseline_background_median": normalization.baseline_location,
+        "probe_background_median": normalization.probe_location,
+        "normalization_scale": normalization.scale,
+        "normalization_offset": offset,
+        "normalization_clipped_low_count": clipped_low,
+        "normalization_clipped_high_count": clipped_high,
+        "absolute_contrast_floor": _FOREGROUND_CONTRAST_THRESHOLD,
+        "relative_retention_fraction": 0.25,
+        "present_foreground_retention_threshold": present_foreground_retention_threshold,
+    }
+    return ForegroundRetentionFacts.from_payload(payload)
+
+
+def _contrast_histogram(values: tuple[float, ...]) -> tuple[int, int, int, int, int]:
+    counts = [0, 0, 0, 0, 0]
+    for value in values:
+        contrast = abs(value)
+        bucket = (
+            0
+            if contrast < _RETENTION_HISTOGRAM_LIMITS[0]
+            else 1
+            if contrast < _RETENTION_HISTOGRAM_LIMITS[1]
+            else 2
+            if contrast < _RETENTION_HISTOGRAM_LIMITS[2]
+            else 3
+            if contrast < _RETENTION_HISTOGRAM_LIMITS[3]
+            else 4
+        )
+        counts[bucket] += 1
+    return counts[0], counts[1], counts[2], counts[3], counts[4]
 
 
 def _normalize_probe_values(
@@ -1326,6 +1504,7 @@ def _aligned_support_choice(  # noqa: PLR0913 - each alignment boundary is expli
             max(generated_count, comparison_count),
             comparison_count,
             0,
+            normalization,
         )
     ordered = sorted(candidates, key=_alignment_sort_key, reverse=True)
     best = ordered[0]
@@ -1350,6 +1529,7 @@ def _aligned_support_choice(  # noqa: PLR0913 - each alignment boundary is expli
         max(generated_count, comparison_count),
         comparison_count,
         len(candidates),
+        normalization,
     )
 
 

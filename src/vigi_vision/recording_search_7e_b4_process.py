@@ -25,6 +25,7 @@ import math
 import multiprocessing
 import re
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic, sleep
@@ -35,6 +36,7 @@ from vigi_vision.assisted_roi_predictor import LazyEfficientSamPredictor
 from vigi_vision.assisted_roi_service import RoiSuggestionUnavailableError
 from vigi_vision.investigation_confirmation_models import ConfirmationRoi
 from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
+from vigi_vision.object_presence_retention_diagnostics import ForegroundRetentionFacts
 from vigi_vision.object_presence_values import BinaryMask, DecodedRgbImage
 from vigi_vision.recording_search_b3_masks import _prediction_to_mask
 from vigi_vision.recording_search_b3_models import (
@@ -73,13 +75,16 @@ _REQUEST_KEYS: Final = frozenset(
         "predictor",
     }
 )
+_RETENTION_REQUEST_KEYS: Final = _REQUEST_KEYS | frozenset({"retention_diagnostics"})
 _REUSE_REQUEST_KEYS: Final = _REQUEST_KEYS | frozenset({"baseline_mask"})
 _REFERENCE_REQUEST_KEYS: Final = _REQUEST_KEYS | frozenset({"reference_only"})
+_RETENTION_REUSE_REQUEST_KEYS: Final = _REUSE_REQUEST_KEYS | frozenset({"retention_diagnostics"})
 _PREDICTOR_KEYS: Final = {
     "efficient_sam": frozenset({"kind", "checkpoint_path", "expected_sha256", "device_mode"}),
     "static_masks": frozenset({"kind", "baseline_rows", "probe_rows", "delay_seconds"}),
 }
 _RESULT_KEYS: Final = frozenset({"version", "correlation_id", "kind", "result"})
+_RETENTION_RESULT_KEYS: Final = _RESULT_KEYS | frozenset({"retention_diagnostic"})
 _READY_KEYS: Final = frozenset({"version", "correlation_id", "kind", "timings_ms"})
 _FAILURE_KEYS: Final = frozenset({"version", "correlation_id", "kind", "code"})
 _FAILURE_CODES: Final = frozenset(
@@ -169,6 +174,7 @@ class StaticMaskWorkerSpec:
 
 WorkerSpec = EfficientSamWorkerSpec | StaticMaskWorkerSpec
 TimingSink = Callable[[dict[str, int | str | bool]], None]
+RetentionSink = Callable[[ForegroundRetentionFacts], None]
 
 
 class B4ProcessError(RuntimeError):
@@ -219,6 +225,7 @@ def run_b4_in_process(
     timing_sink: TimingSink | None = None,
     reference_only: bool = False,
     baseline_mask: BinaryMask | None = None,
+    retention_sink: RetentionSink | None = None,
 ) -> ClassificationResult | BinaryMask:
     """Compute B4 in one spawned child and accept only a fully reaped result."""
     if not _valid_timeout(timeout_seconds):
@@ -242,6 +249,7 @@ def run_b4_in_process(
             correlation_id,
             reference_only=reference_only,
             baseline_mask=baseline_mask,
+            retention_diagnostics=retention_sink is not None,
         )
         encoded = _encode_json(request)
     except B4ProcessError:
@@ -354,7 +362,7 @@ def run_b4_in_process(
                     inference_deadline = monotonic() + float(startup_timeout)
                     continue
                 try:
-                    result = _decode_result(raw, correlation_id)
+                    result = _decode_result(raw, correlation_id, retention_sink=retention_sink)
                 except B4ProcessError as error:
                     if error.code in {"malformed_worker_protocol", "invalid_classifier_output"}:
                         failure_phase = "result_validation"
@@ -421,7 +429,9 @@ def run_b4_in_process(
                             inference_deadline = monotonic() + float(startup_timeout)
                             continue
                         try:
-                            result = _decode_result(raw, correlation_id)
+                            result = _decode_result(
+                                raw, correlation_id, retention_sink=retention_sink
+                            )
                         except B4ProcessError as error:
                             if error.code in {
                                 "malformed_worker_protocol",
@@ -607,6 +617,7 @@ def _build_request(
     *,
     reference_only: bool = False,
     baseline_mask: BinaryMask | None = None,
+    retention_diagnostics: bool = False,
 ) -> dict[str, object]:
     """Build one exact primitive-only request after parent-side validation."""
     if not isinstance(worker_spec, (EfficientSamWorkerSpec, StaticMaskWorkerSpec)):
@@ -643,6 +654,8 @@ def _build_request(
         request["reference_only"] = True
     elif baseline_mask is not None:
         request["baseline_mask"] = _encode_reference_mask(baseline_mask)
+    if retention_diagnostics and not reference_only:
+        request["retention_diagnostics"] = True
     return request
 
 
@@ -659,6 +672,13 @@ def _worker_entry(connection: Connection, encoded: bytes) -> None:
     """Top-level spawn target with no parent capability or persistence access."""
     child_started_at = monotonic()
     timings: dict[str, int | str] = {}
+    retention_payloads: list[dict[str, object]] = []
+
+    def retention_sink(facts: ForegroundRetentionFacts) -> None:
+        try:
+            retention_payloads.append(facts.to_payload())
+        except Exception:
+            retention_payloads.clear()
 
     def stage_sink(name: str, elapsed_ms: int) -> None:
         if name in _TIMING_KEYS:
@@ -710,7 +730,12 @@ def _worker_entry(connection: Connection, encoded: bytes) -> None:
             except OSError:
                 pass
             return
-        result = _compute(request, predictor=predictor, stage_sink=stage_sink)
+        result = _compute(
+            request,
+            predictor=predictor,
+            stage_sink=stage_sink,
+            retention_sink=retention_sink if request.get("retention_diagnostics") is True else None,
+        )
         _send_payload(
             connection,
             {
@@ -726,6 +751,8 @@ def _worker_entry(connection: Connection, encoded: bytes) -> None:
             "kind": "result",
             "result": result.model_dump(mode="json"),
         }
+        if retention_payloads:
+            payload["retention_diagnostic"] = retention_payloads[-1]
     except RoiSuggestionUnavailableError:
         payload = {
             "version": PROTOCOL_VERSION,
@@ -759,6 +786,7 @@ def _compute(
     *,
     predictor: object | None = None,
     stage_sink: Callable[[str, int], None] | None = None,
+    retention_sink: RetentionSink | None = None,
 ) -> ClassificationResult:
     """Reconstruct only validated values and run the shared pure computation."""
     width = request["source_width"]
@@ -802,6 +830,7 @@ def _compute(
         mask_predictor=predictor,
         baseline_mask=baseline_mask,
         diagnostics_sink=stage_sink,
+        retention_sink=retention_sink,
     )
     _emit_stage(stage_sink, "child_inference_ms", _elapsed_ms(started))
     return result
@@ -908,7 +937,13 @@ def _decode_request(encoded: bytes) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError
     keys = frozenset(value.keys())
-    if keys not in {_REQUEST_KEYS, _REFERENCE_REQUEST_KEYS, _REUSE_REQUEST_KEYS}:
+    if keys not in {
+        _REQUEST_KEYS,
+        _REFERENCE_REQUEST_KEYS,
+        _REUSE_REQUEST_KEYS,
+        _RETENTION_REQUEST_KEYS,
+        _RETENTION_REUSE_REQUEST_KEYS,
+    }:
         raise ValueError
     if value.get("version") != PROTOCOL_VERSION:
         raise ValueError
@@ -932,6 +967,10 @@ def _decode_request(encoded: bytes) -> dict[str, object]:
     if "baseline_mask" in value:
         _decode_packed_mask(value.get("baseline_mask"), width, height)
     if "reference_only" in value and type(value["reference_only"]) is not bool:
+        raise ValueError
+    if "retention_diagnostics" in value and value["retention_diagnostics"] is not True:
+        raise ValueError
+    if "reference_only" in value and "retention_diagnostics" in value:
         raise ValueError
     return value
 
@@ -994,7 +1033,12 @@ def _decode_packed_mask(encoded_mask: object, width: int, height: int) -> Binary
         raise ValueError from error
 
 
-def _decode_result(raw: bytes, expected_correlation: str) -> ClassificationResult:
+def _decode_result(
+    raw: bytes,
+    expected_correlation: str,
+    *,
+    retention_sink: RetentionSink | None = None,
+) -> ClassificationResult:
     if type(raw) is not bytes or not raw or len(raw) > MAX_RESULT_BYTES:
         raise B4ProcessError("malformed_worker_protocol")
     try:
@@ -1010,14 +1054,25 @@ def _decode_result(raw: bytes, expected_correlation: str) -> ClassificationResul
         raise B4ProcessError("malformed_worker_protocol")
     kind = value.get("kind")
     if kind == "result":
-        if set(value) != _RESULT_KEYS or not isinstance(value.get("result"), dict):
+        keys = frozenset(value)
+        if (
+            keys not in {_RESULT_KEYS, _RETENTION_RESULT_KEYS}
+            or (keys == _RETENTION_RESULT_KEYS and retention_sink is None)
+            or not isinstance(value.get("result"), dict)
+        ):
             raise B4ProcessError("malformed_worker_protocol")
         try:
             from vigi_vision.object_presence_evidence import ClassificationResult
 
-            return ClassificationResult.model_validate_json(_encode_json(value["result"]))
+            result = ClassificationResult.model_validate_json(_encode_json(value["result"]))
         except Exception as error:
             raise B4ProcessError("invalid_classifier_output") from error
+        if keys == _RETENTION_RESULT_KEYS and retention_sink is not None:
+            facts = ForegroundRetentionFacts.from_payload(value.get("retention_diagnostic"))
+            if facts is not None:
+                with suppress(Exception):
+                    retention_sink(facts)
+        return result
     if kind == "failure":
         if set(value) != _FAILURE_KEYS or value.get("code") not in _FAILURE_CODES:
             raise B4ProcessError("malformed_worker_protocol")

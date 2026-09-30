@@ -104,6 +104,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
+    from vigi_vision.object_presence_retention_diagnostics import ForegroundRetentionFacts
 
 
 SUCCESSOR_SCHEMA_VERSION = 8
@@ -669,6 +670,7 @@ class SuccessorB4Classifier:
     ) -> SuccessorClassifierResult:
         started = perf_counter()
         timing_events: list[dict[str, object]] = []
+        retention_diagnostics: list[ForegroundRetentionFacts] = []
         try:
             result = run_b4_in_process(
                 baseline_image=baseline_image,
@@ -684,6 +686,7 @@ class SuccessorB4Classifier:
                 cancellation=cancellation,
                 baseline_mask=baseline_mask,
                 timing_sink=timing_events.append,
+                retention_sink=retention_diagnostics.append,
             )
         except B4ProcessTimeout as error:
             diagnostic: dict[str, object] = (
@@ -733,6 +736,7 @@ class SuccessorB4Classifier:
             getattr(result, "comparison", None),
             "completed",
             elapsed_ms,
+            retention_diagnostics[-1] if retention_diagnostics else None,
         )
 
     def prepare_reference(

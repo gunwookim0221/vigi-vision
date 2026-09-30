@@ -215,6 +215,14 @@ identity, strict reopen, candidate qualification, or public status; its absence
 or write failure never changes `CLASSIFIER_FAILED`/`CLASSIFIER_TIMEOUT` or the
 terminal decision. Historical runs need no migration.
 
+Successful successor comparisons may write a separate optional
+`foreground-retention-v1` sidecar under the same run-relative diagnostics tree.
+It contains fixed support-retention counts, five-bin contrast histograms, and
+known background-normalization scalars for calibration and RCA only. It is
+non-authoritative: historical absence, deletion, or a failed write does not
+change a public decision or strict reopen. Raw masks and pixel values are never
+stored.
+
 Successor classification uses the additive
 `efficient-sam-ti-baseline-support-v3` policy. Each probe is compared against
 the immutable baseline support after bounded local translation/rotation

@@ -59,7 +59,10 @@ from vigi_vision.recording_search_successor_acquisition import (
     successor_midpoint_target_id,
     successor_target_id,
 )
-from vigi_vision.recording_search_successor_diagnostics import persist_failure
+from vigi_vision.recording_search_successor_diagnostics import (
+    persist_failure,
+    persist_foreground_retention,
+)
 from vigi_vision.recording_search_successor_search_evidence import (
     SearchEvidence,
     SearchEvidenceBand,
@@ -71,6 +74,7 @@ if TYPE_CHECKING:
 
     from vigi_vision.object_presence_models import DecodedRgbImage
     from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
+    from vigi_vision.object_presence_retention_diagnostics import ForegroundRetentionFacts
     from vigi_vision.recording_search_b3_contracts import MediaDecoder
     from vigi_vision.recording_search_successor import (
         CoarseTargetAssignment,
@@ -280,6 +284,9 @@ class SuccessorClassifierResult:
     comparison: RawComparison | None = field(default=None, repr=False)
     stage: str = "completed"
     elapsed_ms: int | None = None
+    retention_diagnostic: ForegroundRetentionFacts | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.outcome, ClassificationOutcome):
@@ -358,6 +365,7 @@ class EfficientSamSuccessorClassifier:
         cancellation: Callable[[], bool] | None = None,
     ) -> SuccessorClassifierResult:
         started = perf_counter()
+        retention_diagnostics: list[ForegroundRetentionFacts] = []
         try:
             result = run_b4_in_process(
                 baseline_image=baseline_image,
@@ -371,6 +379,7 @@ class EfficientSamSuccessorClassifier:
                 timeout_seconds=self.timeout_seconds,
                 startup_timeout_seconds=self.startup_timeout_seconds,
                 cancellation=cancellation,
+                retention_sink=retention_diagnostics.append,
             )
         except B4ProcessTimeout as error:
             raise SuccessorClassificationError("classifier_timeout") from error
@@ -387,6 +396,7 @@ class EfficientSamSuccessorClassifier:
             result.comparison,
             "completed",
             elapsed_ms,
+            retention_diagnostics[-1] if retention_diagnostics else None,
         )
 
     def classify_with_cancellation(
@@ -425,6 +435,7 @@ class EfficientSamSuccessorClassifier:
     ) -> SuccessorClassifierResult:
         """Classify while reusing one compatible immutable baseline mask."""
         started = perf_counter()
+        retention_diagnostics: list[ForegroundRetentionFacts] = []
         try:
             result = run_b4_in_process(
                 baseline_image=baseline_image,
@@ -439,6 +450,7 @@ class EfficientSamSuccessorClassifier:
                 startup_timeout_seconds=self.startup_timeout_seconds,
                 cancellation=cancellation,
                 baseline_mask=baseline_mask,
+                retention_sink=retention_diagnostics.append,
             )
         except B4ProcessTimeout as error:
             raise SuccessorClassificationError("classifier_timeout") from error
@@ -455,6 +467,7 @@ class EfficientSamSuccessorClassifier:
             result.comparison,
             "completed",
             elapsed_ms,
+            retention_diagnostics[-1] if retention_diagnostics else None,
         )
 
     def classify_with_baseline_mask_and_cancellation(
@@ -1028,6 +1041,7 @@ class SuccessorCoarseClassificationService:
         saw_decode_failure = False
         first_decode_reason: str | None = None
         last_comparison: dict[str, object] | None = None
+        last_retention_diagnostic: ForegroundRetentionFacts | None = None
         primary = candidates[0]
         for index, candidate in enumerate(candidates):
             if cancellation is not None and cancellation():
@@ -1131,6 +1145,7 @@ class SuccessorCoarseClassificationService:
             if _is_occluded_result(classified):
                 saw_occluded = True
                 last_comparison = comparison
+                last_retention_diagnostic = classified.retention_diagnostic
                 trace.append(
                     (
                         _timestamp(candidate.candidate_time_utc),
@@ -1152,44 +1167,50 @@ class SuccessorCoarseClassificationService:
                     True,
                 )
             )
-            return _observation(
+            return _persist_retention_diagnostic(
+                _observation(
+                    plan,
+                    target,
+                    acquisition,
+                    authority,
+                    SuccessorObservationState(classified.outcome.value),
+                    classified.reason_code,
+                    self.classifier.policy_identity,
+                    comparison=comparison,
+                    classifier_stage=classified.stage,
+                    classifier_elapsed_ms=classified.elapsed_ms,
+                    frame_candidate=candidate,
+                    fallback_used=index > 0,
+                    fallback_reason=(
+                        _FALLBACK_REASON
+                        if saw_occluded
+                        else ("DECODE_UNAVAILABLE" if saw_decode_failure else None)
+                    )
+                    if index > 0
+                    else None,
+                    observability="USABLE",
+                    candidate_trace=tuple(trace),
+                    _search_evidence=search_evidence,
+                ),
+                classified.retention_diagnostic,
+            )
+        fallback_reason = _FALLBACK_REASON if saw_occluded else "DECODE_UNAVAILABLE"
+        return _persist_retention_diagnostic(
+            _observation(
                 plan,
                 target,
                 acquisition,
                 authority,
-                SuccessorObservationState(classified.outcome.value),
-                classified.reason_code,
+                SuccessorObservationState.INDETERMINATE,
+                "roi_occluded" if saw_occluded else (first_decode_reason or "frame_decode_failed"),
                 self.classifier.policy_identity,
-                comparison=comparison,
-                classifier_stage=classified.stage,
-                classifier_elapsed_ms=classified.elapsed_ms,
-                frame_candidate=candidate,
-                fallback_used=index > 0,
-                fallback_reason=(
-                    _FALLBACK_REASON
-                    if saw_occluded
-                    else ("DECODE_UNAVAILABLE" if saw_decode_failure else None)
-                )
-                if index > 0
-                else None,
-                observability="USABLE",
+                comparison=last_comparison,
+                frame_candidate=primary,
+                fallback_reason=fallback_reason,
+                observability="OCCLUDED" if saw_occluded else "DECODE_UNAVAILABLE",
                 candidate_trace=tuple(trace),
-                _search_evidence=search_evidence,
-            )
-        fallback_reason = _FALLBACK_REASON if saw_occluded else "DECODE_UNAVAILABLE"
-        return _observation(
-            plan,
-            target,
-            acquisition,
-            authority,
-            SuccessorObservationState.INDETERMINATE,
-            "roi_occluded" if saw_occluded else (first_decode_reason or "frame_decode_failed"),
-            self.classifier.policy_identity,
-            comparison=last_comparison,
-            frame_candidate=primary,
-            fallback_reason=fallback_reason,
-            observability="OCCLUDED" if saw_occluded else "DECODE_UNAVAILABLE",
-            candidate_trace=tuple(trace),
+            ),
+            last_retention_diagnostic,
         )
 
     def _evaluate_candidate(
@@ -1476,6 +1497,27 @@ def _is_occluded_result(classified: SuccessorClassifierResult) -> bool:
         and comparison.visual_status is VisualStatus.UNUSABLE
         and comparison.unusable_reason is not None
     )
+
+
+def _persist_retention_diagnostic(
+    observation: SuccessorObservation,
+    facts: ForegroundRetentionFacts | None,
+) -> SuccessorObservation:
+    """Publish optional classifier aggregates after deriving observation identity."""
+    persist_foreground_retention(
+        plan_id=observation.plan_id,
+        target_id=observation.target_id,
+        observation_id=observation.observation_id,
+        requested_time_utc=observation.requested_time_utc.astimezone(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
+        reference_identity=observation.authority_identity,
+        reference_frame_resource_id=observation.reference_frame_resource_id,
+        roi_identity=observation.roi_identity,
+        classifier_policy_identity=observation.classifier_policy_identity,
+        facts=facts,
+    )
+    return observation
 
 
 def _observation(
