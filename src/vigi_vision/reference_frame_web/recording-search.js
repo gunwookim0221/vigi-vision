@@ -834,7 +834,8 @@
     "comparison_mode", "baseline_support_pixel_count", "baseline_support_luma_similarity",
     "baseline_support_luma_ncc", "baseline_support_edge_similarity",
     "baseline_support_change_ratio", "baseline_support_foreground_retention",
-    "baseline_support_background_change_ratio", "baseline_support_alignment_dx",
+    "baseline_support_background_change_ratio", "baseline_support_clear_background_ratio",
+    "baseline_support_alignment_dx",
     "baseline_support_alignment_dy", "baseline_support_alignment_rotation_degrees",
     "baseline_support_alignment_overlap", "baseline_support_alignment_score",
     "baseline_support_alignment_margin", "baseline_support_stability_pixel_count",
@@ -863,6 +864,9 @@
     if (value === null) return true;
     if (typeof value !== "object" || Array.isArray(value)) return false;
     if (Object.keys(value).some((key) => !COMPARISON_KEYS.has(key))) return false;
+    const clearBackgroundRatio = value.baseline_support_clear_background_ratio;
+    if (clearBackgroundRatio !== undefined && clearBackgroundRatio !== null
+      && (!validFiniteNumber(clearBackgroundRatio) || clearBackgroundRatio < 0 || clearBackgroundRatio > 1)) return false;
     if (value.visual_status !== undefined && value.visual_status !== null
       && !["comparable", "unusable", "COMPARABLE", "UNUSABLE"].includes(value.visual_status)) return false;
     if (value.unusable_reason !== undefined

@@ -220,6 +220,31 @@ function currentEvidenceManifest(statusKind = "INCONCLUSIVE") {
   return payload;
 }
 
+async function renderInconclusiveEvidence(payload) {
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    if (url.endsWith("/evidence")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => payload });
+    }
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: async () => successorStatus("INCONCLUSIVE", "insufficient_visual_evidence"),
+    });
+  }, undefined, { confirmation: true, search: true, evidence: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  await settle();
+  return harness;
+}
+
 function loadedConfirmation() {
   return {
     investigation_id: INVESTIGATION_ID,
@@ -969,6 +994,87 @@ test("current 34-key evidence renders an INDETERMINATE observation for visual re
   assert.match(harness.recordingSearchEndImage.src, /evidence\/b{64}$/);
   assert.equal(harness.recordingSearchEndCaption.textContent, "최근 유효 관측");
   assert.equal(harness.recordingSearchEndFrameMeta.hidden, true);
+});
+
+test("INCONCLUSIVE evidence with clear-background ratio renders baseline and latest images", async () => {
+  const payload = currentEvidenceManifest("INCONCLUSIVE");
+  const anchor = {
+    ...payload.entries[1],
+    role: "anchor",
+    requested_time_utc: "2026-07-20T03:34:18Z",
+    frame_utc: "2026-07-20T03:34:18Z",
+    comparison: {
+      ...payload.entries[1].comparison,
+      baseline_support_clear_background_ratio: 0.078665,
+    },
+  };
+  const latest = {
+    ...payload.entries[1],
+    observation_id: "successor-observation-v1-" + "3".repeat(64),
+    target_id: "successor-target-v1-latest",
+    acquisition_id: "successor-acquisition-v1-latest",
+    requested_time_utc: "2026-07-20T03:36:12Z",
+    frame_utc: "2026-07-20T03:36:12Z",
+    digest: "c".repeat(64),
+    path: "frames/" + "c".repeat(64) + ".jpg",
+    roi_digest: "e".repeat(64),
+    roi_path: "frames/" + "e".repeat(64) + ".jpg",
+    state: "INDETERMINATE",
+    reason_code: "insufficient_visual_evidence",
+    comparison: {
+      ...payload.entries[1].comparison,
+      baseline_support_clear_background_ratio: 0.075805,
+    },
+  };
+  payload.entries = [payload.entries[0], anchor, latest];
+
+  assert.equal(payload.terminal_status, "INCONCLUSIVE");
+  assert.equal(payload.last_present_observation_id, null);
+  assert.equal(payload.first_absent_observation_id, null);
+  const harness = await renderInconclusiveEvidence(payload);
+
+  assert.equal(harness.recordingSearchEvidenceStatus.textContent, "자동 판정이 불확실하므로 직접 비교하세요.");
+  assert.match(harness.recordingSearchBaselineImage.src, /evidence\/a{64}$/);
+  assert.match(harness.recordingSearchBaselineRoi.src, /evidence\/f{64}$/);
+  assert.match(harness.recordingSearchEndImage.src, /evidence\/c{64}$/);
+  assert.match(harness.recordingSearchEndRoi.src, /evidence\/e{64}$/);
+  assert.doesNotMatch(harness.recordingSearchEvidenceStatus.textContent, /시각 증거 형식을 안전하게 확인할 수 없습니다/);
+});
+
+test("optional clear-background ratio remains compatible when omitted or null", async () => {
+  const omitted = currentEvidenceManifest("INCONCLUSIVE");
+  omitted.entries[1].state = "INDETERMINATE";
+  omitted.entries[1].reason_code = "insufficient_visual_evidence";
+  const omittedHarness = await renderInconclusiveEvidence(omitted);
+  assert.match(omittedHarness.recordingSearchEndImage.src, /evidence\/b{64}$/);
+
+  const nullable = currentEvidenceManifest("INCONCLUSIVE");
+  nullable.entries[1].comparison.baseline_support_clear_background_ratio = null;
+  const nullableHarness = await renderInconclusiveEvidence(nullable);
+  assert.match(nullableHarness.recordingSearchEndImage.src, /evidence\/b{64}$/);
+});
+
+test("clear-background ratio rejects malformed and out-of-range values", async () => {
+  const invalidValues = [
+    ["string", "0.078665"],
+    ["NaN", Number.NaN],
+    ["below range", -0.000001],
+    ["above range", 1.000001],
+  ];
+
+  for (const [label, value] of invalidValues) {
+    const payload = currentEvidenceManifest("INCONCLUSIVE");
+    payload.entries[1].comparison.baseline_support_clear_background_ratio = value;
+    const harness = await renderInconclusiveEvidence(payload);
+
+    assert.equal(
+      harness.recordingSearchEvidenceStatus.textContent,
+      "시각 증거 형식을 안전하게 확인할 수 없습니다.",
+      label,
+    );
+    assert.equal(harness.recordingSearchBaselineImage.hidden, true, label);
+    assert.equal(harness.recordingSearchEndImage.hidden, true, label);
+  }
 });
 
 test("Schema 8 evidence review projects scene and alignment observability", async () => {

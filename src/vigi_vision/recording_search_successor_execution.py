@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from vigi_vision.investigation_confirmation_models import ConfirmedInvestigationInput
 from vigi_vision.object_presence_models import BinaryMask
+from vigi_vision.object_presence_retention_diagnostics import ForegroundRetentionFacts
 from vigi_vision.object_presence_values import ClassificationOutcome, DecodedRgbImage
 from vigi_vision.recording_search_7e_b4_process import (
     B4ProcessCancelled,
@@ -82,6 +83,7 @@ from vigi_vision.recording_search_successor_classification import (
 from vigi_vision.recording_search_successor_diagnostics import (
     SuccessorDiagnosticRepository,
     diagnostic_scope,
+    persist_foreground_retention,
 )
 from vigi_vision.recording_search_successor_evidence import (
     LEGACY_EVIDENCE_VERSION,
@@ -104,9 +106,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
-    from vigi_vision.object_presence_retention_diagnostics import ForegroundRetentionFacts
-
-
 SUCCESSOR_SCHEMA_VERSION = 8
 SUCCESSOR_RECORD_VERSION = "phase7e-successor-terminal-v1"
 _B4_CLASSIFIER_TIMEOUT_SECONDS = 60.0
@@ -1711,7 +1710,54 @@ class SuccessorExecutionService:
             reason_code=result.reason_code,
             terminal_publication_outcome="published",
         )
+        self._persist_final_retention_diagnostics(prepared, result, observations)
         return result
+
+    def _persist_final_retention_diagnostics(
+        self,
+        prepared: SuccessorPreparedExecution,
+        terminal: SuccessorTerminal,
+        observations: tuple[SuccessorObservation, ...],
+    ) -> None:
+        """Best-effort publish facts only after their authoritative IDs commit."""
+        try:
+            if (
+                len(terminal.coarse_observation_ids) != len(observations)
+                or len(terminal.coarse_observations) != len(observations)
+                or terminal.investigation_id != prepared.request.investigation_id
+                or terminal.run_id != prepared.request.run_id
+                or terminal.plan_id != prepared.plan.plan_id
+            ):
+                return
+            for index, observation in enumerate(observations):
+                facts = getattr(observation, "_retention_diagnostic", None)
+                if not isinstance(facts, ForegroundRetentionFacts):
+                    continue
+                if not _retention_identity_matches_final_observation(
+                    prepared,
+                    terminal,
+                    observation,
+                    index=index,
+                ):
+                    continue
+                persist_foreground_retention(
+                    plan_id=observation.plan_id,
+                    target_id=observation.target_id,
+                    observation_id=observation.observation_id,
+                    requested_time_utc=_timestamp(observation.requested_time_utc),
+                    reference_identity=observation.authority_identity,
+                    reference_frame_resource_id=observation.reference_frame_resource_id,
+                    roi_identity=observation.roi_identity,
+                    classifier_policy_identity=observation.classifier_policy_identity,
+                    facts=facts,
+                )
+        except Exception:  # noqa: BLE001 - optional diagnostics must not change authority.
+            # Optional diagnostics cannot invalidate committed evidence or terminal state.
+            _safe_log(
+                "phase7e.foreground_retention_diagnostic",
+                stage="persist_failed",
+                error_code="diagnostic_unavailable",
+            )
 
     def _publish_interrupted(self, prepared: SuccessorPreparedExecution) -> SuccessorTerminal:
         terminal = self._base_terminal(prepared, "INTERRUPTED", "cancelled", False)
@@ -2124,6 +2170,39 @@ def _observation_record(item: SuccessorObservation) -> dict[str, object]:
         "roi_identity": item.roi_identity,
         "classifier_policy_identity": item.classifier_policy_identity,
     }
+
+
+def _retention_identity_matches_final_observation(
+    prepared: SuccessorPreparedExecution,
+    terminal: SuccessorTerminal,
+    observation: SuccessorObservation,
+    *,
+    index: int,
+) -> bool:
+    """Require every sidecar identity field to match its committed observation."""
+    if index >= len(terminal.coarse_observation_ids) or index >= len(terminal.coarse_observations):
+        return False
+    terminal_observation = terminal.coarse_observations[index]
+    requested_time_utc = _timestamp(observation.requested_time_utc)
+    return (
+        terminal.investigation_id == prepared.request.investigation_id
+        and terminal.run_id == prepared.request.run_id
+        and terminal.plan_id == prepared.plan.plan_id == observation.plan_id
+        and terminal.coarse_observation_ids[index] == observation.observation_id
+        and terminal_observation.get("observation_id") == observation.observation_id
+        and terminal_observation.get("target_id") == observation.target_id
+        and terminal_observation.get("requested_time_utc") == requested_time_utc
+        and observation.authority_identity == prepared.authority.authority_identity
+        and terminal_observation.get("authority_identity") == observation.authority_identity
+        and observation.reference_frame_resource_id
+        == prepared.authority.reference_frame_resource_id
+        and terminal_observation.get("reference_frame_resource_id")
+        == observation.reference_frame_resource_id
+        and observation.roi_identity == prepared.authority.roi_identity
+        and terminal_observation.get("roi_identity") == observation.roi_identity
+        and terminal_observation.get("classifier_policy_identity")
+        == observation.classifier_policy_identity
+    )
 
 
 def _observation_bundle(

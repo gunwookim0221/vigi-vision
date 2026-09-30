@@ -36,6 +36,7 @@ from vigi_vision.object_presence_comparator import (
 )
 from vigi_vision.object_presence_evidence import ClassificationResult, RawComparison
 from vigi_vision.object_presence_models import BinaryMask
+from vigi_vision.object_presence_retention_diagnostics import ForegroundRetentionFacts
 from vigi_vision.object_presence_values import (
     ClassificationOutcome,
     VisualReason,
@@ -61,7 +62,6 @@ from vigi_vision.recording_search_successor_acquisition import (
 )
 from vigi_vision.recording_search_successor_diagnostics import (
     persist_failure,
-    persist_foreground_retention,
 )
 from vigi_vision.recording_search_successor_search_evidence import (
     SearchEvidence,
@@ -74,7 +74,6 @@ if TYPE_CHECKING:
 
     from vigi_vision.object_presence_models import DecodedRgbImage
     from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
-    from vigi_vision.object_presence_retention_diagnostics import ForegroundRetentionFacts
     from vigi_vision.recording_search_b3_contracts import MediaDecoder
     from vigi_vision.recording_search_successor import (
         CoarseTargetAssignment,
@@ -637,6 +636,11 @@ class SuccessorObservation:
     # S4 consumes this only in-process.  It is intentionally private and is
     # omitted from every durable/public observation projection.
     _search_evidence: SearchEvidence | None = field(default=None, repr=False, compare=False)
+    # Optional classifier facts travel with the in-process observation until
+    # execution has bound the observation to its final evidence identity.
+    _retention_diagnostic: ForegroundRetentionFacts | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if (
@@ -1167,7 +1171,7 @@ class SuccessorCoarseClassificationService:
                     True,
                 )
             )
-            return _persist_retention_diagnostic(
+            return _attach_retention_diagnostic(
                 _observation(
                     plan,
                     target,
@@ -1195,7 +1199,7 @@ class SuccessorCoarseClassificationService:
                 classified.retention_diagnostic,
             )
         fallback_reason = _FALLBACK_REASON if saw_occluded else "DECODE_UNAVAILABLE"
-        return _persist_retention_diagnostic(
+        return _attach_retention_diagnostic(
             _observation(
                 plan,
                 target,
@@ -1499,25 +1503,14 @@ def _is_occluded_result(classified: SuccessorClassifierResult) -> bool:
     )
 
 
-def _persist_retention_diagnostic(
+def _attach_retention_diagnostic(
     observation: SuccessorObservation,
     facts: ForegroundRetentionFacts | None,
 ) -> SuccessorObservation:
-    """Publish optional classifier aggregates after deriving observation identity."""
-    persist_foreground_retention(
-        plan_id=observation.plan_id,
-        target_id=observation.target_id,
-        observation_id=observation.observation_id,
-        requested_time_utc=observation.requested_time_utc.astimezone(timezone.utc)
-        .isoformat(timespec="seconds")
-        .replace("+00:00", "Z"),
-        reference_identity=observation.authority_identity,
-        reference_frame_resource_id=observation.reference_frame_resource_id,
-        roi_identity=observation.roi_identity,
-        classifier_policy_identity=observation.classifier_policy_identity,
-        facts=facts,
-    )
-    return observation
+    """Carry optional facts with their observation without publishing a sidecar."""
+    if not isinstance(facts, ForegroundRetentionFacts):
+        return observation
+    return replace(observation, _retention_diagnostic=facts)
 
 
 def _observation(
@@ -1684,6 +1677,7 @@ def _with_ordinal(item: SuccessorObservation, ordinal: int) -> SuccessorObservat
         item.observability,
         item.candidate_trace,
         item._search_evidence,
+        item._retention_diagnostic,
     )
 
 
@@ -1762,6 +1756,7 @@ def reidentify_observation(
         item.observability,
         item.candidate_trace,
         item._search_evidence,
+        item._retention_diagnostic,
     )
 
 
