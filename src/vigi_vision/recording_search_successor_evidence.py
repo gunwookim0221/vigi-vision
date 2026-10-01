@@ -530,6 +530,12 @@ class SuccessorEvidenceRepository:
                     entries,
                 ),
             }
+            left_id = getattr(terminal, "last_present_observation_id", None)
+            if left_id is not None:
+                payload["last_present_observation_id"] = left_id
+                payload["first_absent_observation_id"] = getattr(
+                    terminal, "first_absent_observation_id", None
+                )
             _validate_manifest(payload, investigation_id, run_id)
             if not authoritative:
                 return payload
@@ -1131,12 +1137,67 @@ def _validate_manifest(value: object, investigation_id: str, run_id: str) -> Non
                 raise SuccessorEvidenceError("evidence_corrupt")
     if len(baseline_entries) != 1:
         raise SuccessorEvidenceError("evidence_corrupt")
+    has_bound_ids = (
+        typed.get("last_present_observation_id") is not None
+        or typed.get("first_absent_observation_id") is not None
+    )
+    if has_bound_ids and terminal_status != "FOUND":
+        if terminal_status != "INCONCLUSIVE" or terminal_reason != "midpoint_indeterminate":
+            raise SuccessorEvidenceError("evidence_corrupt")
+        _validate_bounded_manifest(typed)
     baseline_digest = baseline_entries[0].get("digest")
     for item in cast("list[dict[str, object]]", entries):
         if item.get("role") == "baseline_link" and item.get("digest") != baseline_digest:
             raise SuccessorEvidenceError("evidence_corrupt")
     if version == EVIDENCE_VERSION:
         _validate_candidate_state(typed.get("candidate_state"), typed, baseline_entries[0])
+
+
+def _validate_bounded_manifest(manifest: dict[str, object]) -> None:
+    left_id = manifest.get("last_present_observation_id")
+    right_id = manifest.get("first_absent_observation_id")
+    entries = manifest.get("entries")
+    if (
+        not isinstance(left_id, str)
+        or not left_id
+        or not isinstance(right_id, str)
+        or not right_id
+        or left_id == right_id
+        or not isinstance(entries, list)
+        or manifest.get("candidate_state") is not None
+    ):
+        raise SuccessorEvidenceError("evidence_corrupt")
+    by_id = {
+        item.get("observation_id"): item
+        for item in entries
+        if isinstance(item, dict) and isinstance(item.get("observation_id"), str)
+    }
+    left, right = by_id.get(left_id), by_id.get(right_id)
+    identified = [
+        item
+        for item in entries
+        if isinstance(item, dict) and item.get("observation_id") is not None
+    ]
+    if left is None or right is None or len(by_id) != len(identified):
+        raise SuccessorEvidenceError("evidence_corrupt")
+    baseline = next(
+        (item for item in entries if isinstance(item, dict) and item.get("role") == "baseline"),
+        None,
+    )
+    if (
+        baseline is None
+        or left.get("reference_frame_resource_id") != baseline.get("reference_frame_resource_id")
+        or right.get("reference_frame_resource_id") != baseline.get("reference_frame_resource_id")
+        or left.get("classifier_policy_identity") != right.get("classifier_policy_identity")
+        or left.get("state") != "PRESENT"
+        or right.get("state") != "ABSENT"
+        or not isinstance(left.get("frame_utc"), str)
+        or not isinstance(right.get("frame_utc"), str)
+        or not _valid_timestamp(left["frame_utc"])
+        or not _valid_timestamp(right["frame_utc"])
+        or _parse_timestamp(left["frame_utc"]) >= _parse_timestamp(right["frame_utc"])
+    ):
+        raise SuccessorEvidenceError("evidence_corrupt")
 
 
 def _validate_candidate_state(

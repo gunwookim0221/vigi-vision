@@ -56,6 +56,14 @@ with no candidate. A separate sidecar was rejected because it would create an
 evidence/candidate split-commit window. Persistence alone does not promote a
 candidate to classifier `ABSENT`, `FOUND`, or Phase 8 eligibility.
 
+Successor binary narrowing still stops at an indeterminate midpoint. When its
+existing validated PRESENT → ABSENT bracket survives, Schema 8 uses the
+existing bound-time fields plus optional bound observation IDs on the terminal;
+the same IDs appear in the existing evidence manifest. This closed extension
+is valid only for `INCONCLUSIVE/midpoint_indeterminate`, keeps candidate state
+null, and requires strict endpoint and terminal/evidence agreement on reopen.
+Older unbounded terminals and manifests remain readable without migration.
+
 ## Context
 
 Phase 6 publishes one immutable confirmed reference frame, channel, source-pixel

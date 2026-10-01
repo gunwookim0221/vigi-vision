@@ -298,6 +298,38 @@
     return validEvidenceUtc(value) ? new Date(value).getTime() : null;
   }
 
+  function utcMicroseconds(value) {
+    if (!validUtc(value)) return null;
+    const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?(?:Z|\+00:00)$/.exec(value);
+    if (match === null) return null;
+    const wholeSecondMillis = Date.parse(`${match[1]}Z`);
+    if (Number.isNaN(wholeSecondMillis)) return null;
+    const fractionMicros = BigInt((match[2] ?? "").padEnd(6, "0"));
+    return BigInt(wholeSecondMillis) * 1000n + fractionMicros;
+  }
+
+  function evidenceUtcMicros(value) {
+    return validEvidenceUtc(value) ? utcMicroseconds(value) : null;
+  }
+
+  function localFromUtcPreservingFraction(value, zone) {
+    const local = localFromUtc(value, zone);
+    const fraction = /T\d{2}:\d{2}:\d{2}\.(\d{1,6})(?:Z|\+00:00)$/.exec(value)?.[1];
+    return fraction === undefined ? local : `${local}.${fraction}`;
+  }
+
+  function exactIntervalWidthSeconds(start, end) {
+    const startMicros = utcMicroseconds(start);
+    const endMicros = utcMicroseconds(end);
+    if (startMicros === null || endMicros === null || endMicros < startMicros) return null;
+    const widthMicros = endMicros - startMicros;
+    const wholeSeconds = widthMicros / 1_000_000n;
+    const fractionMicros = widthMicros % 1_000_000n;
+    return fractionMicros === 0n
+      ? wholeSeconds.toString()
+      : `${wholeSeconds}.${fractionMicros.toString().padStart(6, "0")}`;
+  }
+
   function setStatus(message, state, busy = false) {
     const busyText = String(busy);
     if (status.textContent !== message) status.textContent = message;
@@ -729,14 +761,22 @@
     invalidateLifecycle(owner);
     terminalReady = true;
     setStatus("녹화 기록 검색이 종료되었습니다.", "complete");
-    resultKind.textContent = terminalText(payload.status);
+    const details = payload.terminal_details;
+    const bounded = payload.status === "INCONCLUSIVE"
+      && payload.reason_code === "midpoint_indeterminate"
+      && details?.last_present_time_utc != null
+      && details?.first_absent_time_utc != null;
+    resultKind.textContent = bounded
+      ? "대상 소실 시각은 확정되지 않았습니다. 마지막 존재와 첫 부재 관측 사이로 범위가 제한되었습니다."
+      : terminalText(payload.status);
     const mappedReason = Object.prototype.hasOwnProperty.call(
       RESULT_REASON_MESSAGES,
       payload.reason_code,
     ) ? RESULT_REASON_MESSAGES[payload.reason_code] : null;
-    resultReason.textContent = mappedReason
-      ?? (payload.reason_code === null ? "서버가 추가 사유를 제공하지 않았습니다." : "서버가 제공한 안전한 결과 사유가 있습니다.");
-    const details = payload.terminal_details;
+    resultReason.textContent = bounded
+      ? "중간 지점의 화면 판정이 불확실하여 이 구간을 더 좁히지 못했습니다."
+      : (mappedReason
+        ?? (payload.reason_code === null ? "서버가 추가 사유를 제공하지 않았습니다." : "서버가 제공한 안전한 결과 사유가 있습니다."));
     if ((activeRun?.searchEnd === null || activeRun?.searchEnd === undefined)
       && details !== null && validUtc(details.observed_end_time_utc)) {
       const restoredEnd = localFromUtc(details.observed_end_time_utc, details.source_timezone);
@@ -756,12 +796,25 @@
       const observedStart = localFromUtc(details.observed_start_time_utc, zone);
       const observedEnd = localFromUtc(details.observed_end_time_utc, zone);
       observedRange.textContent = `${observedStart} ~ ${observedEnd} (${zone})${details.coverage_complete ? "" : " — 요청 종료 전 녹화 종료"}`;
-      if (payload.status === "FOUND" && details.last_present_time_utc !== null && details.first_absent_time_utc !== null) {
-        const present = localFromUtc(details.last_present_time_utc, zone);
-        const absent = localFromUtc(details.first_absent_time_utc, zone);
+      if ((payload.status === "FOUND" || bounded)
+        && details.last_present_time_utc !== null && details.first_absent_time_utc !== null) {
+        const present = bounded
+          ? localFromUtcPreservingFraction(details.last_present_time_utc, zone)
+          : localFromUtc(details.last_present_time_utc, zone);
+        const absent = bounded
+          ? localFromUtcPreservingFraction(details.first_absent_time_utc, zone)
+          : localFromUtc(details.first_absent_time_utc, zone);
         lastPresent.textContent = `${present} (${zone})`;
         firstAbsent.textContent = `${absent} (${zone})`;
-        disappearanceInterval.textContent = `${present} ~ ${absent} (${zone})`;
+        const widthSeconds = bounded
+          ? exactIntervalWidthSeconds(
+            details.last_present_time_utc,
+            details.first_absent_time_utc,
+          )
+          : null;
+        disappearanceInterval.textContent = bounded
+          ? `${present} ~ ${absent} (${zone}, 미해결 구간 ${widthSeconds ?? "확인할 수 없음"}초)`
+          : `${present} ~ ${absent} (${zone})`;
       } else {
         lastPresent.textContent = "해당 없음";
         firstAbsent.textContent = "해당 없음";
@@ -1178,13 +1231,22 @@
     setEvidenceHighlight(baselineHighlight, roi, sourceWidth, sourceHeight);
     setEvidenceHighlight(endHighlight, roi, sourceWidth, sourceHeight);
     if (foundEvidence != null) foundEvidence.hidden = true;
-    let bracketEvidenceAvailable = terminalPayload?.status !== "FOUND";
-    if (terminalPayload?.status === "FOUND" && foundEvidence != null) {
+    const bounded = terminalPayload?.status === "INCONCLUSIVE"
+      && terminalPayload.reason_code === "midpoint_indeterminate"
+      && terminalPayload.terminal_details?.last_present_time_utc != null
+      && terminalPayload.terminal_details?.first_absent_time_utc != null;
+    let bracketEvidenceAvailable = terminalPayload?.status !== "FOUND" && !bounded;
+    if ((terminalPayload?.status === "FOUND" || bounded) && foundEvidence != null) {
       const present = entries.find((item) => item.observation_id === payload.last_present_observation_id
-        && item.role === "observation" && item.state === "PRESENT"
+        && (item.role === "observation" || bounded && ["anchor", "baseline_link"].includes(item.role))
+        && item.state === "PRESENT"
+        && (!bounded || evidenceUtcMicros(item.frame_utc)
+          === utcMicroseconds(terminalPayload.terminal_details.last_present_time_utc))
         && evidenceDigest(item) !== null);
       const absent = entries.find((item) => item.observation_id === payload.first_absent_observation_id
         && item.role === "observation" && item.state === "ABSENT"
+        && (!bounded || evidenceUtcMicros(item.frame_utc)
+          === utcMicroseconds(terminalPayload.terminal_details.first_absent_time_utc))
         && evidenceDigest(item) !== null);
       const presentSrc = evidenceUrl(present);
       const absentSrc = evidenceUrl(absent);

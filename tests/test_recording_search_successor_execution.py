@@ -20,6 +20,7 @@ from anyio import CapacityLimiter
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import vigi_vision.recording_search_successor_evidence as evidence_module
 import vigi_vision.recording_search_successor_execution as execution_module
 from test_recording_search_successor_search_evidence import (
     _comparison,
@@ -391,6 +392,40 @@ class _IndeterminateClassifier(_Classifier):
         )
 
 
+class _IndeterminateAfterBracketClassifier(_Classifier):
+    """Keep the coarse bracket, then stop the first binary midpoint."""
+
+    def __init__(self) -> None:
+        self.seen_absent = False
+
+    def classify(self, *args: object) -> SuccessorClassifierResult:
+        if self.seen_absent:
+            return SuccessorClassifierResult(
+                ClassificationOutcome.INDETERMINATE, "insufficient_visual_evidence"
+            )
+        result = super().classify(*args)  # type: ignore[arg-type]
+        if result.outcome is ClassificationOutcome.ABSENT:
+            self.seen_absent = True
+        return result
+
+
+class _ThreeMidpointClassifier(_IndeterminateAfterBracketClassifier):
+    """Exercise ABSENT, PRESENT, then INDETERMINATE midpoint refinement."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.midpoints = 0
+
+    def classify(self, *args: object) -> SuccessorClassifierResult:
+        if self.seen_absent:
+            self.midpoints += 1
+            if self.midpoints == 1:
+                return SuccessorClassifierResult(ClassificationOutcome.ABSENT)
+            if self.midpoints == 2:
+                return SuccessorClassifierResult(ClassificationOutcome.PRESENT)
+        return super().classify(*args)
+
+
 class _CoarseOcclusionClassifier(_Classifier):
     def __init__(self, *, later_clean_absent: bool) -> None:
         self.calls = 0
@@ -719,6 +754,310 @@ def test_successor_http_shaped_execution_publishes_found_and_reopens(tmp_path: P
     assert reopened["phase8_status"] == "NOT_REQUESTED"
     assert reopened["narrowing_id"]
     assert not tuple((tmp_path / "temporary").glob("**/*"))
+
+
+def test_midpoint_indeterminate_publishes_existing_bracket(tmp_path: Path) -> None:
+    service = _service(tmp_path, ANCHOR + timedelta(minutes=15), _ThreeMidpointClassifier())
+    service.evidence_repository = SuccessorEvidenceRepository(tmp_path / "successor")
+    confirmed = replace(_confirmed(tmp_path), jpeg_sha256=hashlib.sha256(b"baseline").hexdigest())
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    result = service.execute(prepared)
+    assert result.status == "INCONCLUSIVE"
+    assert result.reason_code == "midpoint_indeterminate"
+    assert result.last_present_time_utc is not None
+    assert result.first_absent_time_utc is not None
+    assert result.last_present_time_utc < result.first_absent_time_utc
+    assert (
+        datetime.fromisoformat(result.first_absent_time_utc.replace("Z", "+00:00"))
+        - datetime.fromisoformat(result.last_present_time_utc.replace("Z", "+00:00"))
+    ).total_seconds() == 150
+    assert result.last_present_observation_id is not None
+    assert result.first_absent_observation_id is not None
+    persisted = service.publisher.read(confirmed.investigation_id, prepared.request.run_id)
+    raw_evidence = service.evidence_repository.read(
+        confirmed.investigation_id, prepared.request.run_id
+    )
+    assert persisted is not None
+    assert raw_evidence is not None
+    assert execution_module._evidence_matches_terminal(raw_evidence, persisted)
+    evidence = service.read_evidence(confirmed.investigation_id, prepared.request.run_id)
+    assert evidence is not None
+    assert evidence["last_present_observation_id"] is not None
+    assert evidence["first_absent_observation_id"] is not None
+    assert evidence["last_present_observation_id"] == result.last_present_observation_id
+    assert evidence["first_absent_observation_id"] == result.first_absent_observation_id
+    reopened = SuccessorTerminalRepository(tmp_path / "successor").read(
+        confirmed.investigation_id, prepared.request.run_id
+    )
+    assert reopened is not None
+    assert reopened["status"] == "INCONCLUSIVE"
+    assert reopened["reason_code"] == "midpoint_indeterminate"
+    assert reopened["last_present_time_utc"] == result.last_present_time_utc
+    assert reopened["first_absent_time_utc"] == result.first_absent_time_utc
+    assert reopened["last_present_observation_id"] == result.last_present_observation_id
+    assert reopened["first_absent_observation_id"] == result.first_absent_observation_id
+    restarted_service = _service(tmp_path, ANCHOR + timedelta(minutes=15))
+    restarted_service.evidence_repository = SuccessorEvidenceRepository(tmp_path / "successor")
+    restarted_evidence = restarted_service.read_evidence(
+        confirmed.investigation_id, prepared.request.run_id
+    )
+    assert restarted_evidence is not None
+    assert restarted_evidence["last_present_observation_id"] == result.last_present_observation_id
+    assert restarted_evidence["first_absent_observation_id"] == result.first_absent_observation_id
+    restarted_public = Phase7EPublicService(
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        successor_execution=restarted_service,
+    )
+    reopened_status = restarted_public.status(confirmed.investigation_id, prepared.request.run_id)
+    assert reopened_status.phase7.status == "INCONCLUSIVE"
+    assert reopened_status.phase7.reason_code == "midpoint_indeterminate"
+    assert reopened_status.terminal_details is not None
+    assert reopened_status.terminal_details.last_present_time_utc == result.last_present_time_utc
+    assert reopened_status.terminal_details.first_absent_time_utc == result.first_absent_time_utc
+
+
+def test_bounded_midpoint_preserves_fractional_actual_frame_times(tmp_path: Path) -> None:
+    service = _service(tmp_path, ANCHOR + timedelta(minutes=15), _ThreeMidpointClassifier())
+    service.acquisition.decoder = _FrameDecoder(-0.25)
+    service.evidence_repository = SuccessorEvidenceRepository(tmp_path / "successor")
+    confirmed = replace(_confirmed(tmp_path), jpeg_sha256=hashlib.sha256(b"baseline").hexdigest())
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-dddddddddddddddddddddddddddddddd",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    result = service.execute(prepared)
+    assert result.status == "INCONCLUSIVE"
+    assert result.reason_code == "midpoint_indeterminate"
+    assert result.last_present_time_utc is not None
+    assert result.first_absent_time_utc is not None
+    assert result.last_present_time_utc.endswith(".750000Z")
+    assert result.first_absent_time_utc.endswith(".750000Z")
+    evidence = service.read_evidence(confirmed.investigation_id, prepared.request.run_id)
+    assert evidence is not None
+    for id_key, time_key in (
+        ("last_present_observation_id", "last_present_time_utc"),
+        ("first_absent_observation_id", "first_absent_time_utc"),
+    ):
+        entry = next(
+            item
+            for item in evidence["entries"]
+            if item["observation_id"] == getattr(result, id_key)
+        )
+        assert entry["frame_utc"] == getattr(result, time_key)
+
+
+def test_bounded_midpoint_strict_validation_rejects_malformed_records(  # noqa: PLR0915
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path, ANCHOR + timedelta(minutes=15), _ThreeMidpointClassifier())
+    service.evidence_repository = SuccessorEvidenceRepository(tmp_path / "successor")
+    confirmed = replace(_confirmed(tmp_path), jpeg_sha256=hashlib.sha256(b"baseline").hexdigest())
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:47:32",
+        run_id="search-run-cccccccccccccccccccccccccccccccc",
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+    result = service.execute(prepared)
+    record = result.as_record()
+    raw_evidence = service.evidence_repository.read(
+        confirmed.investigation_id, prepared.request.run_id
+    )
+    assert raw_evidence is not None
+    left_id = result.last_present_observation_id
+    right_id = result.first_absent_observation_id
+    assert left_id is not None
+    assert right_id is not None
+
+    def invalid_record(**changes: object) -> None:
+        candidate = json.loads(json.dumps(record))
+        candidate.update(changes)
+        with pytest.raises(SuccessorExecutionError, match="successor_publication_corrupt"):
+            execution_module._validate_terminal_record(candidate)
+
+    invalid_record(last_present_time_utc=None)
+    invalid_record(first_absent_time_utc=None)
+    invalid_record(last_present_observation_id=None)
+    invalid_record(first_absent_observation_id=None)
+    invalid_record(last_present_observation_id="unknown-observation")
+    invalid_record(last_present_observation_id=right_id)
+    invalid_record(first_absent_observation_id=left_id)
+    invalid_record(first_absent_time_utc=result.last_present_time_utc)
+    invalid_record(
+        last_present_time_utc=result.first_absent_time_utc,
+        first_absent_time_utc=result.last_present_time_utc,
+    )
+    invalid_record(reason_code="classifier_failed")
+    invalid_record(
+        gaps=[
+            {
+                "start_utc": result.last_present_time_utc,
+                "end_utc": result.first_absent_time_utc,
+            }
+        ]
+    )
+    for endpoint_id, state in (
+        (left_id, "ABSENT"),
+        (left_id, "INDETERMINATE"),
+        (right_id, "PRESENT"),
+    ):
+        candidate = json.loads(json.dumps(record))
+        next(
+            item
+            for item in candidate["coarse_observations"]
+            if item["observation_id"] == endpoint_id
+        )["state"] = state
+        with pytest.raises(SuccessorExecutionError, match="successor_publication_corrupt"):
+            execution_module._validate_terminal_record(candidate)
+    for field_name, replacement in (
+        ("roi_identity", "wrong-roi"),
+        ("authority_identity", "wrong-authority"),
+        ("frame_utc", result.first_absent_time_utc),
+    ):
+        candidate = json.loads(json.dumps(record))
+        next(
+            item for item in candidate["coarse_observations"] if item["observation_id"] == left_id
+        )[field_name] = replacement
+        with pytest.raises(SuccessorExecutionError, match="successor_publication_corrupt"):
+            execution_module._validate_terminal_record(candidate)
+
+    def invalid_manifest(**changes: object) -> None:
+        candidate = json.loads(json.dumps(raw_evidence))
+        candidate.update(changes)
+        with pytest.raises(SuccessorEvidenceError, match="evidence_corrupt"):
+            evidence_module._validate_manifest(
+                candidate, confirmed.investigation_id, prepared.request.run_id
+            )
+
+    invalid_manifest(last_present_observation_id=None)
+    invalid_manifest(first_absent_observation_id=None)
+    invalid_manifest(last_present_observation_id="unknown-observation")
+    invalid_manifest(first_absent_observation_id=left_id)
+    invalid_manifest(candidate_state={"contradiction": True})
+    for endpoint_id, state in ((left_id, "ABSENT"), (right_id, "PRESENT")):
+        candidate = json.loads(json.dumps(raw_evidence))
+        next(item for item in candidate["entries"] if item["observation_id"] == endpoint_id)[
+            "state"
+        ] = state
+        with pytest.raises(SuccessorEvidenceError, match="evidence_corrupt"):
+            evidence_module._validate_manifest(
+                candidate, confirmed.investigation_id, prepared.request.run_id
+            )
+    wrong_time = json.loads(json.dumps(raw_evidence))
+    next(item for item in wrong_time["entries"] if item["observation_id"] == left_id)[
+        "frame_utc"
+    ] = result.first_absent_time_utc
+    with pytest.raises(SuccessorEvidenceError, match="evidence_corrupt"):
+        evidence_module._validate_manifest(
+            wrong_time, confirmed.investigation_id, prepared.request.run_id
+        )
+
+    def manifest_with_endpoint_times(present_time: str, absent_time: str) -> dict[str, object]:
+        candidate = json.loads(json.dumps(raw_evidence))
+        next(item for item in candidate["entries"] if item["observation_id"] == left_id)[
+            "frame_utc"
+        ] = present_time
+        next(item for item in candidate["entries"] if item["observation_id"] == right_id)[
+            "frame_utc"
+        ] = absent_time
+        return candidate
+
+    for present_time, absent_time in (
+        ("2026-09-04T05:32:32.100000Z", "2026-09-04T05:32:32Z"),
+        ("2026-09-04T05:32:32.750000Z", "2026-09-04T05:32:32.500000Z"),
+        ("2026-09-04T05:32:32Z", "2026-09-04T05:32:32.000000Z"),
+        ("2026-09-04T05:32:33Z", "2026-09-04T05:32:32Z"),
+    ):
+        with pytest.raises(SuccessorEvidenceError, match="evidence_corrupt"):
+            evidence_module._validate_manifest(
+                manifest_with_endpoint_times(present_time, absent_time),
+                confirmed.investigation_id,
+                prepared.request.run_id,
+            )
+
+    for present_time, absent_time in (
+        ("2026-09-04T05:32:32Z", "2026-09-04T05:32:32.100000Z"),
+        ("2026-09-04T05:32:32.100000Z", "2026-09-04T05:32:32.750000Z"),
+        ("2026-09-04T05:32:32Z", "2026-09-04T05:32:33Z"),
+    ):
+        evidence_module._validate_manifest(
+            manifest_with_endpoint_times(present_time, absent_time),
+            confirmed.investigation_id,
+            prepared.request.run_id,
+        )
+
+    equivalent_precision = json.loads(json.dumps(raw_evidence))
+    left_entry = next(
+        item for item in equivalent_precision["entries"] if item["observation_id"] == left_id
+    )
+    assert isinstance(record["last_present_time_utc"], str)
+    if record["last_present_time_utc"].endswith(".000000Z"):
+        left_entry["frame_utc"] = record["last_present_time_utc"][:-8] + "Z"
+    else:
+        left_entry["frame_utc"] = record["last_present_time_utc"][:-1] + ".000000Z"
+    evidence_module._validate_manifest(
+        equivalent_precision, confirmed.investigation_id, prepared.request.run_id
+    )
+    assert execution_module._evidence_matches_terminal(equivalent_precision, record)
+
+    mismatch = json.loads(json.dumps(raw_evidence))
+    next(item for item in mismatch["entries"] if item["observation_id"] == right_id)[
+        "frame_utc"
+    ] = "2026-09-04T05:32:33Z"
+    evidence_module._validate_manifest(
+        mismatch, confirmed.investigation_id, prepared.request.run_id
+    )
+    assert not execution_module._evidence_matches_terminal(mismatch, record)
+    ordinary_terminal = json.loads(json.dumps(record))
+    ordinary_terminal["last_present_time_utc"] = None
+    ordinary_terminal["first_absent_time_utc"] = None
+    ordinary_terminal.pop("last_present_observation_id")
+    ordinary_terminal.pop("first_absent_observation_id")
+    execution_module._validate_terminal_record(ordinary_terminal)
+    assert not execution_module._evidence_matches_terminal(raw_evidence, ordinary_terminal)
+    terminal_path = service.publisher._path(confirmed.investigation_id, prepared.request.run_id)
+    terminal_text = terminal_path.read_text(encoding="utf-8")
+    terminal_path.write_text(
+        json.dumps({**record, "first_absent_observation_id": None}), encoding="utf-8"
+    )
+    with pytest.raises(SuccessorExecutionError, match="successor_publication_corrupt"):
+        service.publisher.read(confirmed.investigation_id, prepared.request.run_id)
+    terminal_path.write_text(terminal_text, encoding="utf-8")
+    manifest_path = (
+        tmp_path
+        / "successor"
+        / confirmed.investigation_id
+        / prepared.request.run_id
+        / "evidence"
+        / "manifest.json"
+    )
+    manifest_text = manifest_path.read_text(encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps({**raw_evidence, "first_absent_observation_id": "unknown-observation"}),
+        encoding="utf-8",
+    )
+    with pytest.raises(SuccessorEvidenceError, match="evidence_corrupt"):
+        service.evidence_repository.read(confirmed.investigation_id, prepared.request.run_id)
+    manifest_path.write_text(manifest_text, encoding="utf-8")
+    assert (
+        service.publisher.publish_terminal(result).terminal_result_id == result.terminal_result_id
+    )
+    assert service.read_evidence(confirmed.investigation_id, prepared.request.run_id) is not None
 
 
 def test_successor_complete_present_publishes_not_found(tmp_path: Path) -> None:
@@ -2497,6 +2836,7 @@ def test_cancellation_during_evidence_staging_hides_normal_manifest(
         (ANCHOR + timedelta(hours=2), None, "NOT_FOUND"),
         (ANCHOR + timedelta(minutes=15), None, "FOUND"),
         (ANCHOR + timedelta(hours=2), _IndeterminateClassifier(), "INCONCLUSIVE"),
+        (ANCHOR + timedelta(minutes=15), _ThreeMidpointClassifier(), "INCONCLUSIVE"),
     ],
 )
 def test_non_cancelled_terminal_and_evidence_remain_consistent(
@@ -2526,6 +2866,11 @@ def test_non_cancelled_terminal_and_evidence_remain_consistent(
     assert evidence is not None
     assert evidence["terminal_status"] == result.status
     assert evidence["terminal_reason"] == result.reason_code
+    if result.reason_code == "midpoint_indeterminate":
+        assert result.last_present_time_utc is not None
+        assert result.first_absent_time_utc is not None
+        assert evidence["last_present_observation_id"] == result.last_present_observation_id
+        assert evidence["first_absent_observation_id"] == result.first_absent_observation_id
     public_reader = Phase7EPublicService(
         None,
         None,
@@ -2545,6 +2890,34 @@ def test_non_cancelled_terminal_and_evidence_remain_consistent(
         public_reader.evidence(confirmed.investigation_id, prepared.request.run_id)
         == public_evidence
     )
+    public_status = public_reader.status(confirmed.investigation_id, prepared.request.run_id)
+    assert public_status.phase7.status == result.status
+    assert public_status.terminal_details is not None
+    assert public_status.terminal_details.last_present_time_utc == result.last_present_time_utc
+    assert public_status.terminal_details.first_absent_time_utc == result.first_absent_time_utc
+    if result.reason_code == "midpoint_indeterminate":
+        app = FastAPI()
+        install_recording_search_routes(
+            app, None, CapacityLimiter(2), phase7e_service=public_reader
+        )
+        url = f"/api/v1/recording-searches/{confirmed.investigation_id}/{prepared.request.run_id}"
+        client = TestClient(app)
+        status_response = client.get(url)
+        evidence_response = client.get(f"{url}/evidence")
+        assert status_response.status_code == 200
+        assert evidence_response.status_code == 200
+        status_json = status_response.json()
+        evidence_json = evidence_response.json()
+        assert status_json["status"] == "INCONCLUSIVE"
+        assert status_json["reason_code"] == "midpoint_indeterminate"
+        assert (
+            status_json["terminal_details"]["last_present_time_utc"] == result.last_present_time_utc
+        )
+        assert (
+            status_json["terminal_details"]["first_absent_time_utc"] == result.first_absent_time_utc
+        )
+        assert evidence_json["last_present_observation_id"] == result.last_present_observation_id
+        assert evidence_json["first_absent_observation_id"] == result.first_absent_observation_id
 
 
 def test_cancellation_after_authoritative_evidence_commit_preserves_normal_result(

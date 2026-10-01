@@ -175,6 +175,15 @@ iterations; gaps, indeterminate observations, unavailable acquisition, and
 classifier failures close safely without inventing a boundary. When the
 historical baseline precedes the successor horizon, narrowing retains that
 measured baseline-to-anchor bracket instead of fabricating pre-anchor media.
+An `INDETERMINATE` midpoint still stops narrowing. If the stopped result
+retains a validated PRESENT → ABSENT bracket, the terminal remains
+`INCONCLUSIVE/midpoint_indeterminate` and publishes the last confirmed PRESENT
+and first confirmed ABSENT observation IDs and actual-frame times as an
+unresolved interval. The interval width is the difference between those
+times; it does not identify an exact disappearance instant or satisfy `FOUND`.
+Other `INCONCLUSIVE` results may have no bounds. Existing records remain
+readable without migration.
+
 Slice 5 now
 composes this chain behind the existing HTTP/background boundary for every new
 10-minute-to-2-hour request, publishes an atomic Schema 8 successor terminal

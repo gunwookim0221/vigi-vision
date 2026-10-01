@@ -804,6 +804,106 @@ test("FOUND renders the honest localized disappearance interval and observed ran
   assert.match(harness.recordingSearchObservedRange.textContent, /12:34:28.*12:35:27/);
 });
 
+async function renderBoundedInconclusive(
+  lastPresentTimeUtc,
+  firstAbsentTimeUtc,
+  evidenceLastPresentTimeUtc = lastPresentTimeUtc,
+  evidenceFirstAbsentTimeUtc = firstAbsentTimeUtc,
+) {
+  const payload = evidenceManifest("FOUND");
+  payload.terminal_status = "INCONCLUSIVE";
+  payload.terminal_reason = "midpoint_indeterminate";
+  const present = payload.entries.find(
+    (entry) => entry.observation_id === payload.last_present_observation_id,
+  );
+  const absent = payload.entries.find(
+    (entry) => entry.observation_id === payload.first_absent_observation_id,
+  );
+  present.frame_utc = evidenceLastPresentTimeUtc;
+  present.requested_time_utc = lastPresentTimeUtc;
+  absent.frame_utc = evidenceFirstAbsentTimeUtc;
+  absent.requested_time_utc = firstAbsentTimeUtc;
+  const terminal = successorStatus("INCONCLUSIVE", "midpoint_indeterminate");
+  terminal.terminal_details.last_present_time_utc = lastPresentTimeUtc;
+  terminal.terminal_details.first_absent_time_utc = firstAbsentTimeUtc;
+  terminal.terminal_details.observed_end_time_utc = firstAbsentTimeUtc;
+  const harness = createHarness((url) => {
+    if (url === "/api/v1/recording-searches") {
+      return Promise.resolve({ ok: true, status: 202, json: async () => accepted() });
+    }
+    if (url.endsWith("/evidence")) {
+      return Promise.resolve({ ok: true, status: 200, json: async () => payload });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => terminal });
+  }, undefined, { confirmation: true, search: true, evidence: true, requestId: REQUEST_ID });
+  dispatchConfirmed(harness);
+  harness.recordingSearchEnd.value = "2026-07-20T12:40:00";
+  harness.recordingSearchEnd.listeners.input();
+  harness.recordingSearchStart.listeners.click({ preventDefault() {} });
+  await settle();
+  harness.runTimers();
+  await settle();
+  await settle();
+
+  return harness;
+}
+
+test("bounded INCONCLUSIVE preserves fractional endpoints and exact width", async () => {
+  const harness = await renderBoundedInconclusive(
+    "2026-07-20T03:34:40.100000Z",
+    "2026-07-20T03:34:40.750000Z",
+  );
+  assert.match(harness.recordingSearchResultKind.textContent, /확정되지 않았습니다/);
+  assert.doesNotMatch(harness.recordingSearchResultKind.textContent, /찾았습니다/);
+  assert.match(harness.recordingSearchInterval.textContent, /미해결 구간 0\.650000초/);
+  assert.match(harness.recordingSearchLastPresent.textContent, /12:34:40\.100000/);
+  assert.match(harness.recordingSearchFirstAbsent.textContent, /12:34:40\.750000/);
+  assert.equal(harness.recordingSearchFoundEvidence.hidden, false);
+});
+
+test("bounded INCONCLUSIVE keeps fractional endpoints distinct across a second boundary", async () => {
+  const harness = await renderBoundedInconclusive(
+    "2026-07-20T03:34:40.900000Z",
+    "2026-07-20T03:34:41.100000Z",
+  );
+  assert.match(harness.recordingSearchInterval.textContent, /미해결 구간 0\.200000초/);
+  assert.match(harness.recordingSearchLastPresent.textContent, /12:34:40\.900000/);
+  assert.match(harness.recordingSearchFirstAbsent.textContent, /12:34:41\.100000/);
+});
+
+test("bounded endpoint evidence matches equivalent instants with different precision text", async () => {
+  const harness = await renderBoundedInconclusive(
+    "2026-07-20T03:34:40.100000Z",
+    "2026-07-20T03:34:40.750000Z",
+    "2026-07-20T03:34:40.1Z",
+    "2026-07-20T03:34:40.75Z",
+  );
+  assert.equal(harness.recordingSearchFoundEvidence.hidden, false);
+});
+
+test("bounded endpoint evidence rejects a microsecond mismatch within one millisecond", async () => {
+  const harness = await renderBoundedInconclusive(
+    "2026-07-20T03:34:40.100000Z",
+    "2026-07-20T03:34:40.750000Z",
+    "2026-07-20T03:34:40.100001Z",
+    "2026-07-20T03:34:40.750000Z",
+  );
+  assert.equal(harness.recordingSearchFoundEvidence.hidden, true);
+  assert.match(harness.recordingSearchEvidenceStatus.textContent, /안전하게 확인할 수 없습니다/);
+});
+
+test("bounded whole-second timestamps keep their existing rendering", async () => {
+  const harness = await renderBoundedInconclusive(
+    "2026-07-20T03:34:40Z",
+    "2026-07-20T03:34:41Z",
+  );
+  assert.match(harness.recordingSearchInterval.textContent, /미해결 구간 1초/);
+  assert.match(harness.recordingSearchLastPresent.textContent, /12:34:40 \(Asia\/Seoul\)/);
+  assert.match(harness.recordingSearchFirstAbsent.textContent, /12:34:41 \(Asia\/Seoul\)/);
+  assert.doesNotMatch(harness.recordingSearchLastPresent.textContent, /\.\d/);
+  assert.doesNotMatch(harness.recordingSearchFirstAbsent.textContent, /\.\d/);
+});
+
 test("terminal FOUND loads identity-bound visual evidence and both bracket frames", async () => {
   const requests = [];
   const harness = createHarness((url) => {

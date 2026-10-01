@@ -465,6 +465,44 @@ def test_narrowing_accepts_comparable_occlusion_but_keeps_fail_closed_guard() ->
     assert not acquisition.calls
 
 
+def test_real_run_shape_stops_on_indeterminate_with_150_second_outer_bracket() -> None:
+    left = datetime(2026, 10, 1, 3, 13, 55, tzinfo=UTC)
+    right = datetime(2026, 10, 1, 3, 23, 55, tzinfo=UTC)
+    plan = build_successor_plan(
+        SuccessorPlanRequest(1, left, left + timedelta(minutes=30), "Asia/Seoul"),
+        (_segment(left, left + timedelta(minutes=30)),),
+    )
+    authority = _authority(plan)
+    coarse = _coarse(plan, authority, left=left, right=right)
+    first_midpoint = datetime(2026, 10, 1, 3, 18, 55, tzinfo=UTC)
+    second_midpoint = datetime(2026, 10, 1, 3, 16, 25, tzinfo=UTC)
+    third_midpoint = datetime(2026, 10, 1, 3, 17, 40, tzinfo=UTC)
+    service, acquisition, classification = _service(
+        plan,
+        authority,
+        coarse,
+        {
+            first_midpoint: SuccessorObservationState.ABSENT,
+            second_midpoint: SuccessorObservationState.PRESENT,
+            third_midpoint: SuccessorObservationState.INDETERMINATE,
+        },
+    )
+
+    result = service.narrow(plan, coarse, authority)
+
+    assert result.completion is SuccessorNarrowingCompletion.INDETERMINATE_OBSERVATION
+    assert result.reason_code == "midpoint_indeterminate"
+    assert result.last_present.frame_utc == second_midpoint
+    assert result.first_absent.frame_utc == first_midpoint
+    assert result.interval_width_seconds == 150
+    assert [item.requested_time_utc for item in classification.calls] == [
+        first_midpoint,
+        second_midpoint,
+        third_midpoint,
+    ]
+    assert len(acquisition.calls) == 3
+
+
 def test_odd_width_midpoint_tie_breaks_to_earlier_second() -> None:
     plan = _plan(minutes=1)
     authority = _authority(plan)

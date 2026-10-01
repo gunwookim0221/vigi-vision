@@ -266,9 +266,11 @@ class SuccessorTerminal:
     coarse_target_ids: tuple[str, ...] = ()
     target_statuses: tuple[str, ...] = ()
     coarse_observations: tuple[dict[str, object], ...] = ()
+    last_present_observation_id: str | None = None
+    first_absent_observation_id: str | None = None
 
     def as_record(self) -> dict[str, object]:
-        return {
+        record: dict[str, object] = {
             "record_version": SUCCESSOR_RECORD_VERSION,
             "schema_version": SUCCESSOR_SCHEMA_VERSION,
             "investigation_id": self.investigation_id,
@@ -295,6 +297,13 @@ class SuccessorTerminal:
             "target_statuses": list(self.target_statuses),
             "coarse_observations": list(self.coarse_observations),
         }
+        if (
+            self.last_present_observation_id is not None
+            or self.first_absent_observation_id is not None
+        ):
+            record["last_present_observation_id"] = self.last_present_observation_id
+            record["first_absent_observation_id"] = self.first_absent_observation_id
+        return record
 
 
 class SuccessorTerminalRepository:
@@ -1590,6 +1599,7 @@ class SuccessorExecutionService:
     ) -> SuccessorTerminal:
         terminal = self._base_terminal(prepared, "INCONCLUSIVE", reason, False)
         observations = _observation_bundle(coarse, narrowed)
+        bounded = _eligible_unresolved_bracket(prepared, reason, coarse, narrowed, observations)
         terminal = replace(
             terminal,
             terminal_result_id=_digest_terminal(
@@ -1599,7 +1609,21 @@ class SuccessorExecutionService:
             coarse_observation_ids=tuple(item.observation_id for item in observations),
             coarse_target_ids=tuple(item.target_id for item in observations),
             target_statuses=tuple(item.acquisition_status.value for item in observations),
-            coarse_observations=tuple(_observation_record(item) for item in observations),
+            coarse_observations=tuple(
+                _observation_record(item, exact_time=bounded) for item in observations
+            ),
+            last_present_time_utc=(
+                _timestamp_exact(narrowed.last_present_frame_utc) if bounded and narrowed else None
+            ),
+            first_absent_time_utc=(
+                _timestamp_exact(narrowed.first_absent_frame_utc) if bounded and narrowed else None
+            ),
+            last_present_observation_id=(
+                narrowed.last_present.observation_id if bounded and narrowed else None
+            ),
+            first_absent_observation_id=(
+                narrowed.first_absent.observation_id if bounded and narrowed else None
+            ),
         )
         terminal = replace(
             terminal,
@@ -2158,7 +2182,9 @@ def _s4_segment_for_midpoint(plan: MultiSegmentCoarsePlan, midpoint: datetime) -
     ).segment_id
 
 
-def _observation_record(item: SuccessorObservation) -> dict[str, object]:
+def _observation_record(
+    item: SuccessorObservation, *, exact_time: bool = False
+) -> dict[str, object]:
     return {
         "observation_id": item.observation_id,
         "target_id": item.target_id,
@@ -2166,7 +2192,13 @@ def _observation_record(item: SuccessorObservation) -> dict[str, object]:
         "sequence": item.sequence,
         "ordinal": item.ordinal,
         "requested_time_utc": _timestamp(item.requested_time_utc),
-        "frame_utc": None if item.frame_utc is None else _timestamp(item.frame_utc),
+        "frame_utc": (
+            None
+            if item.frame_utc is None
+            else _timestamp_exact(item.frame_utc)
+            if exact_time
+            else _timestamp(item.frame_utc)
+        ),
         "frame_pts_seconds": item.frame_pts_seconds,
         "frame_offset_seconds": item.frame_offset_seconds,
         "timing_precision_status": item.timing_precision_status,
@@ -2253,6 +2285,61 @@ def _observation_bundle(
     return (*coarse.observations, *narrowed.midpoint_observations)
 
 
+def _eligible_unresolved_bracket(
+    prepared: SuccessorPreparedExecution,
+    reason: str,
+    coarse: SuccessorCoarseClassificationResult,
+    narrowed: SuccessorBinaryNarrowingResult | None,
+    observations: tuple[SuccessorObservation, ...],
+) -> bool:
+    if (
+        reason != "midpoint_indeterminate"
+        or narrowed is None
+        or narrowed.completion is not SuccessorNarrowingCompletion.INDETERMINATE_OBSERVATION
+        or narrowed.reason_code != reason
+        or narrowed.plan_id != prepared.plan.plan_id
+        or narrowed.authority_identity != prepared.authority.authority_identity
+        or narrowed.roi_identity != prepared.authority.roi_identity
+        or narrowed.coarse_observations != coarse.observations
+    ):
+        return False
+    left, right = narrowed.last_present, narrowed.first_absent
+    if (
+        left.state is not SuccessorObservationState.PRESENT
+        or right.state is not SuccessorObservationState.ABSENT
+        or left.frame_utc is None
+        or right.frame_utc is None
+        or left.frame_utc >= right.frame_utc
+        or _timestamp_exact(left.frame_utc) >= _timestamp_exact(right.frame_utc)
+        or left.observation_id == right.observation_id
+        or any(
+            item.plan_id != prepared.plan.plan_id
+            or item.authority_identity != prepared.authority.authority_identity
+            or item.roi_identity != prepared.authority.roi_identity
+            or item.reference_frame_resource_id != prepared.authority.reference_frame_resource_id
+            for item in (left, right)
+        )
+        or left.classifier_policy_identity != right.classifier_policy_identity
+        or any(
+            gap.start_utc < right.frame_utc and gap.end_utc > left.frame_utc
+            for gap in prepared.plan.gaps
+        )
+    ):
+        return False
+    by_id = {item.observation_id: item for item in observations}
+    return (
+        len(by_id) == len(observations)
+        and by_id.get(left.observation_id) == left
+        and by_id.get(right.observation_id) == right
+        and any(
+            item.state is SuccessorObservationState.INDETERMINATE
+            and item.frame_utc is not None
+            and left.frame_utc < item.frame_utc < right.frame_utc
+            for item in narrowed.midpoint_observations
+        )
+    )
+
+
 def _observed_start(observations: tuple[SuccessorObservation, ...], fallback: str) -> str:
     frames = tuple(item.frame_utc for item in observations if item.frame_utc is not None)
     return fallback if not frames else _timestamp(min(frames))
@@ -2271,9 +2358,49 @@ def _evidence_matches_terminal(
     reason_code = terminal.get("reason_code")
     if status not in {"FOUND", "NOT_FOUND", "INCONCLUSIVE"}:
         return False
+    if (
+        status == "INCONCLUSIVE"
+        and reason_code == "midpoint_indeterminate"
+        and (
+            (terminal.get("last_present_observation_id") is None)
+            != (evidence.get("last_present_observation_id") is None)
+            or (terminal.get("first_absent_observation_id") is None)
+            != (evidence.get("first_absent_observation_id") is None)
+        )
+    ):
+        return False
+    if terminal.get("last_present_observation_id") is not None:
+        entries = evidence.get("entries")
+        if not isinstance(entries, list):
+            return False
+        if evidence.get("last_present_observation_id") != terminal.get(
+            "last_present_observation_id"
+        ) or evidence.get("first_absent_observation_id") != terminal.get(
+            "first_absent_observation_id"
+        ):
+            return False
+        for id_key, time_key, state in (
+            ("last_present_observation_id", "last_present_time_utc", "PRESENT"),
+            ("first_absent_observation_id", "first_absent_time_utc", "ABSENT"),
+        ):
+            if not any(
+                isinstance(item, dict)
+                and item.get("observation_id") == terminal.get(id_key)
+                and _same_utc_time(item.get("frame_utc"), terminal.get(time_key))
+                and item.get("state") == state
+                for item in entries
+            ):
+                return False
     return (
         evidence.get("terminal_status") == status and evidence.get("terminal_reason") == reason_code
     )
+
+
+def _same_utc_time(left: object, right: object) -> bool:
+    try:
+        return _strict_utc_timestamp(left) == _strict_utc_timestamp(right)
+    except SuccessorExecutionError:
+        return False
 
 
 def _terminal_from_record(value: Mapping[str, object]) -> SuccessorTerminal:
@@ -2312,6 +2439,12 @@ def _terminal_from_record(value: Mapping[str, object]) -> SuccessorTerminal:
         target_ids,
         target_statuses,
         coarse_observations,
+        value.get("last_present_observation_id")
+        if isinstance(value.get("last_present_observation_id"), str)
+        else None,
+        value.get("first_absent_observation_id")
+        if isinstance(value.get("first_absent_observation_id"), str)
+        else None,
     )
 
 
@@ -2459,9 +2592,95 @@ def _validate_terminal_timing(value: Mapping[str, object], status: str) -> None:
         absent_time = _strict_utc_timestamp(first_absent)
         if not observed_start <= present_time < absent_time <= observed_end:
             raise SuccessorExecutionError("successor_publication_corrupt")
-    elif last_present is not None or first_absent is not None:
+    elif (
+        status == "INCONCLUSIVE"
+        and value.get("reason_code") == "midpoint_indeterminate"
+        and (last_present is not None or first_absent is not None)
+    ):
+        _validate_bounded_inconclusive(value, observed_start, observed_end)
+    elif (
+        last_present is not None
+        or first_absent is not None
+        or "last_present_observation_id" in value
+        or "first_absent_observation_id" in value
+    ):
         raise SuccessorExecutionError("successor_publication_corrupt")
     if type(value.get("coverage_complete")) is not bool:
+        raise SuccessorExecutionError("successor_publication_corrupt")
+
+
+def _validate_bounded_inconclusive(
+    value: Mapping[str, object], observed_start: datetime, observed_end: datetime
+) -> None:
+    left_time = _strict_utc_timestamp(value.get("last_present_time_utc"))
+    right_time = _strict_utc_timestamp(value.get("first_absent_time_utc"))
+    left_id = value.get("last_present_observation_id")
+    right_id = value.get("first_absent_observation_id")
+    observations = value.get("coarse_observations")
+    observation_ids = value.get("coarse_observation_ids")
+    if (
+        not observed_start <= left_time < right_time <= observed_end
+        or not isinstance(left_id, str)
+        or not left_id
+        or not isinstance(right_id, str)
+        or not right_id
+        or left_id == right_id
+        or not isinstance(value.get("narrowing_id"), str)
+        or not value["narrowing_id"].startswith("successor-narrowing-v1-")
+        or not isinstance(observations, list)
+        or not isinstance(observation_ids, list)
+    ):
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    by_id = {
+        item.get("observation_id"): item
+        for item in observations
+        if isinstance(item, dict) and isinstance(item.get("observation_id"), str)
+    }
+    left, right = by_id.get(left_id), by_id.get(right_id)
+    if (
+        len(by_id) != len(observations)
+        or left is None
+        or right is None
+        or observation_ids != [item.get("observation_id") for item in observations]
+    ):
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    for item, expected_id, state, frame_time in (
+        (left, left_id, "PRESENT", left_time),
+        (right, right_id, "ABSENT", right_time),
+    ):
+        if (
+            item.get("observation_id") != expected_id
+            or item.get("state") != state
+            or _strict_utc_timestamp(item.get("frame_utc")) != frame_time
+            or item.get("authority_identity") != left.get("authority_identity")
+            or item.get("roi_identity") != left.get("roi_identity")
+            or item.get("reference_frame_resource_id") != left.get("reference_frame_resource_id")
+            or item.get("classifier_policy_identity") != left.get("classifier_policy_identity")
+        ):
+            raise SuccessorExecutionError("successor_publication_corrupt")
+    if (
+        left.get("authority_identity") is None
+        or left.get("roi_identity") is None
+        or left.get("reference_frame_resource_id") is None
+        or left.get("classifier_policy_identity") is None
+        or left_id not in observation_ids
+        or right_id not in observation_ids
+        or not any(
+            isinstance(item, dict)
+            and item.get("state") == "INDETERMINATE"
+            and isinstance(item.get("frame_utc"), str)
+            and left_time < _strict_utc_timestamp(item["frame_utc"]) < right_time
+            for item in observations
+        )
+    ):
+        raise SuccessorExecutionError("successor_publication_corrupt")
+    gaps = value.get("gaps", [])
+    if not isinstance(gaps, list) or any(
+        isinstance(gap, dict)
+        and _strict_utc_timestamp(gap.get("start_utc")) < right_time
+        and _strict_utc_timestamp(gap.get("end_utc")) > left_time
+        for gap in gaps
+    ):
         raise SuccessorExecutionError("successor_publication_corrupt")
 
 
@@ -2579,6 +2798,10 @@ def _safe_log(event: str, **fields: object) -> None:
 
 def _timestamp(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _timestamp_exact(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 __all__ = (
