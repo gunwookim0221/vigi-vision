@@ -17,7 +17,10 @@ import pytest
 import vigi_vision.recording_search_successor_execution as execution_module
 from test_recording_search_7e_b4_process import _values
 from test_recording_search_successor_execution import ANCHOR, _confirmed, _service
+from vigi_vision.investigation_confirmation_models import ConfirmationRoi, RoiProvenance
 from vigi_vision.object_presence_models import BinaryMask
+from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
+from vigi_vision.object_presence_values import ClassificationOutcome, DecodedRgbImage
 from vigi_vision.recording_search_7e_b4_process import (
     B4ProcessError,
     B4ProcessTimeout,
@@ -312,6 +315,51 @@ def test_production_adapter_preserves_safe_failure_code_without_timing_event(
     assert raised.value.diagnostic["failure_phase"] == phase
     if child_started is not None:
         assert raised.value.diagnostic["child_started"] is child_started
+
+
+def test_real_successor_b4_classifier_returns_both_optional_diagnostics() -> None:
+    width = 32
+    height = 32
+    baseline = DecodedRgbImage.from_rows(
+        tuple(
+            tuple(
+                ((52 + (x + y) % 5,) * 3 if 12 <= x < 20 and 12 <= y < 20 else (180,) * 3)
+                for x in range(width)
+            )
+            for y in range(height)
+        )
+    )
+    mask = BinaryMask.from_rows(
+        tuple(tuple(12 <= x < 20 and 12 <= y < 20 for x in range(width)) for y in range(height))
+    )
+    roi = ConfirmationRoi(
+        x=4,
+        y=4,
+        width=24,
+        height=24,
+        coordinate_space="source_pixels",
+        provenance=RoiProvenance.MANUAL,
+    )
+    policy = ObjectPresenceDecisionPolicy(
+        classifier_policy_version="test-support-change-production-adapter",
+        classifier_preprocessing_version="test-support-change-production-adapter",
+        baseline_support_mode=True,
+        minimum_mask_overlap_for_comparison=0.1,
+        minimum_comparison_area=1,
+        minimum_roi_pixels=64,
+        minimum_clipped_mask_pixels=1,
+    )
+    classifier = SuccessorB4Classifier(policy, StaticMaskWorkerSpec(mask, mask))
+
+    result = classifier.classify(baseline, baseline, width, height, roi, "support-change-adapter")
+
+    assert result.outcome is ClassificationOutcome.PRESENT
+    assert result.comparison is not None
+    assert result.retention_diagnostic is not None
+    assert result.support_change_diagnostic is not None
+    assert result.support_change_diagnostic.support_change_ratio == (
+        result.comparison.baseline_support_change_ratio
+    )
 
 
 def test_real_spawned_b4_failure_reaches_successor_adapter_with_safe_details() -> None:

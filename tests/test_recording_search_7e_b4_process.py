@@ -22,8 +22,13 @@ from vigi_vision.investigation_confirmation_models import (
     ConfirmedInvestigationInput,
     RoiProvenance,
 )
-from vigi_vision.object_presence_comparator import ClassifierInput, ObjectPresenceClassifier
-from vigi_vision.object_presence_models import BinaryMask, DecodedRgbImage
+from vigi_vision.object_presence_comparator import (
+    ClassifierInput,
+    ObjectPresenceClassifier,
+    _LumaNormalization,
+    _make_support_change_facts,
+)
+from vigi_vision.object_presence_models import BinaryMask, ClassificationResult, DecodedRgbImage
 from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
 from vigi_vision.recording_search_7e_1c import (
     CommonSessionCancelledError,
@@ -943,6 +948,21 @@ def test_protocol_rejects_unknown_keys_and_wrong_version() -> None:
         StaticMaskWorkerSpec(baseline_mask, probe_mask),
         "protocol",
     )
+    support_change_request = _build_request(
+        baseline,
+        probe,
+        32,
+        32,
+        roi,
+        policy,
+        StaticMaskWorkerSpec(baseline_mask, probe_mask),
+        "support-change",
+        support_change_diagnostics=True,
+    )
+    assert (
+        _decode_request(json.dumps(support_change_request).encode())["support_change_diagnostics"]
+        is True
+    )
     unknown = {**request, "unexpected": True}
     with pytest.raises(ValueError, match=r".*"):
         _decode_request(json.dumps(unknown).encode())
@@ -969,3 +989,115 @@ def test_protocol_rejects_mismatched_or_malformed_result() -> None:
     }
     with pytest.raises(B4ProcessError):
         _decode_result(json.dumps(malformed).encode(), "expected")
+
+
+def test_malformed_optional_support_facts_do_not_invalidate_worker_result() -> None:
+    baseline, probe, baseline_mask, probe_mask, roi, policy = _values()
+    authoritative = ObjectPresenceClassifier(policy).classify(
+        ClassifierInput(baseline, probe, baseline_mask, probe_mask, roi)
+    )
+    facts = _make_support_change_facts(
+        (100.0,) * 4,
+        (100.0,) * 4,
+        (100.0,) * 4,
+        _LumaNormalization(100.0, 100.0, 1.0, ()),
+        "a" * 64,
+        4,
+        2,
+        2,
+        1,
+        1,
+        0,
+        0,
+        0,
+        1.0,
+        "not_required",
+        0.0,
+    )
+    assert facts is not None
+    valid_result_payload = {
+        "version": 1,
+        "correlation_id": "expected",
+        "kind": "result",
+        "result": authoritative.model_dump(mode="json"),
+        "support_change_diagnostic": facts.to_payload(),
+    }
+    valid_sink = []
+    valid_result = _decode_result(
+        json.dumps(valid_result_payload).encode(),
+        "expected",
+        support_change_sink=valid_sink.append,
+    )
+    assert valid_result == authoritative
+    assert valid_sink == [facts]
+
+    for invalid in (10**1000, float("nan"), float("inf"), float("-inf"), "wrong"):
+        optional_facts = facts.to_payload()
+        optional_facts["normalization_scale"] = invalid
+        result_payload = {
+            "version": 1,
+            "correlation_id": "expected",
+            "kind": "result",
+            "result": authoritative.model_dump(mode="json"),
+            "support_change_diagnostic": optional_facts,
+        }
+        decoded_facts = []
+
+        result = _decode_result(
+            json.dumps(result_payload, allow_nan=True).encode(),
+            "expected",
+            support_change_sink=decoded_facts.append,
+        )
+
+        assert result == authoritative
+        assert decoded_facts == []
+
+
+def test_b4_worker_transports_support_change_facts_separately() -> None:
+    image = DecodedRgbImage.from_rows(
+        tuple(
+            tuple(
+                ((40 + (x + 2 * y) % 10,) * 3 if 14 <= x < 18 and 14 <= y < 18 else (180,) * 3)
+                for x in range(32)
+            )
+            for y in range(32)
+        )
+    )
+    mask = BinaryMask.from_rows(
+        tuple(tuple(14 <= x < 18 and 14 <= y < 18 for x in range(32)) for y in range(32))
+    )
+    roi = ConfirmationRoi(
+        x=4,
+        y=4,
+        width=24,
+        height=24,
+        coordinate_space="source_pixels",
+        provenance=RoiProvenance.MANUAL,
+    )
+    policy = ObjectPresenceDecisionPolicy(
+        minimum_mask_overlap_for_comparison=0.1,
+        minimum_comparison_area=64,
+        minimum_roi_pixels=64,
+        minimum_clipped_mask_pixels=1,
+        baseline_support_mode=True,
+    )
+    diagnostics = []
+
+    result = run_b4_in_process(
+        baseline_image=image,
+        probe_image=image,
+        source_width=32,
+        source_height=32,
+        roi=roi,
+        policy=policy,
+        worker_spec=StaticMaskWorkerSpec(mask, mask),
+        correlation_id="support-change-worker",
+        timeout_seconds=5.0,
+        startup_timeout_seconds=3.0,
+        support_change_sink=diagnostics.append,
+    )
+
+    assert isinstance(result, ClassificationResult)
+    assert diagnostics
+    assert diagnostics[-1].support_change_ratio == (result.comparison.baseline_support_change_ratio)
+    assert diagnostics[-1].normalized_postclip_changed_count == 0

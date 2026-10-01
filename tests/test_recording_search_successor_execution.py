@@ -3111,10 +3111,12 @@ def test_successor_runs_through_http_background_and_restart_status(tmp_path: Pat
         accepted = client.post("/api/v1/recording-searches", json=body)
         assert accepted.status_code == 202
         status_url = accepted.json()["status_url"]
-        for _ in range(100):
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
             status = client.get(status_url)
             if status.json()["status"] not in {"ACCEPTED", "RUNNING"}:
                 break
+            time.sleep(0.01)
         assert status.json()["status"] == "FOUND"
         assert status.json()["schema_version"] == 8
         duplicate = client.post("/api/v1/recording-searches", json=body)

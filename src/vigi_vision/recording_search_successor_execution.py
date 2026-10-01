@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 from vigi_vision.investigation_confirmation_models import ConfirmedInvestigationInput
 from vigi_vision.object_presence_models import BinaryMask
 from vigi_vision.object_presence_retention_diagnostics import ForegroundRetentionFacts
+from vigi_vision.object_presence_support_change_diagnostics import SupportChangeFacts
 from vigi_vision.object_presence_values import ClassificationOutcome, DecodedRgbImage
 from vigi_vision.recording_search_7e_b4_process import (
     B4ProcessCancelled,
@@ -84,6 +85,7 @@ from vigi_vision.recording_search_successor_diagnostics import (
     SuccessorDiagnosticRepository,
     diagnostic_scope,
     persist_foreground_retention,
+    persist_support_change,
 )
 from vigi_vision.recording_search_successor_evidence import (
     LEGACY_EVIDENCE_VERSION,
@@ -670,6 +672,7 @@ class SuccessorB4Classifier:
         started = perf_counter()
         timing_events: list[dict[str, object]] = []
         retention_diagnostics: list[ForegroundRetentionFacts] = []
+        support_change_diagnostics: list[SupportChangeFacts] = []
         try:
             result = run_b4_in_process(
                 baseline_image=baseline_image,
@@ -686,6 +689,7 @@ class SuccessorB4Classifier:
                 baseline_mask=baseline_mask,
                 timing_sink=timing_events.append,
                 retention_sink=retention_diagnostics.append,
+                support_change_sink=support_change_diagnostics.append,
             )
         except B4ProcessTimeout as error:
             diagnostic: dict[str, object] = (
@@ -736,6 +740,7 @@ class SuccessorB4Classifier:
             "completed",
             elapsed_ms,
             retention_diagnostics[-1] if retention_diagnostics else None,
+            support_change_diagnostics[-1] if support_change_diagnostics else None,
         )
 
     def prepare_reference(
@@ -1719,45 +1724,79 @@ class SuccessorExecutionService:
         terminal: SuccessorTerminal,
         observations: tuple[SuccessorObservation, ...],
     ) -> None:
-        """Best-effort publish facts only after their authoritative IDs commit."""
-        try:
-            if (
-                len(terminal.coarse_observation_ids) != len(observations)
-                or len(terminal.coarse_observations) != len(observations)
-                or terminal.investigation_id != prepared.request.investigation_id
-                or terminal.run_id != prepared.request.run_id
-                or terminal.plan_id != prepared.plan.plan_id
+        """Best-effort publish optional facts only after authoritative IDs commit."""
+        if (
+            len(terminal.coarse_observation_ids) != len(observations)
+            or len(terminal.coarse_observations) != len(observations)
+            or terminal.investigation_id != prepared.request.investigation_id
+            or terminal.run_id != prepared.request.run_id
+            or terminal.plan_id != prepared.plan.plan_id
+        ):
+            return
+        for index, observation in enumerate(observations):
+            retention_facts = getattr(observation, "_retention_diagnostic", None)
+            support_facts = getattr(observation, "_support_change_diagnostic", None)
+            if not isinstance(retention_facts, ForegroundRetentionFacts) and not isinstance(
+                support_facts, SupportChangeFacts
             ):
-                return
-            for index, observation in enumerate(observations):
-                facts = getattr(observation, "_retention_diagnostic", None)
-                if not isinstance(facts, ForegroundRetentionFacts):
-                    continue
-                if not _retention_identity_matches_final_observation(
+                continue
+            try:
+                identity_matches = _retention_identity_matches_final_observation(
                     prepared,
                     terminal,
                     observation,
                     index=index,
-                ):
-                    continue
-                persist_foreground_retention(
+                )
+            except Exception:  # noqa: BLE001 - diagnostic binding is optional.
+                identity_matches = False
+            if not identity_matches:
+                continue
+            if isinstance(retention_facts, ForegroundRetentionFacts):
+                try:
+                    persist_foreground_retention(
+                        plan_id=observation.plan_id,
+                        target_id=observation.target_id,
+                        observation_id=observation.observation_id,
+                        requested_time_utc=_timestamp(observation.requested_time_utc),
+                        reference_identity=observation.authority_identity,
+                        reference_frame_resource_id=observation.reference_frame_resource_id,
+                        roi_identity=observation.roi_identity,
+                        classifier_policy_identity=observation.classifier_policy_identity,
+                        facts=retention_facts,
+                    )
+                except Exception:  # noqa: BLE001 - optional diagnostic isolation.
+                    _safe_log(
+                        "phase7e.foreground_retention_diagnostic",
+                        stage="persist_failed",
+                        error_code="diagnostic_unavailable",
+                    )
+            if not isinstance(support_facts, SupportChangeFacts):
+                continue
+            roi = prepared.authority.roi
+            try:
+                persist_support_change(
                     plan_id=observation.plan_id,
                     target_id=observation.target_id,
                     observation_id=observation.observation_id,
                     requested_time_utc=_timestamp(observation.requested_time_utc),
                     reference_identity=observation.authority_identity,
                     reference_frame_resource_id=observation.reference_frame_resource_id,
+                    baseline_frame_digest=prepared.authority.reference_frame_jpeg_sha256,
+                    probe_frame_digest=observation.frame_sha256 or "",
                     roi_identity=observation.roi_identity,
+                    roi_x=roi.x,
+                    roi_y=roi.y,
+                    roi_width=roi.width,
+                    roi_height=roi.height,
                     classifier_policy_identity=observation.classifier_policy_identity,
-                    facts=facts,
+                    facts=support_facts,
                 )
-        except Exception:  # noqa: BLE001 - optional diagnostics must not change authority.
-            # Optional diagnostics cannot invalidate committed evidence or terminal state.
-            _safe_log(
-                "phase7e.foreground_retention_diagnostic",
-                stage="persist_failed",
-                error_code="diagnostic_unavailable",
-            )
+            except Exception:  # noqa: BLE001 - optional diagnostic isolation.
+                _safe_log(
+                    "phase7e.support_change_diagnostic",
+                    stage="persist_failed",
+                    error_code="diagnostic_unavailable",
+                )
 
     def _publish_interrupted(self, prepared: SuccessorPreparedExecution) -> SuccessorTerminal:
         terminal = self._base_terminal(prepared, "INTERRUPTED", "cancelled", False)

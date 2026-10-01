@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import test_recording_search_successor_execution as successor_execution_test
 import vigi_vision.recording_search_successor_execution as execution_module
 from test_object_presence_retention_diagnostics import _metrics_with_facts
 from test_recording_search_successor_execution import (
@@ -18,17 +21,25 @@ from test_recording_search_successor_execution import (
     _confirmed,
     _service,
 )
+from vigi_vision.investigation_confirmation_models import ConfirmationRoi, RoiProvenance
+from vigi_vision.object_presence_comparator import _LumaNormalization, _make_support_change_facts
+from vigi_vision.object_presence_models import BinaryMask
+from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
 from vigi_vision.object_presence_retention_diagnostics import ForegroundRetentionFacts
+from vigi_vision.object_presence_support_change_diagnostics import SupportChangeFacts
 from vigi_vision.object_presence_values import DecodedRgbImage
+from vigi_vision.recording_search_7e_b4_process import StaticMaskWorkerSpec
 from vigi_vision.recording_search_successor_classification import SuccessorClassifierResult
 from vigi_vision.recording_search_successor_diagnostics import (
     SuccessorDiagnosticError,
     SuccessorDiagnosticRepository,
     diagnostic_scope,
     persist_foreground_retention,
+    persist_support_change,
 )
 from vigi_vision.recording_search_successor_evidence import SuccessorEvidenceRepository
 from vigi_vision.recording_search_successor_execution import (
+    SuccessorB4Classifier,
     SuccessorExecutionError,
     SuccessorExecutionService,
 )
@@ -42,6 +53,49 @@ _FACTS = _metrics_with_facts(
     (40.0,) * 5,
     (40.0,) * 5,
 )[1]
+_SUPPORT_FACTS = _make_support_change_facts(
+    (100.0,) * 4,
+    (100.0,) * 4,
+    (100.0,) * 4,
+    _LumaNormalization(100.0, 100.0, 1.0, ()),
+    "e" * 64,
+    4,
+    4,
+    4,
+    1,
+    1,
+    0,
+    0,
+    0,
+    1.0,
+    "not_required",
+    0.0,
+)
+assert isinstance(_SUPPORT_FACTS, SupportChangeFacts)
+
+
+def _support_record(facts: SupportChangeFacts = _SUPPORT_FACTS) -> dict[str, object]:
+    return {
+        "version": "phase7e-support-change-v1",
+        "diagnostic_kind": "support_change",
+        "investigation_id": _INVESTIGATION_ID,
+        "run_id": _RUN_ID,
+        "plan_id": "successor-plan-test",
+        "target_id": "successor-target-test",
+        "observation_id": _OBSERVATION_ID,
+        "requested_time_utc": "2026-09-04T05:18:00Z",
+        "reference_identity": f"successor-authority-v1-{'b' * 64}",
+        "reference_frame_resource_id": "NVR_Channel_01-Reference-Frame",
+        "baseline_frame_digest": "a" * 64,
+        "probe_frame_digest": "b" * 64,
+        "roi_identity": f"successor-roi-v1-{'c' * 64}",
+        "roi_x": 0,
+        "roi_y": 0,
+        "roi_width": 4,
+        "roi_height": 4,
+        "classifier_policy_identity": f"policy-{'d' * 64}",
+        **facts.to_payload(),
+    }
 
 
 def _record(facts: ForegroundRetentionFacts = _FACTS) -> dict[str, object]:
@@ -173,6 +227,78 @@ def test_b4_and_retention_diagnostic_types_do_not_share_a_path(tmp_path: Path) -
     assert (diagnostic_directory / "foreground-retention-v1" / f"{_OBSERVATION_ID}.json").is_file()
 
 
+def test_support_change_repository_is_separate_bounded_and_idempotent(tmp_path: Path) -> None:
+    repository = SuccessorDiagnosticRepository(tmp_path)
+    record = _support_record()
+
+    repository.publish_support_change(record)
+    repository.publish_support_change(record)
+
+    path = (
+        tmp_path
+        / _INVESTIGATION_ID
+        / _RUN_ID
+        / "diagnostics"
+        / "support-change-v1"
+        / f"{_OBSERVATION_ID}.json"
+    )
+    assert path.is_file()
+    assert path.stat().st_size <= 4096
+    assert repository.read_support_change(_INVESTIGATION_ID, _RUN_ID, _OBSERVATION_ID) == record
+    assert repository.read(_INVESTIGATION_ID, _RUN_ID, _OBSERVATION_ID) is None
+    assert repository.read_retention(_INVESTIGATION_ID, _RUN_ID, _OBSERVATION_ID) is None
+
+
+def test_concurrent_identical_support_change_publication_is_atomic(tmp_path: Path) -> None:
+    repository = SuccessorDiagnosticRepository(tmp_path)
+    record = _support_record()
+
+    with ThreadPoolExecutor(max_workers=4) as workers:
+        futures = [workers.submit(repository.publish_support_change, record) for _ in range(8)]
+        for future in futures:
+            future.result()
+
+    directory = tmp_path / _INVESTIGATION_ID / _RUN_ID / "diagnostics" / "support-change-v1"
+    paths = tuple(directory.glob("*.json"))
+    assert len(paths) == 1
+    assert json.loads(paths[0].read_text(encoding="ascii")) == record
+
+
+def test_support_change_conflict_and_corrupt_record_are_never_overwritten(
+    tmp_path: Path,
+) -> None:
+    repository = SuccessorDiagnosticRepository(tmp_path)
+    record = _support_record()
+    repository.publish_support_change(record)
+    changed = dict(record, normalization_offset=1.0)
+
+    with pytest.raises(SuccessorDiagnosticError, match="diagnostic_conflict"):
+        repository.publish_support_change(changed)
+    assert repository.read_support_change(_INVESTIGATION_ID, _RUN_ID, _OBSERVATION_ID) == record
+
+    path = (
+        tmp_path
+        / _INVESTIGATION_ID
+        / _RUN_ID
+        / "diagnostics"
+        / "support-change-v1"
+        / f"{_OBSERVATION_ID}.json"
+    )
+    path.write_text("{", encoding="ascii")
+    with pytest.raises(SuccessorDiagnosticError, match="diagnostic_corrupt"):
+        repository.publish_support_change(record)
+    assert path.read_text(encoding="ascii") == "{"
+
+
+def test_malformed_support_change_record_is_rejected_without_publication(tmp_path: Path) -> None:
+    repository = SuccessorDiagnosticRepository(tmp_path)
+    malformed = dict(_support_record(), normalization_scale=10**1000)
+
+    with pytest.raises(SuccessorDiagnosticError, match="diagnostic_corrupt"):
+        repository.publish_support_change(malformed)
+    assert repository.read_support_change(_INVESTIGATION_ID, _RUN_ID, _OBSERVATION_ID) is None
+
+
 def test_optional_persistence_failure_does_not_change_classifier_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -197,6 +323,36 @@ def test_optional_persistence_failure_does_not_change_classifier_result(
     assert repository.read_retention(_INVESTIGATION_ID, _RUN_ID, _OBSERVATION_ID) is None
 
 
+def test_support_change_optional_write_failure_is_suppressed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = SuccessorDiagnosticRepository(tmp_path)
+
+    def fail_publish(_record: dict[str, object]) -> None:
+        raise OSError
+
+    monkeypatch.setattr(repository, "publish_support_change", fail_publish)
+    with diagnostic_scope(repository, _INVESTIGATION_ID, _RUN_ID):
+        persist_support_change(
+            plan_id="successor-plan-test",
+            target_id="successor-target-test",
+            observation_id=_OBSERVATION_ID,
+            requested_time_utc="2026-09-04T05:18:00Z",
+            reference_identity=f"successor-authority-v1-{'b' * 64}",
+            reference_frame_resource_id="reference-frame-resource-v1-test",
+            baseline_frame_digest="a" * 64,
+            probe_frame_digest="b" * 64,
+            roi_identity=f"successor-roi-v1-{'c' * 64}",
+            roi_x=0,
+            roi_y=0,
+            roi_width=4,
+            roi_height=4,
+            classifier_policy_identity=f"policy-{'d' * 64}",
+            facts=_SUPPORT_FACTS,
+        )
+    assert repository.read_support_change(_INVESTIGATION_ID, _RUN_ID, _OBSERVATION_ID) is None
+
+
 class _FactsClassifier(_Classifier):
     def classify(  # noqa: PLR0913 - retain the existing classifier protocol.
         self,
@@ -208,7 +364,11 @@ class _FactsClassifier(_Classifier):
         correlation_id: str,
     ) -> SuccessorClassifierResult:
         result = super().classify(baseline, probe, width, height, roi, correlation_id)
-        return replace(result, retention_diagnostic=_FACTS)
+        return replace(
+            result,
+            retention_diagnostic=_FACTS,
+            support_change_diagnostic=_SUPPORT_FACTS,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +416,15 @@ def test_historical_run_and_reopen_remain_valid_without_retention_sidecars(
             / "foreground-retention-v1"
         ).glob("*.json")
     )
+    assert not tuple(
+        (
+            repository.root
+            / run.investigation_id
+            / run.run_id
+            / "diagnostics"
+            / "support-change-v1"
+        ).glob("*.json")
+    )
     assert run.service.publisher.read(run.investigation_id, run.run_id) == run.terminal
     assert run.service.evidence_repository.read(run.investigation_id, run.run_id) == run.evidence
 
@@ -301,6 +470,11 @@ def test_retention_sidecar_removal_does_not_change_reopen_or_public_result(
     assert paths
     for path in paths:
         path.unlink()
+
+    support_directory = (
+        repository.root / run.investigation_id / run.run_id / "diagnostics" / "support-change-v1"
+    )
+    assert tuple(support_directory.glob("*.json"))
 
     assert run.service.publisher.read(run.investigation_id, run.run_id) == run.terminal
     assert run.service.evidence_repository.read(run.investigation_id, run.run_id) == run.evidence
@@ -368,6 +542,167 @@ def test_retention_sidecars_bind_to_final_authoritative_observation_ids(tmp_path
         assert {key: diagnostic[key] for key in _FACTS.to_payload()} == _FACTS.to_payload()
 
 
+def test_support_change_sidecars_bind_to_final_ids_and_coexist_with_retention(
+    tmp_path: Path,
+) -> None:
+    run = _successful_run(tmp_path, include_diagnostics=True)
+    repository = SuccessorDiagnosticRepository(run.service.publisher.root)
+    diagnostics = run.service.publisher.root / run.investigation_id / run.run_id / "diagnostics"
+    support_directory = diagnostics / "support-change-v1"
+    retention_directory = diagnostics / "foreground-retention-v1"
+    evidence_by_id = {
+        str(entry["observation_id"]): entry
+        for entry in run.evidence["entries"]
+        if isinstance(entry, dict) and entry.get("role") != "baseline_link"
+    }
+    support_paths = tuple(support_directory.glob("*.json"))
+    retention_ids = {path.stem for path in retention_directory.glob("*.json")}
+    support_ids = {path.stem for path in support_paths}
+
+    assert support_ids
+    assert support_ids == retention_ids
+    assert support_ids <= set(evidence_by_id)
+    anchor_ids = {
+        observation_id
+        for observation_id, entry in evidence_by_id.items()
+        if entry["role"] == "anchor"
+    }
+    coarse_ids = {
+        observation_id
+        for observation_id, entry in evidence_by_id.items()
+        if str(entry["target_id"]).startswith("successor-target-v1-")
+    }
+    midpoint_ids = {
+        observation_id
+        for observation_id, entry in evidence_by_id.items()
+        if str(entry["target_id"]).startswith("successor-midpoint-target-v1-")
+    }
+    assert anchor_ids
+    assert coarse_ids
+    assert midpoint_ids
+    assert anchor_ids <= support_ids
+    assert coarse_ids <= support_ids
+    assert midpoint_ids <= support_ids
+    for path in support_paths:
+        observation_id = path.stem
+        diagnostic = repository.read_support_change(
+            run.investigation_id, run.run_id, observation_id
+        )
+        assert diagnostic is not None
+        assert diagnostic["observation_id"] == observation_id == path.stem
+        assert observation_id in evidence_by_id
+        assert diagnostic["probe_frame_digest"] == evidence_by_id[observation_id]["digest"]
+        assert diagnostic["baseline_frame_digest"] == hashlib.sha256(b"baseline").hexdigest()
+        assert diagnostic["support_mask_fingerprint"] == _SUPPORT_FACTS.support_mask_fingerprint
+
+    assert (
+        repository.read_retention(run.investigation_id, run.run_id, next(iter(support_ids)))
+        is not None
+    )
+
+
+def test_real_b4_execution_persists_diagnostics_against_final_evidence_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def decode(_self: object, payload: bytes, width: int, height: int) -> object:
+        rows = tuple(
+            tuple(
+                (
+                    (180 + (x + y) % 5,) * 3
+                    if payload == b"absent" or not (12 <= x < 20 and 12 <= y < 20)
+                    else (52 + (x + y) % 5,) * 3
+                )
+                for x in range(width)
+            )
+            for y in range(height)
+        )
+        return SimpleNamespace(image=DecodedRgbImage.from_rows(rows), integrity=None)
+
+    def decode_frame(_self: object, request: object) -> object:
+        clip_path = request.clip_path  # type: ignore[attr-defined]
+        output_path = request.output_path  # type: ignore[attr-defined]
+        payload = clip_path.read_bytes()
+        output_path.write_bytes(payload)
+        return successor_execution_test.DecodedFrameEvidence(
+            output_path,
+            request.target_offset_seconds,  # type: ignore[attr-defined]
+            32,
+            32,
+            successor_execution_test.TimingPrecisionStatus.MEASURED_CLIP_RELATIVE,
+            (),
+        )
+
+    monkeypatch.setattr(successor_execution_test._MediaDecoder, "decode", decode)
+    monkeypatch.setattr(successor_execution_test._FrameDecoder, "decode", decode_frame)
+    width = 32
+    height = 32
+    roi = ConfirmationRoi(
+        x=4,
+        y=4,
+        width=24,
+        height=24,
+        coordinate_space="source_pixels",
+        provenance=RoiProvenance.MANUAL,
+    )
+    mask = BinaryMask.from_rows(
+        tuple(tuple(12 <= x < 20 and 12 <= y < 20 for x in range(width)) for y in range(height))
+    )
+    policy = ObjectPresenceDecisionPolicy(
+        classifier_policy_version="test-support-change-production-execution",
+        classifier_preprocessing_version="test-support-change-production-execution",
+        baseline_support_mode=True,
+        minimum_mask_overlap_for_comparison=0.1,
+        minimum_comparison_area=64,
+        minimum_roi_pixels=64,
+        minimum_clipped_mask_pixels=1,
+    )
+    classifier = SuccessorB4Classifier(policy, StaticMaskWorkerSpec(mask, mask))
+    service = _service(tmp_path, ANCHOR + timedelta(hours=1), classifier)
+    service.evidence_repository = SuccessorEvidenceRepository(service.publisher.root)
+    confirmed = replace(
+        _confirmed(tmp_path),
+        source_width=width,
+        source_height=height,
+        roi=roi,
+        jpeg_sha256=hashlib.sha256(b"baseline").hexdigest(),
+    )
+    prepared = service.prepare(
+        confirmed,
+        search_end_time_text="2026-09-04T14:21:32",
+        run_id=_RUN_ID,
+        now_utc=ANCHOR + timedelta(hours=1),
+    )
+
+    terminal = service.execute(prepared)
+
+    evidence = service.evidence_repository.read(confirmed.investigation_id, _RUN_ID)
+    assert evidence is not None
+    assert terminal.status == evidence["terminal_status"]
+    evidence_by_id = {
+        str(item["observation_id"]): item
+        for item in evidence["entries"]
+        if isinstance(item, dict) and item.get("role") != "baseline_link"
+    }
+    assert any(item["role"] == "anchor" for item in evidence_by_id.values())
+    assert any(
+        str(item["target_id"]).startswith("successor-target-v1-")
+        for item in evidence_by_id.values()
+    )
+    repository = SuccessorDiagnosticRepository(service.publisher.root)
+    diagnostics_root = service.publisher.root / confirmed.investigation_id / _RUN_ID / "diagnostics"
+    support_paths = tuple((diagnostics_root / "support-change-v1").glob("*.json"))
+    retention_paths = tuple((diagnostics_root / "foreground-retention-v1").glob("*.json"))
+    assert support_paths
+    assert {path.stem for path in support_paths} == {path.stem for path in retention_paths}
+    assert {path.stem for path in support_paths} <= set(evidence_by_id)
+    for path in support_paths:
+        record = repository.read_support_change(confirmed.investigation_id, _RUN_ID, path.stem)
+        assert record is not None
+        assert record["observation_id"] == path.stem == evidence_by_id[path.stem]["observation_id"]
+        assert repository.read_retention(confirmed.investigation_id, _RUN_ID, path.stem) is not None
+    assert not tuple((diagnostics_root / "support-change-v1").glob("*.tmp"))
+
+
 def test_retention_identity_mismatch_discards_diagnostic_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -391,6 +726,14 @@ def test_retention_identity_mismatch_discards_diagnostic_only(
         / "foreground-retention-v1"
     )
     assert not tuple(directory.glob("*.json"))
+    support_directory = (
+        actual.service.publisher.root
+        / actual.investigation_id
+        / actual.run_id
+        / "diagnostics"
+        / "support-change-v1"
+    )
+    assert not tuple(support_directory.glob("*.json"))
 
 
 def test_failure_before_final_observation_binding_leaves_no_retention_sidecar(
@@ -438,3 +781,37 @@ def test_retention_repository_failure_leaves_execution_and_evidence_unchanged(
     assert actual.terminal == expected.terminal
     assert actual.evidence == expected.evidence
     assert actual.terminal["status"] == expected.terminal["status"]
+    support_directory = (
+        actual.service.publisher.root
+        / actual.investigation_id
+        / actual.run_id
+        / "diagnostics"
+        / "support-change-v1"
+    )
+    assert tuple(support_directory.glob("*.json"))
+
+
+def test_support_change_repository_failure_leaves_retention_and_execution_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = _successful_run(tmp_path / "expected", include_diagnostics=True)
+
+    def fail_publish(_self: SuccessorDiagnosticRepository, _record: dict[str, object]) -> None:
+        raise OSError
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(SuccessorDiagnosticRepository, "publish_support_change", fail_publish)
+        actual = _successful_run(tmp_path / "write-failed", include_diagnostics=True)
+
+    assert actual.terminal == expected.terminal
+    assert actual.evidence == expected.evidence
+    retention_directory = (
+        actual.service.publisher.root
+        / actual.investigation_id
+        / actual.run_id
+        / "diagnostics"
+        / "foreground-retention-v1"
+    )
+    assert tuple(retention_directory.glob("*.json"))
+    support_directory = retention_directory.parent / "support-change-v1"
+    assert not tuple(support_directory.glob("*.json"))

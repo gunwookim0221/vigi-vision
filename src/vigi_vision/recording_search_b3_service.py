@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from vigi_vision.object_presence_models import BinaryMask, DecodedRgbImage
     from vigi_vision.object_presence_policy import ObjectPresenceDecisionPolicy
     from vigi_vision.object_presence_retention_diagnostics import ForegroundRetentionFacts
+    from vigi_vision.object_presence_support_change_diagnostics import SupportChangeFacts
     from vigi_vision.recording_search_b3_contracts import (
         ClassificationHandle,
         ClassificationHost,
@@ -258,6 +259,7 @@ def classify_decoded_images(  # noqa: PLR0913
     baseline_mask: BinaryMask | None = None,
     diagnostics_sink: Callable[[str, int], None] | None = None,
     retention_sink: Callable[[ForegroundRetentionFacts], None] | None = None,
+    support_change_sink: Callable[[SupportChangeFacts], None] | None = None,
 ) -> ClassificationResult:
     """Run the authoritative B4 computation without legacy persistence.
 
@@ -287,6 +289,7 @@ def classify_decoded_images(  # noqa: PLR0913
             ),
             diagnostics_sink=diagnostics_sink,
             retention_sink=retention_sink,
+            support_change_sink=support_change_sink,
         )
     except Exception:  # noqa: BLE001 - classifier failures are one safe category.
         _fail(ClassificationPreparationReason.INVALID_CLASSIFIER_OUTPUT)

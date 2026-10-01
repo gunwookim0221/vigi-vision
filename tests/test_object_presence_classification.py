@@ -392,12 +392,25 @@ def test_baseline_support_v3_accepts_bounded_object_translation() -> None:
         classifier_preprocessing_version="test-baseline-support-v3",
         baseline_support_alignment_mode=True,
     )
-    result = classifier.classify(_support_input(_shift_image(_support_scene(), 2, 0)))
+    support_facts = []
+    result = classifier.classify(
+        _support_input(_shift_image(_support_scene(), 2, 0)),
+        support_change_sink=support_facts.append,
+    )
     assert result.outcome is ClassificationOutcome.PRESENT
     assert result.comparison.comparison_mode == "baseline_support_v3"
     assert result.comparison.baseline_support_alignment_dx == 2
     assert result.comparison.baseline_support_alignment_margin is not None
     assert result.comparison.baseline_support_alignment_margin >= 0.02
+    assert support_facts
+    assert support_facts[-1].alignment_dx == result.comparison.baseline_support_alignment_dx
+    assert support_facts[-1].alignment_dy == result.comparison.baseline_support_alignment_dy
+    assert support_facts[-1].alignment_rotation_degrees == (
+        result.comparison.baseline_support_alignment_rotation_degrees
+    )
+    assert support_facts[-1].support_change_ratio == (
+        result.comparison.baseline_support_change_ratio
+    )
 
 
 def test_baseline_support_v3_accepts_one_pixel_object_translation() -> None:
@@ -646,6 +659,54 @@ def test_baseline_support_v3_keeps_occlusion_and_replacement_indeterminate() -> 
     assert occluded_result.comparison.baseline_support_occlusion_evidence is True
     assert replacement_result.comparison.baseline_support_decision_reason == "replacement_candidate"
     assert replacement_result.comparison.baseline_support_replacement_evidence is True
+
+
+def test_support_change_diagnostics_are_observational_for_v3_classification() -> None:
+    classifier = _support_classifier(
+        classifier_policy_version="test-baseline-support-v3",
+        classifier_preprocessing_version="test-baseline-support-v3",
+        baseline_support_alignment_mode=True,
+    )
+    occluded_rows = [list(row) for row in _support_scene().pixels]
+    replacement_rows = [list(row) for row in _support_scene().pixels]
+    for y in range(7, 11):
+        for x in range(7, 15):
+            occluded_rows[y][x] = (180, 180, 180)
+    for y in range(7, 15):
+        for x in range(7, 15):
+            value = 70 + ((x + y) % 3)
+            replacement_rows[y][x] = (value, value, value)
+    cases = (
+        (_support_scene(), ClassificationOutcome.PRESENT),
+        (_support_scene(shoe=False), ClassificationOutcome.ABSENT),
+        (
+            DecodedRgbImage.from_rows(tuple(tuple(row) for row in occluded_rows)),
+            ClassificationOutcome.INDETERMINATE,
+        ),
+        (
+            DecodedRgbImage.from_rows(tuple(tuple(row) for row in replacement_rows)),
+            ClassificationOutcome.INDETERMINATE,
+        ),
+        (_shift_image(_support_scene(), 5, 5), ClassificationOutcome.INDETERMINATE),
+        (_shift_image(_support_scene(), 2, 0), ClassificationOutcome.PRESENT),
+    )
+
+    for probe, expected_outcome in cases:
+        values = _support_input(probe)
+        without_diagnostics = classifier.classify(values)
+        diagnostics = []
+        with_diagnostics = classifier.classify(values, support_change_sink=diagnostics.append)
+
+        assert without_diagnostics.outcome is expected_outcome
+        assert with_diagnostics == without_diagnostics
+        assert with_diagnostics.comparison == without_diagnostics.comparison
+        if diagnostics:
+            assert diagnostics[-1].support_change_ratio == (
+                with_diagnostics.comparison.baseline_support_change_ratio
+            )
+            assert diagnostics[-1].changed_support_pixel_count == (
+                diagnostics[-1].normalized_postclip_changed_count
+            )
 
 
 def test_baseline_support_v3_does_not_let_probe_mask_block_present() -> None:

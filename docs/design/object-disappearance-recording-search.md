@@ -223,6 +223,16 @@ non-authoritative: historical absence, deletion, or a failed write does not
 change a public decision or strict reopen. Raw masks and pixel values are never
 stored.
 
+The separate `support-change-v1/{final_observation_id}.json` sidecar records
+bounded support/valid/excluded/changed counts, the six exact difference bins
+around the strict `>32` predicate, raw/preclip/postclip changed counts,
+clipping populations and changed/clipping intersections, selected alignment
+and normalization scalars, frame digests, and a SHA-256 fingerprint of the
+baseline support mask. It is non-authoritative and exists for RCA and
+calibration only. It stores no raw mask, support coordinates, or pixels;
+historical absence is valid, and public decisions and strict reopen do not
+depend on it.
+
 Successor classification uses the additive
 `efficient-sam-ti-baseline-support-v3` policy. Each probe is compared against
 the immutable baseline support after bounded local translation/rotation

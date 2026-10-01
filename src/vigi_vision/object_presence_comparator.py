@@ -36,6 +36,10 @@ from vigi_vision.object_presence_models import (
     quantize_metric,
 )
 from vigi_vision.object_presence_retention_diagnostics import ForegroundRetentionFacts
+from vigi_vision.object_presence_support_change_diagnostics import (
+    SupportChangeFacts,
+    baseline_mask_fingerprint,
+)
 
 if TYPE_CHECKING:
     from vigi_vision.investigation_confirmation_models import ConfirmationRoi
@@ -320,6 +324,13 @@ def fast_present_comparison(
 
 
 _SUPPORT_CHANGE_THRESHOLD: Final[float] = 32.0
+_SUPPORT_CHANGE_HISTOGRAM_LIMITS: Final[tuple[float, ...]] = (
+    24.0,
+    30.0,
+    _SUPPORT_CHANGE_THRESHOLD,
+    34.0,
+    40.0,
+)
 _FOREGROUND_CONTRAST_THRESHOLD: Final[float] = 40.0
 _LUMA_MAXIMUM: Final[float] = 255.0
 _RETENTION_HISTOGRAM_LIMITS: Final[tuple[float, ...]] = (30.0, 40.0, 50.0, 80.0)
@@ -353,6 +364,7 @@ class ObjectPresenceClassifier:
         *,
         diagnostics_sink: Callable[[str, int], None] | None = None,
         retention_sink: Callable[[ForegroundRetentionFacts], None] | None = None,
+        support_change_sink: Callable[[SupportChangeFacts], None] | None = None,
     ) -> RawComparison:
         """Return one validated raw comparison without performing I/O."""
         _validate_input(values)
@@ -362,6 +374,7 @@ class ObjectPresenceClassifier:
                 self.policy,
                 diagnostics_sink=diagnostics_sink,
                 retention_sink=retention_sink,
+                support_change_sink=support_change_sink,
             )
         roi_pixels = values.roi.width * values.roi.height
         baseline_mask, probe_mask = clipped_masks(
@@ -401,6 +414,7 @@ class ObjectPresenceClassifier:
         *,
         diagnostics_sink: Callable[[str, int], None] | None = None,
         retention_sink: Callable[[ForegroundRetentionFacts], None] | None = None,
+        support_change_sink: Callable[[SupportChangeFacts], None] | None = None,
     ) -> ClassificationResult:
         """Return the conservative three-state result for one in-memory input."""
         return self.policy.decide(
@@ -408,6 +422,7 @@ class ObjectPresenceClassifier:
                 values,
                 diagnostics_sink=diagnostics_sink,
                 retention_sink=retention_sink,
+                support_change_sink=support_change_sink,
             )
         )
 
@@ -422,6 +437,8 @@ class _AlignmentChoice:
     change: float | None
     foreground: float | None
     background_change: float | None
+    baseline_support: tuple[float, ...]
+    raw_probe: tuple[float, ...]
     normalized_probe: tuple[float, ...]
     dx: int
     dy: int
@@ -562,6 +579,7 @@ def _compare_with_baseline_support(  # noqa: C901, PLR0912, PLR0915 - explicit e
     *,
     diagnostics_sink: Callable[[str, int], None] | None = None,
     retention_sink: Callable[[ForegroundRetentionFacts], None] | None = None,
+    support_change_sink: Callable[[SupportChangeFacts], None] | None = None,
 ) -> RawComparison:
     """Compare probe pixels against the immutable baseline mask support.
 
@@ -661,6 +679,9 @@ def _compare_with_baseline_support(  # noqa: C901, PLR0912, PLR0915 - explicit e
         values.roi.height,
         roi_pixels,
     )
+    fixed_normalization = _build_luma_normalization(
+        fixed_background_baseline, fixed_background_probe
+    )
     fixed_retention_facts: list[ForegroundRetentionFacts] = []
     (
         fixed_similarity,
@@ -674,12 +695,31 @@ def _compare_with_baseline_support(  # noqa: C901, PLR0912, PLR0915 - explicit e
         fixed_background_baseline,
         fixed_background_probe,
         (fixed_background_indices, values.roi.width),
+        fixed_normalization,
         retention_sink=(fixed_retention_facts.append if retention_sink is not None else None),
         baseline_support_pixel_count=baseline_count,
         present_foreground_retention_threshold=policy.baseline_support_present_foreground_minimum,
     )
     alignment: _AlignmentResolution | None = None
     selected_aligned = False
+    support_change_inputs: (
+        tuple[
+            tuple[float, ...],
+            tuple[float, ...],
+            tuple[float, ...],
+            _LumaNormalization,
+            int,
+            int,
+            int,
+            int,
+            int,
+            int,
+            float,
+            str,
+            float,
+        ]
+        | None
+    ) = None
     if policy.baseline_support_alignment_mode:
         alignment = _aligned_support_choice(
             baseline_luma,
@@ -708,6 +748,22 @@ def _compare_with_baseline_support(  # noqa: C901, PLR0912, PLR0915 - explicit e
             foreground_retention = alignment.choice.foreground
             background_change_ratio = alignment.choice.background_change
             normalized_probe = alignment.choice.normalized_probe
+            if alignment.normalization is not None:
+                support_change_inputs = (
+                    alignment.choice.baseline_support,
+                    alignment.choice.raw_probe,
+                    alignment.choice.normalized_probe,
+                    alignment.normalization,
+                    baseline_count,
+                    values.baseline_mask.width,
+                    values.baseline_mask.height,
+                    alignment.choice.dx,
+                    alignment.choice.dy,
+                    alignment.choice.rotation_degrees,
+                    alignment.choice.overlap,
+                    "aligned",
+                    alignment.choice.margin,
+                )
         else:
             # A low-margin alignment is ambiguous.  Preserve fixed baseline
             # support metrics so removal remains observable instead of letting
@@ -750,6 +806,22 @@ def _compare_with_baseline_support(  # noqa: C901, PLR0912, PLR0915 - explicit e
             alignment_state = (
                 "not_required" if fixed_stability.scene_stable else "no_valid_candidate"
             )
+        if not selected_aligned and fixed_normalization is not None:
+            support_change_inputs = (
+                support_baseline,
+                support_probe,
+                fixed_normalized_probe,
+                fixed_normalization,
+                baseline_count,
+                values.baseline_mask.width,
+                values.baseline_mask.height,
+                0,
+                0,
+                0,
+                1.0,
+                alignment_state,
+                alignment_fields[5] or 0.0,
+            )
     else:
         support_luma_similarity = fixed_similarity
         support_luma_ncc = fixed_support_ncc
@@ -766,6 +838,22 @@ def _compare_with_baseline_support(  # noqa: C901, PLR0912, PLR0915 - explicit e
         )
         alignment_fields = (None, None, None, None, None, None)
         alignment_state = "not_required"
+        if fixed_normalization is not None:
+            support_change_inputs = (
+                support_baseline,
+                support_probe,
+                fixed_normalized_probe,
+                fixed_normalization,
+                baseline_count,
+                values.baseline_mask.width,
+                values.baseline_mask.height,
+                0,
+                0,
+                0,
+                1.0,
+                alignment_state,
+                0.0,
+            )
     if retention_sink is not None:
         retention_facts = (
             fixed_retention_facts[0] if not selected_aligned and fixed_retention_facts else None
@@ -824,7 +912,7 @@ def _compare_with_baseline_support(  # noqa: C901, PLR0912, PLR0915 - explicit e
             ),
             VisualReason.ZERO_LUMA_VARIANCE,
         )
-    return RawComparison(
+    comparison = RawComparison(
         baseline_mask_pixel_count=baseline_count,
         probe_mask_pixel_count=probe_count or None,
         roi_pixel_count=roi_pixels,
@@ -873,6 +961,48 @@ def _compare_with_baseline_support(  # noqa: C901, PLR0912, PLR0915 - explicit e
         baseline_support_scene_stable=fixed_stability.scene_stable,
         baseline_support_scene_stability_veto_reason=fixed_stability.veto_reason,
     )
+    if support_change_sink is not None and support_change_inputs is not None:
+        with suppress(Exception):
+            (
+                selected_baseline,
+                selected_raw_probe,
+                selected_normalized_probe,
+                selected_normalization,
+                selected_support_count,
+                mask_width,
+                mask_height,
+                dx,
+                dy,
+                rotation,
+                overlap,
+                selected_alignment_state,
+                alignment_margin,
+            ) = support_change_inputs
+            facts = _make_support_change_facts(
+                selected_baseline,
+                selected_raw_probe,
+                selected_normalized_probe,
+                selected_normalization,
+                baseline_mask_fingerprint(values.baseline_mask),
+                selected_support_count,
+                mask_width,
+                mask_height,
+                len(alignment_background_baseline)
+                if selected_aligned
+                else len(fixed_background_baseline),
+                len(alignment_background_probe)
+                if selected_aligned
+                else len(fixed_background_probe),
+                dx,
+                dy,
+                rotation,
+                overlap,
+                selected_alignment_state,
+                alignment_margin,
+            )
+            if facts is not None and facts.support_change_ratio == change_ratio:
+                support_change_sink(facts)
+    return comparison
 
 
 def _clear_background_ratio(
@@ -1028,6 +1158,120 @@ def _support_luma_metrics(  # noqa: PLR0913 - explicit support/background inputs
         background_changed,
         normalized,
     )
+
+
+def _make_support_change_facts(  # noqa: PLR0913 - exact selected comparison inputs
+    baseline: tuple[float, ...],
+    raw_probe: tuple[float, ...],
+    normalized_probe: tuple[float, ...],
+    normalization: _LumaNormalization,
+    mask_fingerprint: str,
+    support_population: int,
+    mask_width: int,
+    mask_height: int,
+    baseline_background_count: int,
+    probe_background_count: int,
+    dx: int,
+    dy: int,
+    rotation: int,
+    overlap: float,
+    alignment_state: str,
+    alignment_margin: float,
+) -> SupportChangeFacts | None:
+    """Summarize values already used by the selected authoritative comparison."""
+    if (
+        not baseline
+        or len(baseline) != len(raw_probe)
+        or len(baseline) != len(normalized_probe)
+        or support_population < len(baseline)
+    ):
+        return None
+    preclip = tuple(
+        (value - normalization.probe_location) * normalization.scale
+        + normalization.baseline_location
+        for value in raw_probe
+    )
+    if not all(math.isfinite(value) for value in preclip):
+        return None
+    changed = tuple(
+        abs(left - right) > _SUPPORT_CHANGE_THRESHOLD
+        for left, right in zip(baseline, normalized_probe, strict=True)
+    )
+    raw_changed = sum(
+        abs(left - right) > _SUPPORT_CHANGE_THRESHOLD
+        for left, right in zip(baseline, raw_probe, strict=True)
+    )
+    preclip_changed = sum(
+        abs(left - right) > _SUPPORT_CHANGE_THRESHOLD
+        for left, right in zip(baseline, preclip, strict=True)
+    )
+    clipped_low = tuple(value < 0.0 for value in preclip)
+    clipped_high = tuple(value > _LUMA_MAXIMUM for value in preclip)
+    non_clipped = tuple(
+        not low and not high for low, high in zip(clipped_low, clipped_high, strict=True)
+    )
+    histogram = [0, 0, 0, 0, 0, 0]
+    for left, right in zip(baseline, normalized_probe, strict=True):
+        difference = abs(left - right)
+        bucket = next(
+            (
+                index
+                for index, limit in enumerate(_SUPPORT_CHANGE_HISTOGRAM_LIMITS)
+                if difference <= limit
+            ),
+            len(_SUPPORT_CHANGE_HISTOGRAM_LIMITS),
+        )
+        histogram[bucket] += 1
+    changed_count = sum(changed)
+    valid_count = len(baseline)
+    offset = normalization.baseline_location - normalization.probe_location * normalization.scale
+    payload: dict[str, object] = {
+        "baseline_support_pixel_count": support_population,
+        "valid_support_pixel_count": valid_count,
+        "excluded_support_pixel_count": support_population - valid_count,
+        "changed_support_pixel_count": changed_count,
+        "unchanged_support_pixel_count": valid_count - changed_count,
+        "support_change_ratio": quantize_metric(changed_count / valid_count),
+        "difference_le_24_count": histogram[0],
+        "difference_gt_24_le_30_count": histogram[1],
+        "difference_gt_30_le_32_count": histogram[2],
+        "difference_gt_32_le_34_count": histogram[3],
+        "difference_gt_34_le_40_count": histogram[4],
+        "difference_gt_40_count": histogram[5],
+        "raw_probe_changed_count": raw_changed,
+        "normalized_preclip_changed_count": preclip_changed,
+        "normalized_postclip_changed_count": changed_count,
+        "clipped_low_count": sum(clipped_low),
+        "clipped_high_count": sum(clipped_high),
+        "non_clipped_count": sum(non_clipped),
+        "changed_and_clipped_low_count": sum(
+            is_changed and is_low for is_changed, is_low in zip(changed, clipped_low, strict=True)
+        ),
+        "changed_and_clipped_high_count": sum(
+            is_changed and is_high
+            for is_changed, is_high in zip(changed, clipped_high, strict=True)
+        ),
+        "changed_and_non_clipped_count": sum(
+            is_changed and is_non_clipped
+            for is_changed, is_non_clipped in zip(changed, non_clipped, strict=True)
+        ),
+        "baseline_background_pixel_count": baseline_background_count,
+        "probe_background_pixel_count": probe_background_count,
+        "baseline_background_median": normalization.baseline_location,
+        "probe_background_median": normalization.probe_location,
+        "normalization_scale": normalization.scale,
+        "normalization_offset": offset,
+        "alignment_dx": dx,
+        "alignment_dy": dy,
+        "alignment_rotation_degrees": rotation,
+        "alignment_overlap": overlap,
+        "alignment_state": alignment_state,
+        "alignment_margin": alignment_margin,
+        "support_mask_fingerprint": mask_fingerprint,
+        "baseline_mask_width": mask_width,
+        "baseline_mask_height": mask_height,
+    }
+    return SupportChangeFacts.from_payload(payload)
 
 
 def _make_foreground_retention_facts(  # noqa: PLR0913 - explicit support facts
@@ -1444,6 +1688,8 @@ def _aligned_support_choice(  # noqa: PLR0913 - each alignment boundary is expli
                     change,
                     foreground,
                     background_change,
+                    candidate_baseline,
+                    support_probe,
                     normalized_probe,
                     dx,
                     dy,
@@ -1493,6 +1739,8 @@ def _aligned_support_choice(  # noqa: PLR0913 - each alignment boundary is expli
                 None,
                 None,
                 None,
+                (),
+                (),
                 (),
                 0,
                 0,
