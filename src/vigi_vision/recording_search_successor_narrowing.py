@@ -25,6 +25,7 @@ from vigi_vision.recording_search_successor import (
     MultiSegmentCoarsePlan,
     TargetAvailability,
 )
+from vigi_vision.recording_search_successor_acquisition import successor_midpoint_target_id
 from vigi_vision.recording_search_successor_classification import (
     SuccessorClassificationAuthority,
     SuccessorCoarseClassificationResult,
@@ -33,6 +34,7 @@ from vigi_vision.recording_search_successor_classification import (
     SuccessorObservationState,
     is_bridgeable_visual_uncertainty,
 )
+from vigi_vision.recording_search_successor_diagnostics import probe_performance_scope
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -292,19 +294,25 @@ class SuccessorBinaryNarrowingService:
                 segment_id,
                 None,
             )
-            acquisition = self.acquisition_service.acquire_midpoint(plan, target)
-            if cancellation is None:
-                observation = self.classification_service.classify_target(
-                    plan, target, acquisition, authority
-                )
-            else:
-                observation = self.classification_service.classify_target(
-                    plan,
-                    target,
-                    acquisition,
-                    authority,
-                    cancellation=cancellation,
-                )
+            with probe_performance_scope(
+                plan_id=plan.plan_id,
+                target_id=successor_midpoint_target_id(plan, target),
+                requested_time_utc=target.requested_time_utc,
+                observation_role="narrowing",
+            ):
+                acquisition = self.acquisition_service.acquire_midpoint(plan, target)
+                if cancellation is None:
+                    observation = self.classification_service.classify_target(
+                        plan, target, acquisition, authority
+                    )
+                else:
+                    observation = self.classification_service.classify_target(
+                        plan,
+                        target,
+                        acquisition,
+                        authority,
+                        cancellation=cancellation,
+                    )
             midpoint_observations.append(observation)
             progress_generation += 1
             outcome = _completion_for_observation(observation)

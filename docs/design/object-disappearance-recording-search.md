@@ -242,6 +242,29 @@ calibration only. It stores no raw mask, support coordinates, or pixels;
 historical absence is valid, and public decisions and strict reopen do not
 depend on it.
 
+The separate `probe-performance-v1/{final_observation_id}.json` sidecar stores
+bounded per-probe elapsed timings and classifier work counts for RCA before
+optimization. Durations are integer milliseconds measured from monotonic clocks;
+the record is bound only after terminal/evidence publication to the final
+observation ID. `replay_total_ms` runs from replay lifecycle start through
+temporary-clip cleanup, and `replay_cleanup_tail_ms` is exactly
+`replay_total_ms - replay_process_exit_ms` when process exit was observed.
+`probe_total_ms` covers the successor acquisition call through its classified
+observation result. Replay acquisition completes before classification begins
+in this path; probe total is the encompassing measured wall duration, not a sum
+of replay and classifier values, and includes acquisition work outside replay
+such as frame selection and decode. B4 startup, preprocessing, inference,
+alignment, IPC wait, and cleanup values are measured sub-stages:
+`ipc_result_ms` includes child startup and inference wait, alignment is inside
+inference, and B4 cleanup is after result receipt but inside classifier total.
+If one observation invokes B4 more than once, measured stage values and counts
+are accumulated across those calls. These overlapping intervals must not be
+blindly summed. Missing
+lifecycle or classifier stages are null, not zero. The sidecar is
+non-authoritative; write failure, malformed facts, or
+historical absence cannot affect classification, search, terminal publication,
+or strict reopen. Historical runs need no migration.
+
 Successor classification uses the additive
 `efficient-sam-ti-baseline-support-v3` policy. Each probe is compared against
 the immutable baseline support after bounded local translation/rotation

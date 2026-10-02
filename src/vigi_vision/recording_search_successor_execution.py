@@ -55,6 +55,9 @@ from vigi_vision.recording_search_successor import (
 from vigi_vision.recording_search_successor_acquisition import (
     SuccessorTargetAcquisitionService,
     SuccessorTargetStatus,
+    successor_anchor_target_id,
+    successor_midpoint_target_id,
+    successor_target_id,
 )
 from vigi_vision.recording_search_successor_candidate_search import (
     EvidenceNarrowingCancelledError,
@@ -83,9 +86,15 @@ from vigi_vision.recording_search_successor_classification import (
 )
 from vigi_vision.recording_search_successor_diagnostics import (
     SuccessorDiagnosticRepository,
+    completed_probe_performance_captures,
     diagnostic_scope,
+    performance_run_scope,
     persist_foreground_retention,
+    persist_probe_performance,
     persist_support_change,
+    probe_performance_scope,
+    record_classifier_timing,
+    record_classifier_total,
 )
 from vigi_vision.recording_search_successor_evidence import (
     LEGACY_EVIDENCE_VERSION,
@@ -701,6 +710,9 @@ class SuccessorB4Classifier:
                 support_change_sink=support_change_diagnostics.append,
             )
         except B4ProcessTimeout as error:
+            if timing_events:
+                record_classifier_timing(timing_events[-1])
+            record_classifier_total(max(0, round((perf_counter() - started) * 1000)))
             diagnostic: dict[str, object] = (
                 dict(timing_events[-1]) if timing_events else {"error_code": error.code}
             )
@@ -712,8 +724,14 @@ class SuccessorB4Classifier:
                 "classifier_timeout", diagnostic=diagnostic
             ) from error
         except B4ProcessCancelled as error:
+            if timing_events:
+                record_classifier_timing(timing_events[-1])
+            record_classifier_total(max(0, round((perf_counter() - started) * 1000)))
             raise SuccessorClassificationCancelledError from error
         except B4ProcessError as error:
+            if timing_events:
+                record_classifier_timing(timing_events[-1])
+            record_classifier_total(max(0, round((perf_counter() - started) * 1000)))
             diagnostic = dict(timing_events[-1]) if timing_events else {"error_code": error.code}
             if not timing_events and error.code == "worker_start_failed":
                 diagnostic.update(
@@ -723,6 +741,9 @@ class SuccessorB4Classifier:
                 "classifier_failed", diagnostic=diagnostic
             ) from error
         except ClassificationPreparationError as error:
+            if timing_events:
+                record_classifier_timing(timing_events[-1])
+            record_classifier_total(max(0, round((perf_counter() - started) * 1000)))
             safe_code = (
                 error.reason.value
                 if error.reason
@@ -742,6 +763,9 @@ class SuccessorB4Classifier:
             raise SuccessorClassificationContractError
         reason = getattr(result, "reason_code", None)
         elapsed_ms = max(0, round((perf_counter() - started) * 1000))
+        if timing_events:
+            record_classifier_timing(timing_events[-1])
+        record_classifier_total(elapsed_ms)
         return SuccessorClassifierResult(
             outcome,
             None if reason is None else str(reason.value),
@@ -892,10 +916,13 @@ class SuccessorExecutionService:
         *,
         cancellation: Callable[[], bool] | None = None,
     ) -> SuccessorTerminal:
-        with diagnostic_scope(
-            SuccessorDiagnosticRepository(self.publisher.root),
-            prepared.request.investigation_id,
-            prepared.request.run_id,
+        with (
+            diagnostic_scope(
+                SuccessorDiagnosticRepository(self.publisher.root),
+                prepared.request.investigation_id,
+                prepared.request.run_id,
+            ),
+            performance_run_scope(),
         ):
             return self._execute(prepared, cancellation=cancellation)
 
@@ -916,14 +943,20 @@ class SuccessorExecutionService:
             if cancellation is not None and cancellation():
                 return self._publish_interrupted(prepared)
             anchor_target = _anchor_target(prepared.plan)
-            anchor_acquisition = self.acquisition.acquire_anchor(prepared.plan, anchor_target)
-            anchor_observation = self.classification.classify_anchor_target(
-                prepared.plan,
-                anchor_target,
-                anchor_acquisition,
-                prepared.authority,
-                cancellation=cancellation,
-            )
+            with probe_performance_scope(
+                plan_id=prepared.plan.plan_id,
+                target_id=successor_anchor_target_id(prepared.plan, anchor_target),
+                requested_time_utc=anchor_target.requested_time_utc,
+                observation_role="anchor",
+            ):
+                anchor_acquisition = self.acquisition.acquire_anchor(prepared.plan, anchor_target)
+                anchor_observation = self.classification.classify_anchor_target(
+                    prepared.plan,
+                    anchor_target,
+                    anchor_acquisition,
+                    prepared.authority,
+                    cancellation=cancellation,
+                )
             if cancellation is not None and cancellation():
                 return self._publish_interrupted(prepared)
             coarse_observations: list[SuccessorObservation] = []
@@ -934,14 +967,20 @@ class SuccessorExecutionService:
             for target in prepared.plan.targets:
                 if cancellation is not None and cancellation():
                     return self._publish_interrupted(prepared)
-                acquisition = self.acquisition.acquire(prepared.plan, target)
-                observation = self.classification.classify_coarse_target(
-                    prepared.plan,
-                    target,
-                    acquisition,
-                    prepared.authority,
-                    cancellation=cancellation,
-                )
+                with probe_performance_scope(
+                    plan_id=prepared.plan.plan_id,
+                    target_id=successor_target_id(prepared.plan, target),
+                    requested_time_utc=target.requested_time_utc,
+                    observation_role="coarse",
+                ):
+                    acquisition = self.acquisition.acquire(prepared.plan, target)
+                    observation = self.classification.classify_coarse_target(
+                        prepared.plan,
+                        target,
+                        acquisition,
+                        prepared.authority,
+                        cancellation=cancellation,
+                    )
                 if cancellation is not None and cancellation():
                     return self._publish_interrupted(prepared)
                 coarse_observations.append(observation)
@@ -1166,38 +1205,44 @@ class SuccessorExecutionService:
                 segment_id,
                 None,
             )
-            acquisition = self.acquisition.acquire_midpoint(prepared.plan, target)
-            if cancellation is not None and cancellation():
-                log_cancelled()
-                raise SuccessorClassificationCancelledError
-            acquisition_frame_time = acquisition.frame_utc
-            if (
-                acquisition.frame_sha256 is not None
-                and acquisition_frame_time is not None
-                and (acquisition.frame_sha256, acquisition_frame_time) in known_frame_keys
+            with probe_performance_scope(
+                plan_id=prepared.plan.plan_id,
+                target_id=successor_midpoint_target_id(prepared.plan, target),
+                requested_time_utc=target.requested_time_utc,
+                observation_role="fallback",
             ):
-                _safe_log(
-                    "phase7e.coarse_sampling_probe",
-                    stage="skipped",
-                    requested_time_utc=_timestamp(requested_time),
-                    actual_frame_time_utc=_timestamp(acquisition_frame_time),
-                    frame_sha256=acquisition.frame_sha256,
-                    reason="duplicate_frame",
-                    route="reused_existing_frame",
-                )
-                known_requested.add(requested_time)
-                continue
-            try:
-                observation = self.classification.classify_target(
-                    prepared.plan,
-                    target,
-                    acquisition,
-                    prepared.authority,
-                    cancellation=cancellation,
-                )
-            except SuccessorClassificationCancelledError:
-                log_cancelled()
-                raise
+                acquisition = self.acquisition.acquire_midpoint(prepared.plan, target)
+                if cancellation is not None and cancellation():
+                    log_cancelled()
+                    raise SuccessorClassificationCancelledError
+                acquisition_frame_time = acquisition.frame_utc
+                if (
+                    acquisition.frame_sha256 is not None
+                    and acquisition_frame_time is not None
+                    and (acquisition.frame_sha256, acquisition_frame_time) in known_frame_keys
+                ):
+                    _safe_log(
+                        "phase7e.coarse_sampling_probe",
+                        stage="skipped",
+                        requested_time_utc=_timestamp(requested_time),
+                        actual_frame_time_utc=_timestamp(acquisition_frame_time),
+                        frame_sha256=acquisition.frame_sha256,
+                        reason="duplicate_frame",
+                        route="reused_existing_frame",
+                    )
+                    known_requested.add(requested_time)
+                    continue
+                try:
+                    observation = self.classification.classify_target(
+                        prepared.plan,
+                        target,
+                        acquisition,
+                        prepared.authority,
+                        cancellation=cancellation,
+                    )
+                except SuccessorClassificationCancelledError:
+                    log_cancelled()
+                    raise
             if cancellation is not None and cancellation():
                 log_cancelled()
                 raise SuccessorClassificationCancelledError
@@ -1740,6 +1785,7 @@ class SuccessorExecutionService:
             terminal_publication_outcome="published",
         )
         self._persist_final_retention_diagnostics(prepared, result, observations)
+        self._persist_final_probe_performance_diagnostics(prepared, result, observations)
         return result
 
     def _persist_final_retention_diagnostics(
@@ -1818,6 +1864,111 @@ class SuccessorExecutionService:
             except Exception:  # noqa: BLE001 - optional diagnostic isolation.
                 _safe_log(
                     "phase7e.support_change_diagnostic",
+                    stage="persist_failed",
+                    error_code="diagnostic_unavailable",
+                )
+
+    def _persist_final_probe_performance_diagnostics(
+        self,
+        prepared: SuccessorPreparedExecution,
+        terminal: SuccessorTerminal,
+        observations: tuple[SuccessorObservation, ...],
+    ) -> None:
+        """Bind completed captures only to observations in committed evidence."""
+        evidence_repository = self.evidence_repository
+        if (
+            evidence_repository is None
+            or len(terminal.coarse_observation_ids) != len(observations)
+            or len(terminal.coarse_observations) != len(observations)
+            or terminal.investigation_id != prepared.request.investigation_id
+            or terminal.run_id != prepared.request.run_id
+            or terminal.plan_id != prepared.plan.plan_id
+        ):
+            return
+        try:
+            evidence = evidence_repository.read(terminal.investigation_id, terminal.run_id)
+            if (
+                evidence is None
+                or evidence.get("plan_id") != terminal.plan_id
+                or evidence.get("terminal_status") != terminal.status
+                or evidence.get("terminal_reason") != terminal.reason_code
+                or not isinstance(evidence.get("entries"), list)
+            ):
+                return
+            evidence_entries = cast("list[object]", evidence["entries"])
+            evidence_by_id: dict[str, dict[str, object]] = {}
+            for item in evidence_entries:
+                if not isinstance(item, dict):
+                    continue
+                evidence_item = cast("dict[str, object]", item)
+                observation_id = evidence_item.get("observation_id")
+                if isinstance(observation_id, str):
+                    evidence_by_id[observation_id] = evidence_item
+        except Exception:  # noqa: BLE001 - diagnostic binding failure is optional.
+            return
+        captures = completed_probe_performance_captures()
+        for index, observation in enumerate(observations):
+            try:
+                if not _retention_identity_matches_final_observation(
+                    prepared, terminal, observation, index=index
+                ):
+                    continue
+                evidence_observation = evidence_by_id.get(observation.observation_id)
+                if not isinstance(evidence_observation, dict):
+                    continue
+                if any(
+                    evidence_observation.get(key) != expected
+                    for key, expected in (
+                        ("plan_id", observation.plan_id),
+                        ("target_id", observation.target_id),
+                        ("observation_id", observation.observation_id),
+                        ("authority_identity", observation.authority_identity),
+                        ("reference_frame_resource_id", observation.reference_frame_resource_id),
+                        ("roi_identity", observation.roi_identity),
+                        ("classifier_policy_identity", observation.classifier_policy_identity),
+                    )
+                ):
+                    continue
+                if not _same_utc_time(
+                    evidence_observation.get("requested_time_utc"),
+                    _timestamp(observation.requested_time_utc),
+                ):
+                    continue
+                if observation.frame_utc is None:
+                    if evidence_observation.get("frame_utc") is not None:
+                        continue
+                elif not _same_utc_time(
+                    evidence_observation.get("frame_utc"), _timestamp(observation.frame_utc)
+                ):
+                    continue
+                matches = tuple(
+                    capture
+                    for capture in captures
+                    if capture.matches(
+                        observation.plan_id,
+                        observation.target_id,
+                        _timestamp(observation.requested_time_utc),
+                    )
+                )
+                if len(matches) != 1:
+                    continue
+                capture = matches[0]
+                record = capture.record(
+                    investigation_id=terminal.investigation_id,
+                    run_id=terminal.run_id,
+                    observation_id=observation.observation_id,
+                    selected_frame_time_utc=(
+                        None if observation.frame_utc is None else _timestamp(observation.frame_utc)
+                    ),
+                    reference_identity=observation.authority_identity,
+                    reference_frame_resource_id=observation.reference_frame_resource_id,
+                    roi_identity=observation.roi_identity,
+                    classifier_policy_identity=observation.classifier_policy_identity,
+                )
+                persist_probe_performance(record)
+            except Exception:  # noqa: BLE001 - optional sidecar cannot affect authority.
+                _safe_log(
+                    "phase7e.probe_performance_diagnostic",
                     stage="persist_failed",
                     error_code="diagnostic_unavailable",
                 )

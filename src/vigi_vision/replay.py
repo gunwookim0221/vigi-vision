@@ -22,6 +22,11 @@ from pydantic import SecretStr
 from typing_extensions import override
 
 from vigi_vision.recording import ReplayRequest
+from vigi_vision.recording_search_successor_diagnostics import (
+    ProbePerformanceCapture,
+    current_probe_performance_capture,
+    record_replay_progress,
+)
 from vigi_vision.replay_progress import (
     ReplayProgressDiagnostics,
     ReplayProgressRunner,
@@ -151,6 +156,7 @@ class _ReplayLifecycle:
     output_path: Path
     deadline_seconds: float
     diagnostics: ReplayProgressDiagnostics | None
+    performance_capture: ProbePerformanceCapture | None = field(default=None, repr=False)
     started_at: float = field(default_factory=perf_counter)
     output_created: bool = False
     last_size_bytes: int = 0
@@ -316,6 +322,12 @@ class _ReplayLifecycle:
             "cleanup_outcome": cleanup_outcome,
         }
         _safe_replay_log(payload)
+        record_replay_progress(
+            stage,
+            elapsed_ms,
+            exit_code=exit_code,
+            capture=self.performance_capture,
+        )
 
 
 def _progress_milliseconds(diagnostics: ReplayProgressDiagnostics | None) -> int | None:
@@ -438,7 +450,13 @@ class ReplayExtractor:
                 if timeout_seconds is None
                 else min(float(normal_timeout), timeout_seconds)
             )
-            lifecycle = _ReplayLifecycle(request, output_path, effective_timeout, diagnostics)
+            lifecycle = _ReplayLifecycle(
+                request,
+                output_path,
+                effective_timeout,
+                diagnostics,
+                performance_capture=current_probe_performance_capture(),
+            )
             lifecycle.start()
             completed = self._run(
                 arguments,

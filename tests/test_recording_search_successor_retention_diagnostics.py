@@ -429,6 +429,31 @@ def test_historical_run_and_reopen_remain_valid_without_retention_sidecars(
     assert run.service.evidence_repository.read(run.investigation_id, run.run_id) == run.evidence
 
 
+def test_historical_reopen_does_not_require_probe_performance_sidecars(tmp_path: Path) -> None:
+    run = _successful_run(tmp_path, include_diagnostics=False)
+    repository = SuccessorDiagnosticRepository(run.service.publisher.root)
+    directory = (
+        repository.root / run.investigation_id / run.run_id / "diagnostics" / "probe-performance-v1"
+    )
+    for path in directory.glob("*.json"):
+        path.unlink()
+
+    assert (
+        repository.read_probe_performance(
+            run.investigation_id,
+            run.run_id,
+            next(
+                str(entry["observation_id"])
+                for entry in run.evidence["entries"]
+                if entry.get("role") == "anchor"
+            ),
+        )
+        is None
+    )
+    assert run.service.publisher.read(run.investigation_id, run.run_id) == run.terminal
+    assert run.service.evidence_repository.read(run.investigation_id, run.run_id) == run.evidence
+
+
 def test_legacy_provisional_sidecar_is_ignored_and_not_migrated(tmp_path: Path) -> None:
     run = _successful_run(tmp_path, include_diagnostics=False)
     repository = SuccessorDiagnosticRepository(run.service.publisher.root)
@@ -550,6 +575,7 @@ def test_support_change_sidecars_bind_to_final_ids_and_coexist_with_retention(
     diagnostics = run.service.publisher.root / run.investigation_id / run.run_id / "diagnostics"
     support_directory = diagnostics / "support-change-v1"
     retention_directory = diagnostics / "foreground-retention-v1"
+    performance_directory = diagnostics / "probe-performance-v1"
     evidence_by_id = {
         str(entry["observation_id"]): entry
         for entry in run.evidence["entries"]
@@ -557,10 +583,12 @@ def test_support_change_sidecars_bind_to_final_ids_and_coexist_with_retention(
     }
     support_paths = tuple(support_directory.glob("*.json"))
     retention_ids = {path.stem for path in retention_directory.glob("*.json")}
+    performance_ids = {path.stem for path in performance_directory.glob("*.json")}
     support_ids = {path.stem for path in support_paths}
 
     assert support_ids
     assert support_ids == retention_ids
+    assert support_ids == performance_ids
     assert support_ids <= set(evidence_by_id)
     anchor_ids = {
         observation_id
@@ -599,6 +627,35 @@ def test_support_change_sidecars_bind_to_final_ids_and_coexist_with_retention(
         repository.read_retention(run.investigation_id, run.run_id, next(iter(support_ids)))
         is not None
     )
+    for observation_id in performance_ids:
+        performance = repository.read_probe_performance(
+            run.investigation_id, run.run_id, observation_id
+        )
+        assert performance is not None
+        assert performance["observation_id"] == observation_id
+        assert performance["diagnostic_kind"] == "probe_performance"
+
+
+def test_probe_performance_write_failure_keeps_other_diagnostics_and_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_publish(_self: object, _record: object) -> None:
+        message = "optional performance sidecar failure"
+        raise OSError(message)
+
+    monkeypatch.setattr(
+        SuccessorDiagnosticRepository,
+        "publish_probe_performance",
+        fail_publish,
+    )
+    run = _successful_run(tmp_path, include_diagnostics=True)
+    diagnostics = run.service.publisher.root / run.investigation_id / run.run_id / "diagnostics"
+
+    assert run.terminal["status"] == "FOUND"
+    assert run.evidence["terminal_status"] == "FOUND"
+    assert tuple((diagnostics / "foreground-retention-v1").glob("*.json"))
+    assert tuple((diagnostics / "support-change-v1").glob("*.json"))
+    assert not tuple((diagnostics / "probe-performance-v1").glob("*.json"))
 
 
 def test_real_b4_execution_persists_diagnostics_against_final_evidence_ids(

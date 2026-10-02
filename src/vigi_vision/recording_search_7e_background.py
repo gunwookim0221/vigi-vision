@@ -171,7 +171,7 @@ class Phase7EBackgroundManager:
         with self._admission_lock:
             return self._admit(investigation_id, search_end, request_id, prepared)
 
-    def _admit(  # noqa: C901 - explicit active, cached-complete, and durable admission branches.
+    def _admit(  # noqa: C901, PLR0911, PLR0912, PLR0915 - explicit cached and durable admission branches.
         self,
         investigation_id: str,
         search_end: str,
@@ -184,6 +184,7 @@ class Phase7EBackgroundManager:
             or getattr(prepared, "successor_admission", None) is not None
         )
         completed_receipt: Phase7EStartReceipt | None = None
+        active_receipt: Phase7EStartReceipt | None = None
         with self._lock:
             if self._closed:
                 raise Phase7EPublicError(_UNAVAILABLE)
@@ -196,9 +197,27 @@ class Phase7EBackgroundManager:
                 ):
                     raise Phase7EPublicError(_CONFLICT)
                 receipt = prior.receipt()
-                if receipt.status in {"ACCEPTED", "RUNNING"} or not is_successor:
+                if not is_successor:
                     return receipt
-                completed_receipt = receipt
+                if receipt.status in {"ACCEPTED", "RUNNING"}:
+                    active_receipt = receipt
+                else:
+                    completed_receipt = receipt
+
+        if active_receipt is not None:
+            # Terminal publication may precede worker cleanup and ledger completion.
+            # Strict durable reopen wins without changing the live job or its owner.
+            try:
+                existing = self._service.resolve_existing(prepared)
+            except Phase7EPublicError as error:
+                if error.code != _ALREADY_RUNNING:
+                    raise
+                return active_receipt
+            if existing is None:
+                return active_receipt
+            return Phase7EStartReceipt(
+                request_id, investigation_id, active_receipt.run_id, existing.phase7.status
+            )
 
         if completed_receipt is not None:
             # The process-local ledger deduplicates work but cannot certify a

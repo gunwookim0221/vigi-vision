@@ -63,6 +63,8 @@ from vigi_vision.recording_search_successor_acquisition import (
 )
 from vigi_vision.recording_search_successor_diagnostics import (
     persist_failure,
+    record_classifier_timing,
+    record_classifier_total,
 )
 from vigi_vision.recording_search_successor_search_evidence import (
     SearchEvidence,
@@ -385,16 +387,21 @@ class EfficientSamSuccessorClassifier:
                 cancellation=cancellation,
                 retention_sink=retention_diagnostics.append,
                 support_change_sink=support_change_diagnostics.append,
+                timing_sink=record_classifier_timing,
             )
         except B4ProcessTimeout as error:
+            record_classifier_total(max(0, round((perf_counter() - started) * 1000)))
             raise SuccessorClassificationError("classifier_timeout") from error
         except B4ProcessCancelled as error:
+            record_classifier_total(max(0, round((perf_counter() - started) * 1000)))
             raise SuccessorClassificationCancelledError from error
         except (B4ProcessError, ClassificationPreparationError) as error:
+            record_classifier_total(max(0, round((perf_counter() - started) * 1000)))
             raise SuccessorClassificationError("classifier_failed") from error
         if not isinstance(result, ClassificationResult):
             raise SuccessorClassificationContractError
         elapsed_ms = max(0, round((perf_counter() - started) * 1000))
+        record_classifier_total(elapsed_ms)
         return SuccessorClassifierResult(
             result.outcome,
             None if result.reason_code is None else result.reason_code.value,
@@ -459,16 +466,21 @@ class EfficientSamSuccessorClassifier:
                 baseline_mask=baseline_mask,
                 retention_sink=retention_diagnostics.append,
                 support_change_sink=support_change_diagnostics.append,
+                timing_sink=record_classifier_timing,
             )
         except B4ProcessTimeout as error:
+            record_classifier_total(max(0, round((perf_counter() - started) * 1000)))
             raise SuccessorClassificationError("classifier_timeout") from error
         except B4ProcessCancelled as error:
+            record_classifier_total(max(0, round((perf_counter() - started) * 1000)))
             raise SuccessorClassificationCancelledError from error
         except (B4ProcessError, ClassificationPreparationError) as error:
+            record_classifier_total(max(0, round((perf_counter() - started) * 1000)))
             raise SuccessorClassificationError("classifier_failed") from error
         if not isinstance(result, ClassificationResult):
             raise SuccessorClassificationContractError
         elapsed_ms = max(0, round((perf_counter() - started) * 1000))
+        record_classifier_total(elapsed_ms)
         return SuccessorClassifierResult(
             result.outcome,
             None if result.reason_code is None else result.reason_code.value,

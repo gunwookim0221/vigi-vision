@@ -1379,7 +1379,7 @@ def test_public_retry_reopens_committed_candidate_and_rejects_tampering(
 
 
 @pytest.mark.parametrize("evidence_state", ["valid", "missing", "tampered"])
-def test_completed_same_manager_http_retry_and_status_require_committed_evidence(  # noqa: C901, PLR0915
+def test_completed_same_manager_http_retry_and_status_require_committed_evidence(  # noqa: PLR0915
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, evidence_state: str
 ) -> None:
     confirmed = replace(_confirmed(tmp_path), jpeg_sha256=hashlib.sha256(b"baseline").hexdigest())
@@ -1452,14 +1452,12 @@ def test_completed_same_manager_http_retry_and_status_require_committed_evidence
                 break
             time.sleep(0.01)
         assert result.json()["status"] == "FOUND"
-        # Durable publication can precede the worker's process-local ledger
-        # update; wait until the cached receipt itself is completed.
-        for _ in range(500):
-            settled = client.post("/api/v1/recording-searches", json=body)
-            if settled.json()["status"] == "FOUND":
-                break
-            time.sleep(0.01)
-        assert settled.json()["status"] == "FOUND"
+        # A terminal POST receipt no longer proves worker/ledger completion.
+        # This test specifically exercises retries against a completed ledger.
+        job = app.state.phase7e_background_manager._jobs[body["request_id"]]
+        assert job.future is not None
+        job.future.result(timeout=5)
+        assert job.status == "FOUND"
         assert manifest_path.is_file()
         terminal_before = terminal_path.read_bytes()
         calls_before = extractor.calls
@@ -1494,8 +1492,9 @@ def test_completed_same_manager_http_retry_and_status_require_committed_evidence
         assert status.json()["error"]["code"] == "search_run_corrupt"
 
 
+@pytest.mark.parametrize("durable_active_state", ["running", "missing"])
 def test_active_successor_duplicate_does_not_require_uncommitted_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, durable_active_state: str
 ) -> None:
     started = Event()
     release = Event()
@@ -1550,11 +1549,20 @@ def test_active_successor_duplicate_does_not_require_uncommitted_evidence(
             "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
         )
         assert started.wait(2)
-        duplicate = manager.start(
-            confirmed.investigation_id,
-            "2026-09-04T14:47:32",
-            "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        terminal_path = (
+            tmp_path / "successor" / confirmed.investigation_id / first.run_id / "terminal.json"
         )
+        active_before = terminal_path.read_bytes()
+        try:
+            if durable_active_state == "missing":
+                terminal_path.unlink()  # Test-owned temporary active record only.
+            duplicate = manager.start(
+                confirmed.investigation_id,
+                "2026-09-04T14:47:32",
+                "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            )
+        finally:
+            terminal_path.write_bytes(active_before)
         assert duplicate.run_id == first.run_id
         assert duplicate.status in {"ACCEPTED", "RUNNING"}
         assert calls == 1
@@ -3505,9 +3513,11 @@ def test_successor_runs_through_http_background_and_restart_status(tmp_path: Pat
         )
         assert ten_minute.status_code == 202
         ten_status = client.get(ten_minute.json()["status_url"])
-        for _ in range(100):
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
             if ten_status.json()["status"] not in {"ACCEPTED", "RUNNING"}:
                 break
+            time.sleep(0.01)
             ten_status = client.get(ten_minute.json()["status_url"])
         assert ten_status.json()["status"] == "NOT_FOUND"
         assert ten_status.json()["schema_version"] == 8
@@ -3809,3 +3819,205 @@ def test_successor_browser_surface_runs_through_uvicorn_http_and_reload(  # noqa
             process.wait(timeout=5)
         _stdout, _stderr = process.communicate(timeout=1)
         assert process.returncode in ({0, 3} if os.name == "nt" else {0})
+
+
+@pytest.mark.parametrize(
+    ("diagnostic_mode", "terminal_status", "storage_state"),
+    [
+        ("performance", "FOUND", "valid"),
+        ("retention_support", "FOUND", "valid"),
+        ("performance_disabled", "FOUND", "valid"),
+        ("performance", "NOT_FOUND", "valid"),
+        ("performance", "INCONCLUSIVE", "valid"),
+        ("performance", "FOUND", "conflicting_terminal"),
+        ("performance", "FOUND", "malformed_terminal"),
+        ("performance", "FOUND", "missing_evidence"),
+        ("performance", "FOUND", "tampered_evidence"),
+    ],
+)
+def test_active_successor_duplicate_strictly_reopens_durable_terminal(  # noqa: C901, PLR0912, PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    diagnostic_mode: str,
+    terminal_status: str,
+    storage_state: str,
+) -> None:
+    """Hold the original owner after commit, independently of ledger completion."""
+    entered, release = Event(), Event()
+    confirmed = replace(_confirmed(tmp_path), jpeg_sha256=hashlib.sha256(b"baseline").hexdigest())
+    absent_after = ANCHOR + timedelta(minutes=15 if terminal_status == "FOUND" else 60)
+    execution = _service(tmp_path, absent_after)
+    if terminal_status == "INCONCLUSIVE":
+        execution.acquisition.replay_extractor = _FirstCoarseTimeoutExtractor(
+            tmp_path, absent_after
+        )
+    evidence = SuccessorEvidenceRepository(tmp_path / "successor")
+    execution.evidence_repository = evidence
+    counts = {"worker": 0, "evidence": 0, "terminal": 0}
+    original_run = Phase7EBackgroundManager._run
+    original_stage = evidence.stage
+    original_terminal = execution.publisher.publish_terminal
+
+    def run(manager: Phase7EBackgroundManager, job: object) -> None:
+        counts["worker"] += 1
+        original_run(manager, job)  # type: ignore[arg-type]
+
+    def stage(*args: object, **kwargs: object) -> object:
+        counts["evidence"] += 1
+        return original_stage(*args, **kwargs)  # type: ignore[arg-type]
+
+    def publish_terminal(*args: object, **kwargs: object) -> object:
+        counts["terminal"] += 1
+        return original_terminal(*args, **kwargs)  # type: ignore[arg-type]
+
+    hook = (
+        "_persist_final_probe_performance_diagnostics"
+        if diagnostic_mode == "performance"
+        else "_persist_final_retention_diagnostics"
+    )
+    original_diagnostic = getattr(SuccessorExecutionService, hook)
+
+    def pause(service: SuccessorExecutionService, *args: object, **kwargs: object) -> None:
+        entered.set()
+        assert release.wait(15), "test did not release post-terminal diagnostic"
+        original_diagnostic(service, *args, **kwargs)
+
+    monkeypatch.setattr(Phase7EBackgroundManager, "_run", run)
+    monkeypatch.setattr(evidence, "stage", stage)
+    monkeypatch.setattr(execution.publisher, "publish_terminal", publish_terminal)
+    monkeypatch.setattr(SuccessorExecutionService, hook, pause)
+    if diagnostic_mode == "performance_disabled":
+        monkeypatch.setattr(
+            SuccessorExecutionService,
+            "_persist_final_probe_performance_diagnostics",
+            lambda *_args, **_kwargs: None,
+        )
+
+    class _Confirmation:
+        def load_confirmed(self, investigation_id: str) -> ConfirmedInvestigationInput:
+            assert investigation_id == confirmed.investigation_id
+            return confirmed
+
+    policy, classifier_policy, object_policy = approved_phase7e_policy()
+    public = Phase7EPublicService(
+        RecordingSearch7ERepository(tmp_path / "legacy"),
+        SimpleNamespace(),
+        _Confirmation(),
+        None,
+        None,
+        policy,
+        classifier_policy,
+        object_policy,
+        SimpleNamespace(status=lambda *_args: (None, None)),
+        lambda: ANCHOR + timedelta(hours=1),
+        None,
+        execution,
+    )
+    app = FastAPI()
+    install_recording_search_routes(app, None, CapacityLimiter(2), phase7e_service=public)
+    manager = app.state.phase7e_background_manager
+    request_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    body = {
+        "investigation_id": confirmed.investigation_id,
+        "search_end": "2026-09-04T14:47:32",
+        "request_id": request_id,
+    }
+    with TestClient(app) as client:
+        accepted = client.post("/api/v1/recording-searches", json=body)
+        assert accepted.status_code == 202
+        try:
+            assert entered.wait(5)
+            run_id = accepted.json()["run_id"]
+            route = accepted.json()["status_url"]
+            job = manager._jobs[request_id]
+            assert job.status == "RUNNING"
+            assert job.future is not None
+            assert not job.future.done()
+            assert job.ownership is not None
+            assert job.ownership.held
+            assert manager._active_request_id == request_id
+            assert client.get(route).json()["status"] == terminal_status
+            root = tmp_path / "successor" / confirmed.investigation_id / run_id
+            terminal_path = root / "terminal.json"
+            manifest_path = root / "evidence" / "manifest.json"
+            terminal_before = terminal_path.read_bytes()
+            evidence_before = manifest_path.read_bytes()
+            calls_before = execution.acquisition.replay_extractor.calls
+            assert counts == {"worker": 1, "evidence": 1, "terminal": 1}
+            conflict = client.post(
+                "/api/v1/recording-searches",
+                json={**body, "search_end": "2026-09-04T14:48:32"},
+            )
+            assert conflict.status_code == 409
+            assert conflict.json()["error"]["code"] == "request_conflict"
+            try:
+                if storage_state == "conflicting_terminal":
+                    terminal = json.loads(terminal_before)
+                    terminal["source_timezone"] = "UTC"
+                    terminal_path.write_text(json.dumps(terminal), encoding="utf-8")
+                elif storage_state == "malformed_terminal":
+                    terminal_path.write_text("{", encoding="utf-8")
+                elif storage_state == "missing_evidence":
+                    manifest_path.unlink()  # Test-owned temporary evidence only.
+                elif storage_state == "tampered_evidence":
+                    manifest = json.loads(evidence_before)
+                    manifest["plan_id"] = "successor-plan-v1-tampered"
+                    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                retry = client.post("/api/v1/recording-searches", json=body)
+                status = client.get(route)
+                if storage_state == "valid":
+                    assert status.status_code == 200
+                    assert retry.status_code == 202
+                    assert retry.json()["status"] == status.json()["status"] == terminal_status
+                    fresh = Phase7EBackgroundManager(public)
+                    try:
+                        assert (
+                            fresh.status(confirmed.investigation_id, run_id).phase7.status
+                            == terminal_status
+                        )
+                        assert fresh.start(**body).status == terminal_status
+                    finally:
+                        fresh.close()
+                elif storage_state == "conflicting_terminal":
+                    assert retry.status_code == 409
+                    assert retry.json()["error"]["code"] == "request_conflict"
+                    fresh = Phase7EBackgroundManager(public)
+                    try:
+                        with pytest.raises(Phase7EPublicError, match="request_conflict"):
+                            fresh.start(**body)
+                    finally:
+                        fresh.close()
+                else:
+                    assert status.status_code == retry.status_code == 500
+                    if storage_state == "malformed_terminal":
+                        # Existing POST/restart admission maps this repository error
+                        # to safe internal_error; GET maps it to search_run_corrupt.
+                        assert retry.json()["error"]["code"] == "internal_error"
+                        fresh = Phase7EBackgroundManager(public)
+                        try:
+                            with pytest.raises(
+                                SuccessorExecutionError, match="successor_publication_corrupt"
+                            ):
+                                fresh.start(**body)
+                        finally:
+                            fresh.close()
+                    else:
+                        assert retry.json()["error"]["code"] == "search_run_corrupt"
+                assert counts == {"worker": 1, "evidence": 1, "terminal": 1}
+                assert execution.acquisition.replay_extractor.calls == calls_before
+                assert manager._jobs[request_id] is job
+                assert job.status == "RUNNING"
+                assert not job.future.done()
+                assert job.ownership.held
+                assert manager._active_request_id == request_id
+            finally:
+                terminal_path.write_bytes(terminal_before)
+                manifest_path.write_bytes(evidence_before)
+        finally:
+            release.set()
+        job.future.result(timeout=5)
+        assert not job.ownership.held
+        assert manager._active_request_id is None
+        assert (
+            client.post("/api/v1/recording-searches", json=body).json()["status"] == terminal_status
+        )

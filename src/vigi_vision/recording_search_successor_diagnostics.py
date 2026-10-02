@@ -1,4 +1,4 @@
-"""Optional, non-authoritative B4 failure facts for successor observations."""
+"""Optional, non-authoritative diagnostics for successor observations."""
 
 # Closed internal record validation uses literal safe error codes and explicit
 # runtime narrowing at its filesystem boundary.
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import stat
@@ -15,7 +16,10 @@ import tempfile
 from collections.abc import Generator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
@@ -46,6 +50,11 @@ _RETENTION_VERSION = "phase7e-foreground-retention-v1"
 _RETENTION_KIND = "foreground_retention"
 _SUPPORT_CHANGE_VERSION = "phase7e-support-change-v1"
 _SUPPORT_CHANGE_KIND = "support_change"
+_PERFORMANCE_VERSION = "phase7e-probe-performance-v1"
+_PERFORMANCE_KIND = "probe_performance"
+_PERFORMANCE_ROLES = frozenset({"anchor", "coarse", "narrowing", "fallback"})
+_MAX_PERFORMANCE_MS = 86_400_000
+_MAX_PERFORMANCE_COUNT = 1_000_000
 _STAGES = frozenset(
     {
         "startup",
@@ -140,6 +149,65 @@ _SUPPORT_CHANGE_FIELDS = (
     )
     | SUPPORT_CHANGE_FACT_FIELDS
 )
+_PERFORMANCE_DURATION_FIELDS = (
+    "replay_total_ms",
+    "replay_first_output_ms",
+    "replay_process_exit_ms",
+    "replay_cleanup_tail_ms",
+    "probe_total_ms",
+    "classifier_total_ms",
+    "request_decoded_ms",
+    "child_startup_ms",
+    "preprocessing_ms",
+    "inference_ms",
+    "child_inference_ms",
+    "alignment_elapsed_ms",
+    "ipc_result_ms",
+    "b4_cleanup_ms",
+)
+_PERFORMANCE_COUNT_FIELDS = (
+    "classifier_invocation_count",
+    "decoder_calls",
+    "segmentation_calls",
+    "baseline_segmentation_calls",
+    "candidate_segmentation_calls",
+    "alignment_comparisons",
+    "alignment_translation_candidates",
+    "alignment_rotation_candidates",
+    "alignment_scale_candidates",
+    "duplicate_processing_count",
+)
+_PERFORMANCE_FIELDS = frozenset(
+    {
+        "version",
+        "diagnostic_kind",
+        "investigation_id",
+        "run_id",
+        "plan_id",
+        "target_id",
+        "observation_id",
+        "requested_time_utc",
+        "selected_frame_time_utc",
+        "observation_role",
+        "reference_identity",
+        "reference_frame_resource_id",
+        "roi_identity",
+        "classifier_policy_identity",
+        *_PERFORMANCE_DURATION_FIELDS,
+        *_PERFORMANCE_COUNT_FIELDS,
+    }
+)
+_B4_DURATION_MAP = {
+    "request_decoded_ms": "request_decoded_ms",
+    "startup_ms": "child_startup_ms",
+    "preprocessing_ms": "preprocessing_ms",
+    "inference_ms": "inference_ms",
+    "child_inference_ms": "child_inference_ms",
+    "alignment_elapsed_ms": "alignment_elapsed_ms",
+    "ipc_result_ms": "ipc_result_ms",
+    "cleanup_ms": "b4_cleanup_ms",
+}
+_B4_COUNT_FIELDS = frozenset(_PERFORMANCE_COUNT_FIELDS) - {"classifier_invocation_count"}
 
 
 class SuccessorDiagnosticError(ValueError):
@@ -194,6 +262,18 @@ class SuccessorDiagnosticRepository:
         return self._read_at(
             path,
             lambda value: _valid_support_change_record(
+                value, investigation_id, run_id, observation_id
+            ),
+        )
+
+    def read_probe_performance(
+        self, investigation_id: str, run_id: str, observation_id: str
+    ) -> dict[str, object] | None:
+        """Strictly reopen one optional per-observation performance sidecar."""
+        path = self._performance_path(investigation_id, run_id, observation_id)
+        return self._read_at(
+            path,
+            lambda value: _valid_performance_record(
                 value, investigation_id, run_id, observation_id
             ),
         )
@@ -271,6 +351,27 @@ class SuccessorDiagnosticRepository:
             ".support-",
         )
 
+    def publish_probe_performance(self, record: dict[str, object]) -> None:
+        """Create one immutable, bounded probe-performance-v1 sidecar."""
+        investigation_id = record.get("investigation_id")
+        run_id = record.get("run_id")
+        observation_id = record.get("observation_id")
+        if not all(type(value) is str for value in (investigation_id, run_id, observation_id)):
+            raise SuccessorDiagnosticError("invalid_identity")
+        investigation_id = cast("str", investigation_id)
+        run_id = cast("str", run_id)
+        observation_id = cast("str", observation_id)
+        path = self._performance_path(investigation_id, run_id, observation_id)
+        self._publish_at(
+            path,
+            record,
+            lambda value: _valid_performance_record(
+                value, investigation_id, run_id, observation_id
+            ),
+            lambda: self.read_probe_performance(investigation_id, run_id, observation_id),
+            ".performance-",
+        )
+
     def _retention_path(self, investigation_id: str, run_id: str, observation_id: str) -> Path:
         b4_path = self._path(investigation_id, run_id, observation_id)
         path = b4_path.parent / "foreground-retention-v1" / f"{observation_id}.json"
@@ -282,6 +383,14 @@ class SuccessorDiagnosticRepository:
     def _support_change_path(self, investigation_id: str, run_id: str, observation_id: str) -> Path:
         b4_path = self._path(investigation_id, run_id, observation_id)
         path = b4_path.parent / "support-change-v1" / f"{observation_id}.json"
+        for component in (path.parent, path):
+            if component.exists() and _is_reparse(component):
+                raise SuccessorDiagnosticError("diagnostic_unsafe_path")
+        return path
+
+    def _performance_path(self, investigation_id: str, run_id: str, observation_id: str) -> Path:
+        b4_path = self._path(investigation_id, run_id, observation_id)
+        path = b4_path.parent / "probe-performance-v1" / f"{observation_id}.json"
         for component in (path.parent, path):
             if component.exists() and _is_reparse(component):
                 raise SuccessorDiagnosticError("diagnostic_unsafe_path")
@@ -432,6 +541,71 @@ def _valid_support_change_record(
         and abs(facts.alignment_dx) <= _MAX_ALIGNMENT_TRANSLATION
         and abs(facts.alignment_dy) <= _MAX_ALIGNMENT_TRANSLATION
         and facts.alignment_rotation_degrees in _ALLOWED_ALIGNMENT_ROTATIONS
+    )
+
+
+def _valid_performance_record(
+    value: object, investigation_id: str, run_id: str, observation_id: str
+) -> bool:
+    if not isinstance(value, dict):
+        return False
+    record = cast("dict[str, object]", value)
+    identity_is_valid = (
+        frozenset(record) == _PERFORMANCE_FIELDS
+        and record.get("version") == _PERFORMANCE_VERSION
+        and record.get("diagnostic_kind") == _PERFORMANCE_KIND
+        and record.get("investigation_id") == investigation_id
+        and record.get("run_id") == run_id
+        and record.get("observation_id") == observation_id
+        and _safe_text(record.get("plan_id"), _SAFE_ID)
+        and _safe_text(record.get("target_id"), _SAFE_ID)
+        and _safe_text(record.get("requested_time_utc"), _UTC_TIME)
+        and (
+            record.get("selected_frame_time_utc") is None
+            or _safe_text(record.get("selected_frame_time_utc"), _UTC_TIME)
+        )
+        and _safe_text(record.get("observation_role"), _PERFORMANCE_ROLES)
+        and _safe_text(record.get("reference_identity"), _SAFE_ID)
+        and _safe_text(record.get("reference_frame_resource_id"), _RESOURCE_ID)
+        and _safe_text(record.get("roi_identity"), _SAFE_ID)
+        and _safe_text(record.get("classifier_policy_identity"), _SAFE_ID)
+    )
+    if not identity_is_valid:
+        return False
+    return _valid_performance_timing_values(record)
+
+
+def _valid_performance_timing_values(record: dict[str, object]) -> bool:
+    """Validate bounded integers and replay timing arithmetic."""
+    duration_values_valid = all(
+        item is None or (type(item) is int and 0 <= item <= _MAX_PERFORMANCE_MS)
+        for item in (record[key] for key in _PERFORMANCE_DURATION_FIELDS)
+    )
+    count_values_valid = all(
+        item is None or (type(item) is int and 0 <= item <= _MAX_PERFORMANCE_COUNT)
+        for item in (record[key] for key in _PERFORMANCE_COUNT_FIELDS)
+    )
+    probe_total = record.get("probe_total_ms")
+    if (
+        type(probe_total) is not int
+        or probe_total > _MAX_PERFORMANCE_MS
+        or not duration_values_valid
+        or not count_values_valid
+    ):
+        return False
+    replay_total = record["replay_total_ms"]
+    replay_first = record["replay_first_output_ms"]
+    replay_exit = record["replay_process_exit_ms"]
+    replay_tail = record["replay_cleanup_tail_ms"]
+    return not (
+        (type(replay_total) is int and type(replay_first) is int and replay_first > replay_total)
+        or (type(replay_total) is int and type(replay_exit) is int and replay_exit > replay_total)
+        or ((replay_total is None or replay_exit is None) and replay_tail is not None)
+        or (
+            type(replay_total) is int
+            and type(replay_exit) is int
+            and (type(replay_tail) is not int or replay_tail != replay_total - replay_exit)
+        )
     )
 
 
@@ -632,3 +806,279 @@ def persist_support_change(
 
 def _nonnegative_int(value: object) -> int | None:
     return value if type(value) is int and value >= 0 else None
+
+
+@dataclass(slots=True)
+class ProbePerformanceCapture:
+    """Process-local facts for one probe, never authoritative search state."""
+
+    plan_id: str
+    target_id: str
+    requested_time_utc: str
+    observation_role: str
+    started_at: float
+    clock: Callable[[], float] = field(repr=False)
+    durations_ms: dict[str, int | None] = field(default_factory=dict)
+    counts: dict[str, int | None] = field(default_factory=dict)
+    invalid: bool = False
+
+    def record_replay_progress(
+        self, stage: str, elapsed_ms: object, *, exit_code: object = None
+    ) -> None:
+        """Observe existing replay lifecycle events without controlling them."""
+        if type(elapsed_ms) is not int or not 0 <= elapsed_ms <= _MAX_PERFORMANCE_MS:
+            self.invalid = True
+            return
+        key: str | None = None
+        if stage == "first_output":
+            key = "replay_first_output_ms"
+        elif stage == "process_exited" and type(exit_code) is int:
+            key = "replay_process_exit_ms"
+        elif stage == "cleanup_completed":
+            key = "replay_total_ms"
+        if key is None:
+            return
+        if self.durations_ms.get(key) is not None:
+            self.invalid = True
+            return
+        self.durations_ms[key] = elapsed_ms
+
+    def record_classifier_timing(self, event: object) -> None:
+        """Aggregate fixed-shape facts from the existing B4 timing sink."""
+        if not isinstance(event, dict):
+            self.invalid = True
+            return
+        facts = cast("dict[str, object]", event)
+        if facts.get("event") != "phase7e.classifier_timing":
+            self.invalid = True
+            return
+        for source, destination in _B4_DURATION_MAP.items():
+            if source not in facts:
+                continue
+            self._sum_fact(self.durations_ms, destination, facts[source], _MAX_PERFORMANCE_MS)
+        for name in _B4_COUNT_FIELDS:
+            if name in facts:
+                self._sum_fact(self.counts, name, facts[name], _MAX_PERFORMANCE_COUNT)
+
+    def record_classifier_total(self, elapsed_ms: object) -> None:
+        """Accumulate the classifier adapter's measured wall durations."""
+        current = self.durations_ms.get("classifier_total_ms")
+        if current is None:
+            self.durations_ms["classifier_total_ms"] = 0
+        self._sum_fact(
+            self.durations_ms,
+            "classifier_total_ms",
+            elapsed_ms,
+            _MAX_PERFORMANCE_MS,
+        )
+        current_count = self.counts.get("classifier_invocation_count")
+        if current_count is None:
+            self.counts["classifier_invocation_count"] = 0
+        self._sum_fact(
+            self.counts,
+            "classifier_invocation_count",
+            1,
+            _MAX_PERFORMANCE_COUNT,
+        )
+
+    def _sum_fact(
+        self, destination: dict[str, int | None], key: str, value: object, maximum: int
+    ) -> None:
+        if type(value) is not int or not 0 <= value <= maximum:
+            destination[key] = None
+            self.invalid = True
+            return
+        previous = destination.get(key)
+        total = value if previous is None else previous + value
+        if total > maximum:
+            self.invalid = True
+            destination[key] = None
+        else:
+            destination[key] = total
+
+    def complete(self) -> None:
+        """Finalize durations from the injected monotonic clock."""
+        try:
+            ended_at = self.clock()
+            elapsed = (ended_at - self.started_at) * 1000
+            if not math.isfinite(elapsed) or elapsed < 0 or elapsed > _MAX_PERFORMANCE_MS:
+                self.invalid = True
+                return
+            self.durations_ms["probe_total_ms"] = round(elapsed)
+            process_exit = self.durations_ms.get("replay_process_exit_ms")
+            replay_total = self.durations_ms.get("replay_total_ms")
+            if process_exit is not None and replay_total is not None:
+                if process_exit > replay_total:
+                    self.invalid = True
+                else:
+                    self.durations_ms["replay_cleanup_tail_ms"] = replay_total - process_exit
+        except Exception:
+            self.invalid = True
+
+    def matches(self, plan_id: str, target_id: str, requested_time_utc: str) -> bool:
+        """Match only stable pre-publication target identity, never a provisional ID."""
+        return (
+            not self.invalid
+            and self.plan_id == plan_id
+            and self.target_id == target_id
+            and self.requested_time_utc == requested_time_utc
+            and type(self.durations_ms.get("probe_total_ms")) is int
+        )
+
+    def record(
+        self,
+        *,
+        investigation_id: str,
+        run_id: str,
+        observation_id: str,
+        selected_frame_time_utc: str | None,
+        reference_identity: str,
+        reference_frame_resource_id: str,
+        roi_identity: str,
+        classifier_policy_identity: str,
+    ) -> dict[str, object]:
+        """Build the final-ID record after its authoritative evidence commits."""
+        durations = {name: self.durations_ms.get(name) for name in _PERFORMANCE_DURATION_FIELDS}
+        counts = {name: self.counts.get(name) for name in _PERFORMANCE_COUNT_FIELDS}
+        return {
+            "version": _PERFORMANCE_VERSION,
+            "diagnostic_kind": _PERFORMANCE_KIND,
+            "investigation_id": investigation_id,
+            "run_id": run_id,
+            "plan_id": self.plan_id,
+            "target_id": self.target_id,
+            "observation_id": observation_id,
+            "requested_time_utc": self.requested_time_utc,
+            "selected_frame_time_utc": selected_frame_time_utc,
+            "observation_role": self.observation_role,
+            "reference_identity": reference_identity,
+            "reference_frame_resource_id": reference_frame_resource_id,
+            "roi_identity": roi_identity,
+            "classifier_policy_identity": classifier_policy_identity,
+            **durations,
+            **counts,
+        }
+
+
+_PERFORMANCE_RUN: ContextVar[list[ProbePerformanceCapture] | None] = ContextVar(
+    "successor_probe_performance_run", default=None
+)
+_ACTIVE_PROBE: ContextVar[ProbePerformanceCapture | None] = ContextVar(
+    "successor_probe_performance_capture", default=None
+)
+
+
+@contextmanager
+def performance_run_scope() -> Generator[None, None, None]:
+    """Collect optional in-memory facts for one synchronous successor run."""
+    token = _PERFORMANCE_RUN.set([])
+    try:
+        yield
+    finally:
+        _PERFORMANCE_RUN.reset(token)
+
+
+def completed_probe_performance_captures() -> tuple[ProbePerformanceCapture, ...]:
+    """Return the active run's completed, still-unbound process-local captures."""
+    captures = _PERFORMANCE_RUN.get()
+    return () if captures is None else tuple(captures)
+
+
+def current_probe_performance_capture() -> ProbePerformanceCapture | None:
+    """Return the current probe capture for existing lifecycle callbacks."""
+    return _ACTIVE_PROBE.get()
+
+
+@contextmanager
+def probe_performance_scope(
+    *,
+    plan_id: str,
+    target_id: str,
+    requested_time_utc: datetime,
+    observation_role: str,
+    clock: Callable[[], float] = monotonic,
+) -> Generator[ProbePerformanceCapture | None, None, None]:
+    """Measure one acquisition/classification interval without owning it."""
+    active_run = _PERFORMANCE_RUN.get()
+    capture: ProbePerformanceCapture | None = None
+    if active_run is not None and observation_role in _PERFORMANCE_ROLES:
+        try:
+            started_at = clock()
+            if math.isfinite(started_at):
+                capture = ProbePerformanceCapture(
+                    plan_id,
+                    target_id,
+                    requested_time_utc.astimezone(timezone.utc)
+                    .isoformat(timespec="seconds")
+                    .replace("+00:00", "Z"),
+                    observation_role,
+                    float(started_at),
+                    clock,
+                )
+        except Exception:
+            capture = None
+    token = _ACTIVE_PROBE.set(capture)
+    try:
+        yield capture
+    finally:
+        _ACTIVE_PROBE.reset(token)
+        if capture is not None:
+            capture.complete()
+            if not capture.invalid and active_run is not None:
+                active_run.append(capture)
+
+
+def record_replay_progress(
+    stage: str,
+    elapsed_ms: int,
+    *,
+    exit_code: int | None = None,
+    capture: ProbePerformanceCapture | None = None,
+) -> None:
+    """Best-effort observer for existing replay lifecycle events."""
+    active = capture if capture is not None else _ACTIVE_PROBE.get()
+    if active is None:
+        return
+    try:
+        active.record_replay_progress(stage, elapsed_ms, exit_code=exit_code)
+    except Exception:
+        active.invalid = True
+
+
+def record_classifier_timing(event: object) -> None:
+    """Best-effort observer for the existing B4 timing callback."""
+    capture = _ACTIVE_PROBE.get()
+    if capture is None:
+        return
+    try:
+        capture.record_classifier_timing(event)
+    except Exception:
+        capture.invalid = True
+
+
+def record_classifier_total(elapsed_ms: int) -> None:
+    """Record one existing classifier-adapter elapsed result for the active probe."""
+    capture = _ACTIVE_PROBE.get()
+    if capture is None:
+        return
+    try:
+        capture.record_classifier_total(elapsed_ms)
+    except Exception:
+        capture.invalid = True
+
+
+def persist_probe_performance(record: dict[str, object]) -> None:
+    """Best-effort publication under the final observation's diagnostic path."""
+    scope = _ACTIVE.get()
+    if scope is None:
+        return
+    try:
+        repository, _, _ = scope
+        repository.publish_probe_performance(record)
+    except Exception:
+        with suppress(Exception):
+            _LOGGER.warning(
+                "%s %s",
+                "phase7e.probe_performance_diagnostic",
+                "stage=persist_failed error_code=diagnostic_unavailable",
+            )
