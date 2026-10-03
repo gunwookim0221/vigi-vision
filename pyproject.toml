@@ -7,10 +7,11 @@ name = "vigi-vision"
 version = "0.1.0"
 description = "AI-assisted investigation workflows for TP-Link VIGI camera data."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.15"
 dependencies = [
     "fastapi>=0.140.11",
     "openai>=2.0",
+    "pillow>=10.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "python-dotenv>=1.0",
@@ -24,12 +25,33 @@ dependencies = [
 vigi-vision = "vigi_vision.cli:app"
 
 [dependency-groups]
+assisted-roi-build = [
+    "setuptools==70.2.0",
+    "wheel==0.48.0",
+]
+assisted-roi = [
+    "efficient-sam @ git+https://github.com/yformer/EfficientSAM.git@d525f622e6f640acf5a0fc37c7ca1f243da5bde0",
+    "torch==2.10.0+cpu",
+    "torchvision==0.25.0+cpu",
+]
 dev = [
     "basedpyright>=1.21",
     "httpx2[brotli,http2,zstd]>=2.9.1",
     "pytest>=8",
     "ruff>=0.8",
 ]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[tool.uv]
+no-build-isolation-package = ["efficient-sam"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

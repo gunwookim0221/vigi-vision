@@ -158,6 +158,13 @@ VIGI Vision explicitly loads `.env` from the current working directory. OS envir
 
 `ffmpeg` must be available on `PATH` unless `FFMPEG_PATH` names its executable. The selected NVR or IPC credentials are supplied separately to ffmpeg for its RTSP Digest challenge; they are not embedded in the SDK-built URL. Standard IPC RTSP uses the SDK-generated default-port URL; Vision does not support `VIGI_IPC_PORT`. `VIGI_IPC_VERIFY_TLS` is an SDK/OpenAPI control-plane setting and is not read by this RTSP-only Vision path.
 
+### Windows development server
+
+Double-click `start.bat` from this repository's root. The launcher reuses the
+repository-local `.venv`, creates it if needed, syncs the existing project
+dependencies from `uv.lock`, and serves the development app at
+`http://127.0.0.1:8000/`.
+
 ### Development environment preflight
 
 Development and test commands should use the shared project-managed environment
@@ -237,11 +244,23 @@ POST /api/v1/reference-frames/<resource_id>/roi-suggestions
 {"point":{"x":560,"y":221}}
 ```
 
-Configure `VIGI_ASSISTED_ROI_ENABLED`, `VIGI_ASSISTED_ROI_CHECKPOINT`,
+The Windows `start.bat` launcher synchronizes the locked `assisted-roi`
+dependency group with the rest of the app. It first prepares the pinned
+`assisted-roi-build` tools required by upstream's legacy source package, then
+syncs the complete runtime. The runtime includes CPU-only Torch 2.10.0,
+TorchVision 0.25.0, and the official EfficientSAM source pinned to commit
+`d525f622e6f640acf5a0fc37c7ca1f243da5bde0`. The locked Windows CPU stack
+supports CPython 3.10 through 3.14. CUDA is optional; automatic device selection
+falls back to CPU.
+
+Model weights remain a separate operator-provisioned file and are never
+downloaded by startup or an API request. Store `efficient_sam_vitt.pt` outside
+Git and `artifacts/reference-frames`, then configure
+`VIGI_ASSISTED_ROI_ENABLED`, `VIGI_ASSISTED_ROI_CHECKPOINT`,
 `VIGI_ASSISTED_ROI_CHECKPOINT_SHA256`, `VIGI_ASSISTED_ROI_DEVICE` (`cpu`,
-`cuda`, or `auto`), and `VIGI_ASSISTED_ROI_TIMEOUT_SECONDS` only in the server
-environment. Optional ML dependencies are lazy and are not required for the
-rest of the application.
+`cuda`, or `auto`), and `VIGI_ASSISTED_ROI_TIMEOUT_SECONDS` in the server
+environment. The expected checkpoint SHA-256 is
+`dff858b19600a46461cbb7de98f796b23a7a888d9f5e34c0b033f7d6eb9e4e6a`.
 
 Creation returns `201` with `created`; a verified compatible completed resource
 returns `200` with `reused`. The decoded PTS is only relative to the replay
