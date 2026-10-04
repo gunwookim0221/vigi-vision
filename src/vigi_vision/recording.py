@@ -14,7 +14,7 @@ from vigi import (
 )
 
 from vigi_vision.config import NvrConnection
-from vigi_vision.nvr import diagnose_nvr_error
+from vigi_vision.nvr import capture_nvr_acquisition_error, diagnose_nvr_error
 from vigi_vision.recording_models import (
     RecordingDataError,
     RecordingSegment,
@@ -22,6 +22,12 @@ from vigi_vision.recording_models import (
     RecordingWindow,
     RecordingWindowError,
     ReplayRequest,
+)
+from vigi_vision.reference_frame_nvr_acquisition_diagnostics import (
+    NvrAcquisitionDiagnosticOperation as DiagnosticOperation,
+)
+from vigi_vision.reference_frame_nvr_acquisition_diagnostics import (
+    NvrAcquisitionDiagnosticStage as DiagnosticStage,
 )
 
 __all__ = (
@@ -143,12 +149,7 @@ class RecordingPlanner:
                     if _overlaps(window, segment):
                         return ReplayRequest(
                             window=window,
-                            replay_url=self.client.stream.build_replay_url(
-                                self.host,
-                                window.channel_id,
-                                window.start_utc.strftime(_REPLAY_TIME_FORMAT),
-                                window.end_utc.strftime(_REPLAY_TIME_FORMAT),
-                            ),
+                            replay_url=self._replay_url(window),
                         )
         except VigiError as error:
             raise diagnose_nvr_error(error) from None
@@ -159,11 +160,12 @@ class RecordingPlanner:
         window = RecordingWindow(channel_id, instant_utc, instant_utc + timedelta(seconds=1))
         try:
             process_id = self._process_id()
+            matching_days = self._matching_days(window)
             candidates = tuple(
                 segment
-                for recording_day in self._matching_days(window)
+                for recording_day in matching_days
                 for segment in self._segments(channel_id, process_id, recording_day)
-                if segment.start_utc <= instant_utc < segment.end_utc
+                if _covers_instant(segment, instant_utc)
             )
         except VigiError as error:
             raise diagnose_nvr_error(error) from None
@@ -197,12 +199,7 @@ class RecordingPlanner:
         ):
             raise RecordingUnavailableError
         try:
-            replay_url = self.client.stream.build_replay_url(
-                self.host,
-                window.channel_id,
-                window.start_utc.strftime(_REPLAY_TIME_FORMAT),
-                window.end_utc.strftime(_REPLAY_TIME_FORMAT),
-            )
+            replay_url = self._replay_url(window)
         except VigiError as error:
             raise diagnose_nvr_error(error) from None
         return ReplayRequest(window, replay_url)
@@ -210,19 +207,43 @@ class RecordingPlanner:
     def _process_id(self) -> int:
         process_id = self._search_process.process_id
         if process_id is None:
-            process_id = self.client.records.get_free_process().process_id
+            try:
+                process_id = self.client.records.get_free_process().process_id
+            except Exception as error:
+                _capture_recording_exception(
+                    error,
+                    DiagnosticStage.RECORDING_FREE_PROCESS,
+                    DiagnosticOperation.GET_FREE_PROCESS,
+                )
+                raise
             self._search_process.process_id = process_id
         return process_id
 
     def _matching_days(self, window: RecordingWindow) -> tuple[date, ...]:
         local_start = window.start_utc.astimezone(self.recording_timezone).date()
         local_end = window.end_utc.astimezone(self.recording_timezone).date()
-        response = self.client.records.list_days(
-            window.channel_id,
-            local_start.strftime("%Y%m"),
-            local_end.strftime("%Y%m"),
-        )
-        available_days = tuple(_parse_recording_day(record.day) for record in response.days)
+        try:
+            response = self.client.records.list_days(
+                window.channel_id,
+                local_start.strftime("%Y%m"),
+                local_end.strftime("%Y%m"),
+            )
+        except Exception as error:
+            _capture_recording_exception(
+                error,
+                DiagnosticStage.RECORDING_DAYS,
+                DiagnosticOperation.LIST_DAYS,
+            )
+            raise
+        try:
+            available_days = tuple(_parse_recording_day(record.day) for record in response.days)
+        except Exception as error:
+            _capture_recording_exception(
+                error,
+                DiagnosticStage.RECORDING_RESPONSE_PARSE,
+                DiagnosticOperation.PARSE_DAYS,
+            )
+            raise
         return tuple(day for day in available_days if local_start <= day <= local_end)
 
     def _segments(
@@ -235,29 +256,70 @@ class RecordingPlanner:
         while True:
             page_count += 1
             if page_count > _MAX_RECORDING_RESULT_PAGES:
+                error = RecordingDataError()
+                _capture_recording_exception(
+                    error,
+                    DiagnosticStage.RECORDING_RESPONSE_PARSE,
+                    DiagnosticOperation.PARSE_RESULTS,
+                )
                 raise RecordingDataError
-            response = self.client.records.list_results(
-                channel_id,
-                process_id,
-                recording_day.strftime("%Y%m%d"),
-                start_index,
-                start_index + _RESULT_PAGE_SIZE - 1,
-            )
-            page_segments = tuple(
-                RecordingSegment.from_sdk(channel_id, recording_day, segment)
-                for segment in response.results
-            )
-            for segment in page_segments:
-                identity = (segment.channel_id, segment.start_utc, segment.end_utc)
-                if identity in identities:
-                    raise RecordingDataError
-                identities.add(identity)
+            try:
+                response = self.client.records.list_results(
+                    channel_id,
+                    process_id,
+                    recording_day.strftime("%Y%m%d"),
+                    start_index,
+                    start_index + _RESULT_PAGE_SIZE - 1,
+                )
+            except Exception as error:
+                _capture_recording_exception(
+                    error,
+                    DiagnosticStage.RECORDING_SEARCH_RESULTS,
+                    DiagnosticOperation.LIST_RESULTS,
+                )
+                raise
+            try:
+                page_segments = tuple(
+                    RecordingSegment.from_sdk(channel_id, recording_day, segment)
+                    for segment in response.results
+                )
+                for segment in page_segments:
+                    _add_segment_identity(segment, identities)
+            except Exception as error:
+                _capture_recording_exception(
+                    error,
+                    DiagnosticStage.RECORDING_RESPONSE_PARSE,
+                    DiagnosticOperation.PARSE_RESULTS,
+                )
+                raise
             segments.extend(page_segments)
             if len(response.results) < _RESULT_PAGE_SIZE:
                 return tuple(segments)
             if page_count == _MAX_RECORDING_RESULT_PAGES:
+                error = RecordingDataError()
+                _capture_recording_exception(
+                    error,
+                    DiagnosticStage.RECORDING_RESPONSE_PARSE,
+                    DiagnosticOperation.PARSE_RESULTS,
+                )
                 raise RecordingDataError
             start_index += _RESULT_PAGE_SIZE
+
+    def _replay_url(self, window: RecordingWindow) -> str:
+        try:
+            return self.client.stream.build_replay_url(
+                self.host,
+                window.channel_id,
+                window.start_utc.strftime(_REPLAY_TIME_FORMAT),
+                window.end_utc.strftime(_REPLAY_TIME_FORMAT),
+            )
+        except Exception as error:
+            _capture_recording_exception(
+                error,
+                DiagnosticStage.REPLAY_URL_BUILD,
+                DiagnosticOperation.BUILD_REPLAY_URL,
+            )
+            raise
 
 
 def _parse_recording_day(value: str) -> date:
@@ -267,5 +329,35 @@ def _parse_recording_day(value: str) -> date:
         raise RecordingDataError from None
 
 
+def _add_segment_identity(
+    segment: RecordingSegment,
+    identities: set[tuple[int, datetime, datetime]],
+) -> None:
+    identity = (segment.channel_id, segment.start_utc, segment.end_utc)
+    if identity in identities:
+        raise RecordingDataError
+    identities.add(identity)
+
+
+def _capture_recording_exception(
+    error: BaseException,
+    stage: DiagnosticStage,
+    operation: DiagnosticOperation,
+) -> None:
+    capture_nvr_acquisition_error(error, stage=stage.value, operation=operation.value)
+
+
 def _overlaps(window: RecordingWindow, segment: RecordingSegment) -> bool:
     return segment.start_utc < window.end_utc and window.start_utc < segment.end_utc
+
+
+def _covers_instant(segment: RecordingSegment, instant_utc: datetime) -> bool:
+    try:
+        return segment.start_utc <= instant_utc < segment.end_utc
+    except Exception as error:
+        _capture_recording_exception(
+            error,
+            DiagnosticStage.RECORDING_SEGMENT_SELECTION,
+            DiagnosticOperation.SELECT_SEGMENT,
+        )
+        raise

@@ -81,6 +81,10 @@ from vigi_vision.reference_frame_models import (
     ReferenceFrameOutcome,
     parse_reference_frame_request,
 )
+from vigi_vision.reference_frame_nvr_acquisition_diagnostics import (
+    NvrAcquisitionDiagnosticStore,
+    NvrAcquisitionDiagnosticWriter,
+)
 from vigi_vision.reference_frame_resources import (
     ReferenceFrameImageResource,
     ReferenceFrameResourceStore,
@@ -95,6 +99,7 @@ from vigi_vision.replay import ReplayExtractor
 from vigi_vision.video import resolve_ffprobe
 
 _ARTIFACT_ROOT: Final = Path("artifacts/reference-frames")
+_NVR_ACQUISITION_DIAGNOSTIC_ROOT: Final = Path("artifacts/reference-frame-nvr-acquisition-v1")
 _CONFIRMATION_ARTIFACT_ROOT: Final = Path("artifacts/investigations")
 _RECORDING_SEARCH_ARTIFACT_ROOT: Final = Path("artifacts/investigation-searches")
 _IMAGE_HEADERS: Final = {
@@ -130,6 +135,9 @@ class ReferenceFrameApiDependencies:
     )
     recording_search_service: RecordingSearchService | None = field(default=None, repr=False)
     phase7e_service: Phase7EPublicService | None = field(default=None, repr=False)
+    nvr_acquisition_diagnostic_store: NvrAcquisitionDiagnosticWriter | None = field(
+        default=None, repr=False
+    )
 
 
 @final
@@ -156,6 +164,7 @@ def create_reference_frame_app(  # noqa: PLR0913 — each argument is an indepen
     confirmation_service: InvestigationConfirmationExecutionBoundary | None = None,
     recording_search_service: RecordingSearchService | None = None,
     phase7e_service: Phase7EPublicService | None = None,
+    nvr_acquisition_diagnostic_store: NvrAcquisitionDiagnosticWriter | None = None,
 ) -> FastAPI:
     """Create an injectable local API application without reading configuration in handlers."""
     dependencies = ReferenceFrameApiDependencies(
@@ -167,6 +176,7 @@ def create_reference_frame_app(  # noqa: PLR0913 — each argument is an indepen
         confirmation_service=confirmation_service,
         recording_search_service=recording_search_service,
         phase7e_service=phase7e_service,
+        nvr_acquisition_diagnostic_store=nvr_acquisition_diagnostic_store,
     )
     app = FastAPI(
         title="VIGI Vision Reference Frame API",
@@ -364,7 +374,10 @@ def _add_candidate_route(app: FastAPI, dependencies: ReferenceFrameApiDependenci
     candidate_router = APIRouter(
         prefix="/api/v1/reference-frame-candidate-sets", tags=["reference-frames"]
     )
-    candidate_service = ReferenceFrameCandidateSetService(dependencies.service)
+    candidate_service = ReferenceFrameCandidateSetService(
+        dependencies.service,
+        dependencies.nvr_acquisition_diagnostic_store,
+    )
 
     async def create_candidate_set(
         body: ReferenceFrameCandidateSetBody,
@@ -505,6 +518,9 @@ def create_reference_frame_app_from_environment() -> FastAPI:
             confirmation_service=confirmation_service,
             recording_search_service=recording_search_service,
             phase7e_service=phase7e_service,
+            nvr_acquisition_diagnostic_store=NvrAcquisitionDiagnosticStore(
+                _NVR_ACQUISITION_DIAGNOSTIC_ROOT
+            ),
         )
     except ReferenceFrameApiStartupError:
         raise

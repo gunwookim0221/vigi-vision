@@ -16,6 +16,14 @@ from vigi_vision.reference_frame_models import (
     ReferenceFrameOutcome,
     ReferenceFrameResolution,
 )
+from vigi_vision.reference_frame_nvr_acquisition_diagnostics import (
+    NvrAcquisitionDiagnosticCapture,
+    NvrAcquisitionDiagnosticOperation,
+    NvrAcquisitionDiagnosticStage,
+    NvrAcquisitionDiagnosticWriter,
+    candidate_nvr_acquisition_scope,
+    record_nvr_acquisition_failure,
+)
 from vigi_vision.reference_frame_service import ReferenceFrameExecutionBoundary
 from vigi_vision.replay import (
     ReplayAuthenticationError,
@@ -87,6 +95,7 @@ class ReferenceFrameCandidateSetService:
     """Reuse one-frame execution serially without media or artifact implementation."""
 
     executor: ReferenceFrameExecutionBoundary = field(repr=False)
+    diagnostic_store: NvrAcquisitionDiagnosticWriter | None = field(default=None, repr=False)
 
     def execute(
         self, request: ReferenceFrameCandidateSetRequest
@@ -103,15 +112,34 @@ class ReferenceFrameCandidateSetService:
                     )
                 )
                 continue
-            try:
-                resolution = self.executor.execute_or_resolve(candidate.request)
-            except _RECOVERABLE_CANDIDATE_ERRORS as error:
-                safe_error = domain_error(error)
-                items.append(
-                    ReferenceFrameCandidateFailure(candidate, safe_error.code, safe_error.message)
-                )
-            else:
-                items.append(ReferenceFrameCandidateSuccess(candidate, resolution))
+            with candidate_nvr_acquisition_scope(
+                channel_id=candidate.request.channel_id,
+                requested_time_utc=request.reference_time.requested_time_utc,
+                candidate_offset_seconds=candidate.offset_seconds,
+                candidate_time_utc=candidate.request.requested_time_utc,
+            ) as diagnostic_capture:
+                try:
+                    resolution = self.executor.execute_or_resolve(candidate.request)
+                except _RECOVERABLE_CANDIDATE_ERRORS as error:
+                    if isinstance(error, NvrRequestError):
+                        record_nvr_acquisition_failure(
+                            stage=NvrAcquisitionDiagnosticStage.UNKNOWN_NVR_REQUEST,
+                            operation=NvrAcquisitionDiagnosticOperation.UNKNOWN_NVR_REQUEST,
+                            error_kind=error.kind,
+                            exception_class_name=error.exception_type,
+                        )
+                    _persist_diagnostic(self.diagnostic_store, diagnostic_capture)
+                    safe_error = domain_error(error)
+                    items.append(
+                        ReferenceFrameCandidateFailure(
+                            candidate, safe_error.code, safe_error.message
+                        )
+                    )
+                except Exception:
+                    _persist_diagnostic(self.diagnostic_store, diagnostic_capture)
+                    raise
+                else:
+                    items.append(ReferenceFrameCandidateSuccess(candidate, resolution))
         return ReferenceFrameCandidateSetResult(request, tuple(items), _summary(tuple(items)))
 
 
@@ -126,3 +154,16 @@ def _summary(items: tuple[ReferenceFrameCandidateResult, ...]) -> ReferenceFrame
         reused=successful_outcomes.count(ReferenceFrameOutcome.REUSED),
         failed=sum(isinstance(item, ReferenceFrameCandidateFailure) for item in items),
     )
+
+
+def _persist_diagnostic(
+    store: NvrAcquisitionDiagnosticWriter | None,
+    capture: NvrAcquisitionDiagnosticCapture | None,
+) -> None:
+    diagnostic = None if capture is None else capture.diagnostic
+    if store is None or diagnostic is None:
+        return
+    try:
+        store.write(diagnostic)
+    except Exception:  # noqa: BLE001 - diagnostic persistence cannot replace the candidate error.
+        return

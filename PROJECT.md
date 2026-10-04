@@ -120,7 +120,10 @@ reused the same resource, while timing remained conservatively
 around a user-entered reference time: it serially reuses the existing
 single-frame service and child resource lifecycle, preserves partial results,
 and does not change the single-frame API. Automated and observed real-NVR
-validation are complete with conservative timing limitations retained. Phase 4B
+validation are complete with conservative timing limitations retained. The
+candidate path also records bounded, non-authoritative per-failure NVR
+acquisition sidecars without changing public candidate/API error mappings or
+making historical resource reads depend on diagnostics. Phase 4B
 adds a native browser shell at the same loopback application root: it submits
 the default candidate request for a KST local time and renders ordered safe
 result facts plus successful candidate thumbnails. Phase 4C-2 adds transient

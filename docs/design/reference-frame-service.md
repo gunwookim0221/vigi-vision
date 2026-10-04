@@ -753,6 +753,51 @@ candidate window, estimated timing, unknown timing, or an offset outside a
 future validated normal range. No warning may be used to conceal a missing
 JPEG or a policy violation.
 
+## Candidate NVR acquisition diagnostics
+
+The loopback candidate-set composition writes one local sidecar for each
+failed candidate when a known NVR/SDK acquisition boundary fails or its NVR
+response cannot be parsed safely. The versioned record kind is
+`phase-reference-frame-nvr-acquisition-v1`; files live under
+`artifacts/reference-frame-nvr-acquisition-v1/{diagnostic_id}.json`. The
+diagnostic ID is unique per failed attempt. Channel, anchor UTC, candidate UTC,
+and offset associate the record with one candidate even when a set contains
+several failures.
+
+| Stage | Exact production boundary |
+| --- | --- |
+| `channel_refresh` | `SdkNvrGateway.channels()` and its returned channel metadata conversion. |
+| `recording_free_process` | `RecordingPlanner._process_id()` calling `records.get_free_process()`. |
+| `recording_days` | `RecordingPlanner._matching_days()` calling `records.list_days()`. |
+| `recording_search_results` | `RecordingPlanner._segments()` calling `records.list_results()`. |
+| `recording_response_parse` | Conversion of returned recording-day and recording-segment values into application values. |
+| `recording_segment_selection` | `RecordingPlanner.find_covering_segment()` comparing parsed segment bounds to the candidate instant. |
+| `replay_url_build` | `RecordingPlanner._replay_url()` calling `stream.build_replay_url()`. |
+| `unknown_nvr_request` | Candidate boundary fallback when an `NvrRequestError` has no more precise captured stage. |
+
+`sanitized_error_kind` is derived from the existing `NvrErrorKind`: authentication,
+TLS verification, timeout, connection refused, host resolution, SDK request,
+or unexpected. `exception_class_name` is a bounded identifier. Records never
+include exception text or repr, request/response data, headers, URLs, hosts,
+credentials, or SDK object dumps. The schema contains only its version and kind,
+diagnostic ID, channel and candidate time facts, event timestamp, stage,
+operation, safe error kind, and exception class.
+
+This sidecar is RCA evidence only. It does not change candidate outcomes,
+`nvr_unavailable`, `recording_unavailable`, `replay_failure`, decode failures,
+HTTP responses, NVR session handling, retries, timeouts, recording selection,
+or Phase 7. No-recording, application segment/replay mismatch, and decode
+failures do not produce an NVR acquisition sidecar. Diagnostic construction
+and write errors are ignored so the original candidate outcome remains
+authoritative. Each file is limited to 2,048 bytes and the directory retains at
+most 128 sidecars, pruning only its oldest diagnostic files. Existing successful
+resources and historical runs without these optional sidecars remain valid;
+no read or migration path requires one. NVR setup failures before a candidate
+request has established candidate identity cannot be associated with a
+candidate sidecar. A diagnostic ID is immutable: identical re-publication is a
+no-op, while conflicting or unreadable existing content is preserved and does
+not trigger pruning.
+
 ## Historical Phase 2 transport exploration (superseded)
 
 The comparative notes below informed Phase 2 service boundaries. The approved

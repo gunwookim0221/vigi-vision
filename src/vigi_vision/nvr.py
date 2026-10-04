@@ -26,6 +26,11 @@ from vigi import (
 
 from vigi_vision.channel_selection import Channel, select_channel
 from vigi_vision.config import NvrConnection
+from vigi_vision.reference_frame_nvr_acquisition_diagnostics import (
+    NvrAcquisitionDiagnosticOperation,
+    NvrAcquisitionDiagnosticStage,
+    record_nvr_acquisition_failure,
+)
 from vigi_vision.workflow import LiveStream
 
 
@@ -83,18 +88,36 @@ class SdkNvrGateway:
             client.login()
             devices = client.devices.list_added_devices()
         except VigiError as error:
+            capture_nvr_acquisition_error(
+                error,
+                stage="channel_refresh",
+                operation="sdk_nvr_gateway.channels",
+            )
             raise diagnose_nvr_error(error) from error
         except Exception as error:
-            raise diagnose_nvr_error(error) from error
-        return tuple(
-            Channel(
-                channel_id=device.channel_id,
-                name=device.name,
-                alias=device.alias,
-                online=device.online is ChannelStatus.ONLINE,
+            capture_nvr_acquisition_error(
+                error,
+                stage="channel_refresh",
+                operation="sdk_nvr_gateway.channels",
             )
-            for device in devices.devices
-        )
+            raise diagnose_nvr_error(error) from error
+        try:
+            return tuple(
+                Channel(
+                    channel_id=device.channel_id,
+                    name=device.name,
+                    alias=device.alias,
+                    online=device.online is ChannelStatus.ONLINE,
+                )
+                for device in devices.devices
+            )
+        except Exception as error:
+            capture_nvr_acquisition_error(
+                error,
+                stage="channel_refresh",
+                operation="sdk_nvr_gateway.channels.parse",
+            )
+            raise
 
     def live_url(self, channel_id: int, stream: Literal["main", "minor"]) -> str:
         """Build a public SDK live URL without credentials or network access."""
@@ -153,6 +176,25 @@ def diagnose_nvr_error(error: BaseException) -> NvrRequestError:
             return NvrRequestError(NvrErrorKind.SDK_REQUEST, type(error).__name__)
         case unexpected_error:
             return NvrRequestError(NvrErrorKind.UNEXPECTED, type(unexpected_error).__name__)
+
+
+def capture_nvr_acquisition_error(
+    error: BaseException,
+    *,
+    stage: str,
+    operation: str,
+) -> None:
+    """Capture a safe existing NVR category at one exact SDK boundary, if scoped."""
+    try:
+        diagnostic = diagnose_nvr_error(error)
+        record_nvr_acquisition_failure(
+            stage=NvrAcquisitionDiagnosticStage(stage),
+            operation=NvrAcquisitionDiagnosticOperation(operation),
+            error_kind=diagnostic.kind,
+            exception_class_name=diagnostic.exception_type,
+        )
+    except Exception:  # noqa: BLE001 - diagnostic construction cannot affect NVR behavior.
+        return
 
 
 def _diagnose_connection_error(error: SdkConnectionError) -> NvrRequestError:

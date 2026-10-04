@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from vigi_vision.nvr import NvrErrorKind, NvrRequestError
 from vigi_vision.recording import RecordingSegment, RecordingWindow
 from vigi_vision.reference_frame_candidate_api_models import (
     ReferenceFrameCandidateSetBody,
@@ -24,8 +25,17 @@ from vigi_vision.reference_frame_models import (
     ReferenceFrameResult,
     TimingPrecisionStatus,
 )
+from vigi_vision.reference_frame_nvr_acquisition_diagnostics import NvrAcquisitionDiagnostic
 
 CandidateServiceOutcome = ReferenceFrameResolution | ReferenceFrameNoCandidateError | RuntimeError
+
+
+class FakeDiagnosticStore:
+    def __init__(self) -> None:
+        self.records: list[NvrAcquisitionDiagnostic] = []
+
+    def write(self, diagnostic: NvrAcquisitionDiagnostic) -> None:
+        self.records.append(diagnostic)
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +89,33 @@ def test_candidate_service_returns_valid_all_media_failure_result() -> None:
     assert result.summary.created == 0
     assert result.summary.reused == 0
     assert result.summary.failed == 2
+
+
+def test_candidate_service_persists_safe_diagnostic_for_unclassified_nvr_failure() -> None:
+    request = _request((0,))
+    candidate = request.candidates()[0]
+    executor = FakeExecutor(
+        {
+            candidate.request.requested_time_utc: NvrRequestError(
+                NvrErrorKind.TIMEOUT, "TimeoutError"
+            )
+        }
+    )
+    diagnostics = FakeDiagnosticStore()
+
+    result = ReferenceFrameCandidateSetService(
+        executor,
+        diagnostic_store=diagnostics,
+    ).execute(request)
+
+    assert isinstance(result.items[0], ReferenceFrameCandidateFailure)
+    assert result.items[0].code == "nvr_unavailable"
+    assert len(diagnostics.records) == 1
+    diagnostic = diagnostics.records[0]
+    assert diagnostic.stage == "unknown_nvr_request"
+    assert diagnostic.sanitized_error_kind == "timeout"
+    assert diagnostic.channel_id == 1
+    assert diagnostic.candidate_offset_seconds == 0
 
 
 def test_candidate_service_marks_future_child_without_running_executor() -> None:
